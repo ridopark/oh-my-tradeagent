@@ -5,6 +5,8 @@ import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.CorrectBookedLotRequest;
 import com.ohmytradeagent.contract.CorrectBookedLotResult;
+import com.ohmytradeagent.contract.DisarmTrailRequest;
+import com.ohmytradeagent.contract.DisarmTrailResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -178,4 +180,17 @@ public interface PositionWorkflow {
 
   @UpdateMethod(name = "correct_booked_lot")
   CorrectBookedLotResult correctBookedLot(CorrectBookedLotRequest request);
+
+  /**
+   * #825: remove an armed trailing stop WITHOUT closing the position, so its basis can be
+   * re-anchored (the #820 order: disarm → correct_booked_lot → re-arm; {@code armTrail} is
+   * deliberately idempotent and never re-anchors an armed trail). Disarming removes real-money
+   * protection: reason mandatory, the TrailDisarmed audit row pages. The premium subscription is
+   * left running — ticks are ignored while disarmed and a re-arm reuses the stream.
+   */
+  @UpdateValidatorMethod(updateName = "disarm_trail")
+  void disarmTrailValidator(DisarmTrailRequest request);
+
+  @UpdateMethod(name = "disarm_trail")
+  DisarmTrailResult disarmTrail(DisarmTrailRequest request);
 }

@@ -8,6 +8,8 @@ import com.ohmytradeagent.contract.CarriedExitBookedEntry;
 import com.ohmytradeagent.contract.CarriedRetryAttemptEntry;
 import com.ohmytradeagent.contract.CorrectBookedLotRequest;
 import com.ohmytradeagent.contract.CorrectBookedLotResult;
+import com.ohmytradeagent.contract.DisarmTrailRequest;
+import com.ohmytradeagent.contract.DisarmTrailResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -77,6 +79,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   // manual real-money qty correction must be visible); allowlisted in OrderFailureAlerter +
   // application.yml + the mirror test — the half-wired-kind lesson both #817 reviewers caught.
   private static final String KIND_POSITION_LOT_CORRECTED = "PositionLotCorrected";
+
+  // #825: an operator removed an armed trailing stop without closing the position. PAGES —
+  // real-money downside protection was just removed; a silent disarm is the failure mode.
+  private static final String KIND_TRAIL_DISARMED = "TrailDisarmed";
 
   private static final String KIND_PARTIAL_EXIT_REQUESTED = "PartialExitRequested";
   private static final String KIND_PARTIAL_EXIT_FILLED = "PartialExitFilled";
@@ -2822,6 +2828,58 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   }
 
   @Override
+  public void disarmTrailValidator(DisarmTrailRequest request) {
+    // Validator rejections never enter history — cheapest refusal (armTrailValidator precedent).
+    if (request == null || request.getOperatorId() == null || request.getOperatorId().isBlank()) {
+      throw new IllegalArgumentException("operator_id is required");
+    }
+    if (request.getReason() == null || request.getReason().isBlank()) {
+      throw new IllegalArgumentException("reason is required — disarming removes protection");
+    }
+  }
+
+  @Override
+  public DisarmTrailResult disarmTrail(DisarmTrailRequest request) {
+    // New Update — never in recorded histories, no version gate (arm_trail precedent). Same
+    // #799/#811 init-race guard as every operator entry point.
+    Workflow.await(() -> input != null && initGatesResolved);
+
+    DisarmTrailResult result = new DisarmTrailResult();
+    result.setSchemaVersion(1L);
+    if (!trailingArmed) {
+      result.setStatus(DisarmTrailResult.Status.NOT_ARMED);
+      result.setDetail("no trailing stop is armed; nothing changed");
+      return result;
+    }
+    BigDecimal priorPeak = peakPremium;
+    BigDecimal priorGiveback = givebackPct;
+    trailingArmed = false;
+    trailArmedByOperator = false;
+    peakPremium = null;
+    givebackPct = null;
+    // Tick telemetry (ticksReceived/lastTick*) is deliberately KEPT — observability of the still-
+    // running premium subscription, not trail state. A later re-arm re-anchors from a fresh quote.
+
+    Map<String, Object> subj = new LinkedHashMap<>();
+    subj.put("contract_symbol", input.getContractSymbol());
+    subj.put("entry_signal_id", input.getEntrySignalId());
+    subj.put("operator_id", request.getOperatorId());
+    subj.put("reason", request.getReason());
+    subj.put("actor", "operator:" + request.getOperatorId());
+    subj.put("prior_peak_premium", priorPeak);
+    subj.put("prior_giveback_pct", priorGiveback);
+    subj.put("remaining_qty", remainingQty);
+    auditLog(KIND_TRAIL_DISARMED, subj);
+
+    result.setStatus(DisarmTrailResult.Status.DISARMED);
+    result.setPriorPeakPremium(priorPeak);
+    result.setPriorGivebackPct(priorGiveback);
+    result.setDetail(
+        "trailing stop removed — the position has NO downside protection until re-armed");
+    return result;
+  }
+
+  @Override
   public void correctBookedLotValidator(CorrectBookedLotRequest request) {
     // Validator rejections never enter history — cheapest refusal (armTrailValidator precedent).
     // Only synchronous shape checks here; every state-dependent refusal lives in the handler so
@@ -2875,8 +2933,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // deliberately idempotent and will not re-anchor. Runbook order: disarm, correct, re-arm.
       return correctionRejected(
           CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED,
-          "a trailing stop is armed and its basis will not re-anchor; no disarm lever exists yet"
-              + " (#825) — close via the trail or correct before arming");
+          "a trailing stop is armed and its basis will not re-anchor — disarm_trail (#825) first,"
+              + " then correct, then re-arm (the #820 runbook order)");
     }
     if (qty <= entryBookedQty) {
       return correctionRejected(

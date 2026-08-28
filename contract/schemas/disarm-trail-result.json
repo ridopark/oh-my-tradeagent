@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/disarm-trail-result.json",
+  "title": "DisarmTrailResult",
+  "description": "Result of PositionWorkflow.disarm_trail (#825). DISARMED carries the stop that was just removed (prior peak/giveback and the threshold it implied) so the operator can restate it on re-arm; NOT_ARMED is the honest no-op.",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.DisarmTrailResult",
+  "additionalProperties": false,
+  "required": ["schema_version", "status"],
+  "properties": {
+    "schema_version": { "type": "integer", "description": "Payload schema version; 1." },
+    "status": { "type": "string", "enum": ["DISARMED", "NOT_ARMED"], "description": "DISARMED = protection removed (page fired). NOT_ARMED = nothing was armed; no state changed." },
+    "prior_peak_premium": { "type": "number", "description": "The peak the removed trail was anchored on (present on DISARMED)." },
+    "prior_giveback_pct": { "type": "number", "description": "The giveback fraction of the removed trail (present on DISARMED)." },
+    "detail": { "type": "string", "description": "Human-readable summary." }
+  }
+}

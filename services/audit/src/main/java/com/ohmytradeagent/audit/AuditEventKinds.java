@@ -444,6 +444,8 @@ public final class AuditEventKinds {
           "PositionPartialCoverageObserved",
           // #820: operator raised an under-booked lot to journal truth (neutral kind).
           "PositionLotCorrected",
+          // #825: operator removed an armed trailing stop (neutral kind; pages).
+          "TrailDisarmed",
           "PositionPartialCoverage",
           // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker emitted by
           // ReconciliationWorkflowImpl on the missing branch. The first sweep observing a
