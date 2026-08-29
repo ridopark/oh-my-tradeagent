@@ -82,8 +82,10 @@ Order per the risk sign-off: **project cap headroom → verify single owner → 
    writer is tighten-only).
 2. **Single owner**: exactly one running PositionWorkflow per (tenant, OCC) being corrected, and
    no PositionAdopted row since 2026-08-25 (a second owner = double-booked → over-sell).
-3. **Trail unarmed** (`trailingState` query): the handler refuses on an armed trail and NO disarm
-   lever exists yet (#825) — an armed-trail position cannot be corrected without closing.
+3. **Trail unarmed** (`trailingState` query): the handler refuses on an armed trail. If a trail
+   is armed, disarm it first with the `disarm_trail` Update (#825) — same CLI form as step 5 with
+   `--name disarm_trail` and input `{"schema_version":1,"operator_id":"<you>","reason":"<why>"}` —
+   then correct, then re-arm (`arm_trail` re-anchors fresh). The disarm pages YELLOW by design.
 4. **Find the workflow IDs** (homelab):
    `temporal workflow list --namespace copytrade --query "WorkflowType='PositionWorkflow' AND ExecutionStatus='Running' AND ContractSymbol='SMCI  261120C00050000'"`
 5. **Correct** (one per position; qty = the journal FILLED truth; the handler re-verifies against

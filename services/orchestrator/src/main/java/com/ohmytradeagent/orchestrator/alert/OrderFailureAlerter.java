@@ -137,7 +137,7 @@ public class OrderFailureAlerter {
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
-          + "PositionPartialCoverage,PositionLotCorrected";
+          + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -181,6 +181,11 @@ public class OrderFailureAlerter {
   // real-money qty change). Subject shape (contract_symbol / qty_before / qty_after / operator)
   // gets its own small embed.
   private static final String LOT_CORRECTED_KIND = "PositionLotCorrected";
+
+  // #825: an armed trailing stop was removed without closing the position — YELLOW, must be
+  // visible (real-money protection just went away). Subject shape (contract_symbol /
+  // prior_peak_premium / prior_giveback_pct / operator) gets its own small embed.
+  private static final String TRAIL_DISARMED_KIND = "TrailDisarmed";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -255,6 +260,8 @@ public class OrderFailureAlerter {
         embed = buildPartialCoverageEmbed(event);
       } else if (LOT_CORRECTED_KIND.equals(event.getKind())) {
         embed = buildLotCorrectedEmbed(event);
+      } else if (TRAIL_DISARMED_KIND.equals(event.getKind())) {
+        embed = buildTrailDisarmedEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -303,6 +310,34 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /**
+   * #825: the trail-disarm page. YELLOW; every key null-safe (a throwing render is swallowed
+   * upstream and would silently lose the very page that says protection was removed).
+   */
+  private WebhookEmbed buildTrailDisarmedEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "contract_symbol");
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(
+        new WebhookEmbed.Field("prior_peak", subjectStr(subject, "prior_peak_premium"), false));
+    fields.add(
+        new WebhookEmbed.Field("prior_giveback", subjectStr(subject, "prior_giveback_pct"), false));
+    fields.add(
+        new WebhookEmbed.Field("remaining_qty", subjectStr(subject, "remaining_qty"), false));
+    fields.add(new WebhookEmbed.Field("operator", subjectStr(subject, "operator_id"), false));
+    fields.add(new WebhookEmbed.Field("reason", subjectStr(subject, "reason"), false));
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    return new WebhookEmbed(
+        ":large_yellow_circle: Trailing stop DISARMED — " + orNa(symbolRaw) + " is unprotected",
+        "An operator removed the armed trailing stop without closing the position (#825). The lot"
+            + " has NO downside protection until re-armed — if this was the disarm-correct-rearm"
+            + " sequence, the re-arm page should follow shortly.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
+        fields);
   }
 
   /**

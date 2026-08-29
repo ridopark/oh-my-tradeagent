@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://oh-my-tradeagent/schemas/disarm-trail-request.json",
+  "title": "DisarmTrailRequest",
+  "description": "Update payload for PositionWorkflow.disarm_trail (#825) — the operator lever that removes an armed trailing stop WITHOUT closing the position, so its basis can be re-anchored (the #820 runbook order: disarm → correct_booked_lot → re-arm; armTrail is deliberately idempotent and will never re-anchor an armed trail). Disarming removes real-money downside protection: the reason is mandatory and the TrailDisarmed audit row PAGES. An Update, not a signal — a refusal (nothing armed) must be reported, and the synchronous answer carries the prior stop so the operator knows exactly what protection was just removed. The premium-tick subscription is left running (no unsubscribe activity exists; ticks are ignored while disarmed and a re-arm reuses the stream).",
+  "type": "object",
+  "javaType": "com.ohmytradeagent.contract.DisarmTrailRequest",
+  "additionalProperties": false,
+  "required": ["schema_version", "operator_id", "reason"],
+  "properties": {
+    "schema_version": { "type": "integer", "description": "Payload schema version; 1." },
+    "operator_id": { "type": "string", "description": "The operator disarming; recorded as actor operator:<id> on the paged TrailDisarmed audit row." },
+    "reason": { "type": "string", "description": "Why protection is being removed (e.g. 'disarm-correct-rearm, #820 heal'). Mandatory; recorded verbatim." }
+  }
+}

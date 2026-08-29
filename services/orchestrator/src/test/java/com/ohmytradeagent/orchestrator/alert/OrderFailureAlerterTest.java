@@ -800,6 +800,29 @@ class OrderFailureAlerterTest {
     alerter.onAuditEvent(event("PositionLotCorrected", null, new java.util.LinkedHashMap<>()));
   }
 
+  @Test
+  void trailDisarmed_rendersYellowEmbed_nullSafe() {
+    // #825: the disarm page must render (protection was just removed — losing this page silently
+    // is the worst outcome) and must carry the prior anchor + operator identity.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> subject = new java.util.LinkedHashMap<>();
+    subject.put("contract_symbol", "SMCI  261120C00050000");
+    subject.put("prior_peak_premium", "2.50");
+    subject.put("prior_giveback_pct", "0.20");
+    subject.put("operator_id", "ops-1");
+    subject.put("reason", "disarm-correct-rearm");
+    alerter.onAuditEvent(event("TrailDisarmed", "pos-wf-1", subject));
+    org.mockito.ArgumentCaptor<WebhookEmbed> cap =
+        org.mockito.ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhook).postEmbedToUrl(any(), cap.capture());
+    assertThat(cap.getValue().color()).isEqualTo(AlertColors.YELLOW);
+    assertThat(cap.getValue().title()).contains("DISARMED");
+    // All-keys-absent render must survive (a throw is swallowed upstream and loses the page).
+    alerter.onAuditEvent(event("TrailDisarmed", null, new java.util.LinkedHashMap<>()));
+  }
+
   // ---- Issue #821: the whole allowlist-drift class, structurally ----
 
   /**

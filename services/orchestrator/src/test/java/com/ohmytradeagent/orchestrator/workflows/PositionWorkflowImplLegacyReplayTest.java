@@ -621,6 +621,15 @@ class PositionWorkflowImplLegacyReplayTest {
       return null;
     }
 
+    @Override
+    public void disarmTrailValidator(com.ohmytradeagent.contract.DisarmTrailRequest request) {}
+
+    @Override
+    public com.ohmytradeagent.contract.DisarmTrailResult disarmTrail(
+        com.ohmytradeagent.contract.DisarmTrailRequest request) {
+      return null;
+    }
+
     private OrderIntent exitIntent(PartialExitRequest req, long qty, String intentKey) {
       OrderIntent i = new OrderIntent();
       i.setSchemaVersion(1L);

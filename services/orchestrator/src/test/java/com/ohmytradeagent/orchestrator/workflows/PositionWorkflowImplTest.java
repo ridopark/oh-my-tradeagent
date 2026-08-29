@@ -19,6 +19,8 @@ import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.CorrectBookedLotRequest;
 import com.ohmytradeagent.contract.CorrectBookedLotResult;
+import com.ohmytradeagent.contract.DisarmTrailRequest;
+import com.ohmytradeagent.contract.DisarmTrailResult;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
@@ -4965,6 +4967,130 @@ class PositionWorkflowImplTest {
   }
 
   // ---------- helpers ----------
+
+  // ---------- #825: disarm_trail ----------
+
+  private static DisarmTrailRequest disarm(String operatorId, String reason) {
+    DisarmTrailRequest r = new DisarmTrailRequest();
+    r.setSchemaVersion(1L);
+    r.setOperatorId(operatorId);
+    r.setReason(reason);
+    return r;
+  }
+
+  /**
+   * #825 happy path: an armed operator trail disarms — state cleared, prior stop returned, the
+   * paged TrailDisarmed row carries operator + prior anchor, and the trailingState query reports
+   * unarmed.
+   */
+  @Test
+  void disarmTrail_armedTrail_disarmsAndPages() throws Exception {
+    PositionWorkflow stub = newStub("pos-disarm-1");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+    assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
+        .isEqualTo(ArmTrailResult.Status.ARMED);
+
+    DisarmTrailResult r = stub.disarmTrail(disarm("ops-1", "disarm-correct-rearm"));
+
+    assertThat(r.getStatus()).isEqualTo(DisarmTrailResult.Status.DISARMED);
+    assertThat(r.getPriorPeakPremium()).isEqualByComparingTo("2.50");
+    assertThat(r.getPriorGivebackPct()).isEqualByComparingTo("0.20");
+    AuditEvent page = captureKind("TrailDisarmed");
+    assertThat(page.getSubject()).containsEntry("actor", "operator:ops-1");
+    assertThat(stub.trailingState().armed()).isFalse();
+  }
+
+  /** #825: nothing armed — honest NOT_ARMED, no state change, no page. */
+  @Test
+  void disarmTrail_notArmed_rejectsHonestly() throws Exception {
+    PositionWorkflow stub = newStub("pos-disarm-2");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+    waitForAuditKind("PositionEntered");
+
+    assertThat(stub.disarmTrail(disarm("ops-1", "why not")).getStatus())
+        .isEqualTo(DisarmTrailResult.Status.NOT_ARMED);
+    Mockito.verify(audit, Mockito.never())
+        .log(Mockito.argThat(e -> e != null && "TrailDisarmed".equals(e.getKind())));
+  }
+
+  /** #825: validator refusals — reason is mandatory (disarming removes protection). */
+  @Test
+  void disarmTrail_validatorRefusals() throws Exception {
+    PositionWorkflow stub = newStub("pos-disarm-3");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+    waitForAuditKind("PositionEntered");
+
+    assertThatThrownBy(() -> stub.disarmTrail(disarm(" ", "reason ok")))
+        .hasStackTraceContaining("operator_id");
+    assertThatThrownBy(() -> stub.disarmTrail(disarm("ops-1", " ")))
+        .hasStackTraceContaining("reason");
+  }
+
+  /**
+   * #825 THE safety pin: a tick that WOULD have fired the armed trail must do nothing after disarm
+   * — no exit order, position intact. (The premium subscription keeps flowing by design;
+   * processTick must ignore it while unarmed.)
+   */
+  @Test
+  void disarmTrail_tickBelowOldThreshold_firesNothing() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    PositionWorkflow stub = newStub("pos-disarm-4");
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    confirmEntry(stub, 5L);
+    assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
+        .isEqualTo(ArmTrailResult.Status.ARMED); // stop at 2.50 * 0.80 = 2.00
+    assertThat(stub.disarmTrail(disarm("ops-1", "test")).getStatus())
+        .isEqualTo(DisarmTrailResult.Status.DISARMED);
+
+    stub.chandelierTick(tick(new BigDecimal("1.50"))); // far below the OLD stop
+
+    // Wait until the main loop has actually SEEN the tick (the signal is async — a verify fired
+    // before the workflow processes it passes vacuously; a review mutant that skipped the state
+    // reset survived exactly that hole). lastTickObservedAt is stamped in the drain loop BEFORE
+    // the armed check, so it advances even for a properly-disarmed tick.
+    TrailingState st = waitForTickObserved(stub);
+    assertThat(st.lastTickObservedAt()).as("tick reached the main loop").isNotNull();
+    // Race-free discriminators: processTick early-returns while unarmed, so a disarm that
+    // actually took leaves armed=false and ticksReceived=0; the no-op-disarm mutant flips both.
+    assertThat(st.armed()).isFalse();
+    assertThat(st.ticksReceived()).isZero();
+    // And the tick must be inert: no exit placed, full qty still standing.
+    Mockito.verify(exec, Mockito.never()).placeOrder(any());
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+  }
+
+  /**
+   * #825 + #820, the runbook order end-to-end: disarm → correct_booked_lot (previously
+   * REJECTED_TRAIL_ARMED) → re-arm succeeds. Pins that the disarm actually unblocks the correction
+   * and that a fresh armTrail is accepted afterwards (anchor freshness itself is armTrail's
+   * contract, pinned by its own tests — this one pins the runbook ORDER).
+   */
+  @Test
+  void disarmTrail_thenCorrect_thenRearm_reanchors() throws Exception {
+    when(exec.getOrderStatus(anyString()))
+        .thenReturn(journalRow(OrderIntentResult.State.FILLED, 21L, "2.79"));
+    PositionWorkflow stub = newStub("pos-disarm-5");
+    PositionWorkflowInput in = futureInput(2);
+    in.setSourceSignalWorkflowId("src-wf");
+    WorkflowStub.fromTyped(stub).start(in);
+    confirmEntry(stub, 2L);
+    assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
+        .isEqualTo(ArmTrailResult.Status.ARMED);
+    // Armed -> correction refused (the #820 guard, message now names disarm_trail).
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.REJECTED_TRAIL_ARMED);
+
+    assertThat(stub.disarmTrail(disarm("ops-1", "runbook order")).getStatus())
+        .isEqualTo(DisarmTrailResult.Status.DISARMED);
+    assertThat(stub.correctBookedLot(correction(21)).getOutcome())
+        .isEqualTo(CorrectBookedLotResult.Outcome.APPLIED);
+    ArmTrailResult rearm = stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20")));
+    assertThat(rearm.getStatus()).isEqualTo(ArmTrailResult.Status.ARMED);
+    assertThat(stub.trailingState().armed()).isTrue();
+  }
 
   // ---------- #820: correct_booked_lot ----------
 

@@ -517,5 +517,14 @@ class AdoptionWorkflowImplLegacyReplayTest {
         com.ohmytradeagent.contract.CorrectBookedLotRequest request) {
       return null;
     }
+
+    @Override
+    public void disarmTrailValidator(com.ohmytradeagent.contract.DisarmTrailRequest request) {}
+
+    @Override
+    public com.ohmytradeagent.contract.DisarmTrailResult disarmTrail(
+        com.ohmytradeagent.contract.DisarmTrailRequest request) {
+      return null;
+    }
   }
 }
