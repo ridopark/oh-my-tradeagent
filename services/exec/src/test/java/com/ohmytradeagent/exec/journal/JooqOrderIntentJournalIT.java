@@ -208,7 +208,7 @@ class JooqOrderIntentJournalIT {
     journal.markCancelFailed("intent-A", "transient broker hiccup");
     OffsetDateTime filledAt = OffsetDateTime.parse("2026-05-19T17:08:11Z");
 
-    boolean updated = journal.markFilled("intent-A", 5L, new BigDecimal("0.84"), filledAt);
+    boolean updated = journal.markFilled("intent-A", 5L, new BigDecimal("0.84"), filledAt, "ws");
 
     assertThat(updated).isTrue();
     JournaledOrder row = journal.findByIntentKey("intent-A").orElseThrow();
@@ -217,6 +217,38 @@ class JooqOrderIntentJournalIT {
     assertThat(row.avgFillPrice()).isEqualByComparingTo(new BigDecimal("0.84"));
     assertThat(row.filledAt()).isEqualTo(filledAt);
     assertThat(row.lastError()).isNull();
+    // #836: the detection-source attribution is DURABLE — read the column raw, since
+    // JournaledOrder deliberately does not carry it (write-only from the app, read by operators).
+    assertThat(
+            dsl.select(org.jooq.impl.DSL.field("detected_via", String.class))
+                .from("order_intent_journal")
+                .where(org.jooq.impl.DSL.field("intent_key", String.class).eq("intent-A"))
+                .fetchOne()
+                .value1())
+        .isEqualTo("ws");
+  }
+
+  @Test
+  void markFilled_losingRedelivery_keepsWinnersAttribution_836() {
+    // #836: the WS/POLL redelivery race — the conditional markFilled means only the WINNING call
+    // writes, so the recorded detected_via names the net that actually terminalized the row and a
+    // later redelivery from the other net must not overwrite it.
+    journal.upsertIntent(intent("intent-A"));
+    journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
+    OffsetDateTime filledAt = OffsetDateTime.parse("2026-08-25T14:25:48Z");
+
+    assertThat(journal.markFilled("intent-A", 5L, new BigDecimal("0.84"), filledAt, "poll"))
+        .isTrue();
+    assertThat(journal.markFilled("intent-A", 5L, new BigDecimal("0.84"), filledAt, "ws"))
+        .isFalse();
+
+    assertThat(
+            dsl.select(org.jooq.impl.DSL.field("detected_via", String.class))
+                .from("order_intent_journal")
+                .where(org.jooq.impl.DSL.field("intent_key", String.class).eq("intent-A"))
+                .fetchOne()
+                .value1())
+        .isEqualTo("poll");
   }
 
   @Test
@@ -227,7 +259,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "stub-intent-A");
     journal.markFilled(
-        "intent-A", 21L, new BigDecimal("2.79"), OffsetDateTime.parse("2026-08-25T17:59:00Z"));
+        "intent-A",
+        21L,
+        new BigDecimal("2.79"),
+        OffsetDateTime.parse("2026-08-25T17:59:00Z"),
+        "ws");
 
     journal.markCancelledWithFill(
         "intent-A", 2L, new BigDecimal("2.805"), OffsetDateTime.parse("2026-08-25T17:59:05Z"));
@@ -269,7 +305,11 @@ class JooqOrderIntentJournalIT {
 
     boolean updated =
         journal.markFilled(
-            "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+            "intent-A",
+            5L,
+            new BigDecimal("0.84"),
+            OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+            "ws");
 
     assertThat(updated).isFalse();
     JournaledOrder after = journal.findByIntentKey("intent-A").orElseThrow();
@@ -295,12 +335,20 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intentWithOcc("intent-old", "sig-old", occ));
     journal.markSubmittedIfRecorded("intent-old", "stub-old");
     journal.markFilled(
-        "intent-old", 3L, new BigDecimal("0.50"), OffsetDateTime.parse("2026-05-19T15:00:00Z"));
+        "intent-old",
+        3L,
+        new BigDecimal("0.50"),
+        OffsetDateTime.parse("2026-05-19T15:00:00Z"),
+        "ws");
 
     journal.upsertIntent(intentWithOcc("intent-new", "sig-new", occ));
     journal.markSubmittedIfRecorded("intent-new", "stub-new");
     journal.markFilled(
-        "intent-new", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+        "intent-new",
+        5L,
+        new BigDecimal("0.84"),
+        OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+        "ws");
 
     JournaledOrder latest = journal.findLatestFilledByOcc("dev", "copytrade-v1", occ).orElseThrow();
     assertThat(latest.intentKey()).isEqualTo("intent-new");
@@ -327,7 +375,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(foreign);
     journal.markSubmittedIfRecorded("intent-foreign", "stub-foreign");
     journal.markFilled(
-        "intent-foreign", 9L, new BigDecimal("1.20"), OffsetDateTime.parse("2026-05-19T17:00:00Z"));
+        "intent-foreign",
+        9L,
+        new BigDecimal("1.20"),
+        OffsetDateTime.parse("2026-05-19T17:00:00Z"),
+        "ws");
 
     assertThat(journal.findLatestFilledByOcc("dev", "copytrade-v1", occ)).isEmpty();
     assertThat(journal.findLatestFilledByOcc("other-tenant", "copytrade-v1", occ)).isPresent();
@@ -346,7 +398,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intentWithOcc("intent-padded", "sig-padded", paddedOcc));
     journal.markSubmittedIfRecorded("intent-padded", "stub-padded");
     journal.markFilled(
-        "intent-padded", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+        "intent-padded",
+        5L,
+        new BigDecimal("0.84"),
+        OffsetDateTime.parse("2026-05-19T17:08:11Z"),
+        "ws");
 
     JournaledOrder latest =
         journal.findLatestFilledByOcc("dev", "copytrade-v1", compactOcc).orElseThrow();
@@ -423,7 +479,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intent("intent-filled"));
     journal.markSubmittedIfRecorded("intent-filled", "brk-filled");
     journal.markFilled(
-        "intent-filled", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-05-24T00:00:00Z"));
+        "intent-filled",
+        1L,
+        new BigDecimal("1.00"),
+        OffsetDateTime.parse("2026-05-24T00:00:00Z"),
+        "ws");
 
     // CANCELLED — terminal cancel from the broker.
     journal.upsertIntent(intent("intent-cancelled"));
@@ -505,7 +565,7 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "brk-A");
     journal.markFilled(
-        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"), "ws");
     JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
 
     boolean updated = journal.markExpired("intent-A");
@@ -537,7 +597,7 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "brk-A");
     journal.markFilled(
-        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"), "ws");
     JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
 
     boolean updated = journal.markBrokerRejected("intent-A", "broker terminal: REJECTED");
@@ -569,7 +629,7 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(intent("intent-A"));
     journal.markSubmittedIfRecorded("intent-A", "brk-A");
     journal.markFilled(
-        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"));
+        "intent-A", 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-19T17:08:11Z"), "ws");
     JournaledOrder before = journal.findByIntentKey("intent-A").orElseThrow();
 
     boolean updated = journal.markCancelledIfSubmitted("intent-A");
@@ -594,13 +654,13 @@ class JooqOrderIntentJournalIT {
     buy.setSide(OrderIntent.Side.BUY);
     journal.upsertIntent(buy);
     journal.markSubmittedIfRecorded("buy-1", "brk-buy");
-    journal.markFilled("buy-1", 3L, new BigDecimal("2.3533"), buyAt);
+    journal.markFilled("buy-1", 3L, new BigDecimal("2.3533"), buyAt, "ws");
 
     OrderIntent sell = intentWithOcc("sell-1", "sig-sell", occ);
     sell.setSide(OrderIntent.Side.SELL);
     journal.upsertIntent(sell);
     journal.markSubmittedIfRecorded("sell-1", "brk-sell");
-    journal.markFilled("sell-1", 2L, new BigDecimal("1.84"), sellAt);
+    journal.markFilled("sell-1", 2L, new BigDecimal("1.84"), sellAt, "ws");
 
     var buys =
         journal.findFilledBySideOnDay("dev", "copytrade-v1", "BUY", LocalDate.of(2026, 6, 29));
@@ -625,7 +685,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(onDay);
     journal.markSubmittedIfRecorded("sell-onday", "brk-1");
     journal.markFilled(
-        "sell-onday", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+        "sell-onday",
+        1L,
+        new BigDecimal("1.00"),
+        OffsetDateTime.parse("2026-06-29T18:00:00Z"),
+        "ws");
 
     // FILLED SELL on a DIFFERENT ET day (excluded): 2026-06-30 18:00Z.
     OrderIntent otherDay = intentWithOcc("sell-otherday", "sig", occ);
@@ -633,7 +697,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(otherDay);
     journal.markSubmittedIfRecorded("sell-otherday", "brk-2");
     journal.markFilled(
-        "sell-otherday", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-30T18:00:00Z"));
+        "sell-otherday",
+        1L,
+        new BigDecimal("1.00"),
+        OffsetDateTime.parse("2026-06-30T18:00:00Z"),
+        "ws");
 
     // SUBMITTED (not FILLED) SELL on the target day (excluded — no fill).
     OrderIntent notFilled = intentWithOcc("sell-notfilled", "sig", occ);
@@ -647,7 +715,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(buy);
     journal.markSubmittedIfRecorded("buy-onday", "brk-4");
     journal.markFilled(
-        "buy-onday", 1L, new BigDecimal("2.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+        "buy-onday",
+        1L,
+        new BigDecimal("2.00"),
+        OffsetDateTime.parse("2026-06-29T18:00:00Z"),
+        "ws");
 
     var sells = journal.findFilledBySideOnDay("dev", "copytrade-v1", "SELL", day);
     assertThat(sells).extracting(JournaledOrder::intentKey).containsExactly("sell-onday");
@@ -663,7 +735,11 @@ class JooqOrderIntentJournalIT {
     journal.upsertIntent(foreign);
     journal.markSubmittedIfRecorded("sell-foreign", "brk-f");
     journal.markFilled(
-        "sell-foreign", 1L, new BigDecimal("1.00"), OffsetDateTime.parse("2026-06-29T18:00:00Z"));
+        "sell-foreign",
+        1L,
+        new BigDecimal("1.00"),
+        OffsetDateTime.parse("2026-06-29T18:00:00Z"),
+        "ws");
 
     assertThat(journal.findFilledBySideOnDay("dev", "copytrade-v1", "SELL", day)).isEmpty();
     assertThat(journal.findFilledBySideOnDay("other-tenant", "copytrade-v1", "SELL", day))
@@ -687,13 +763,13 @@ class JooqOrderIntentJournalIT {
     buy.setSide(OrderIntent.Side.BUY);
     journal.upsertIntent(buy);
     journal.markSubmittedIfRecorded("buy-d1", "brk-buy");
-    journal.markFilled("buy-d1", 50L, new BigDecimal("1.99"), d1);
+    journal.markFilled("buy-d1", 50L, new BigDecimal("1.99"), d1, "ws");
 
     OrderIntent sell = intentWithOcc("sell-d2", "sig-sell", occ);
     sell.setSide(OrderIntent.Side.SELL);
     journal.upsertIntent(sell);
     journal.markSubmittedIfRecorded("sell-d2", "brk-sell");
-    journal.markFilled("sell-d2", 11L, new BigDecimal("1.88"), d2);
+    journal.markFilled("sell-d2", 11L, new BigDecimal("1.88"), d2, "ws");
 
     // sinceEtDay well before D1 — both fills are within the window.
     LocalDate since = LocalDate.of(2026, 4, 23); // D2 − 90d
@@ -726,13 +802,13 @@ class JooqOrderIntentJournalIT {
     oldBuy.setSide(OrderIntent.Side.BUY);
     journal.upsertIntent(oldBuy);
     journal.markSubmittedIfRecorded("buy-old", "brk-old");
-    journal.markFilled("buy-old", 7L, new BigDecimal("1.11"), old);
+    journal.markFilled("buy-old", 7L, new BigDecimal("1.11"), old, "ws");
 
     OrderIntent boundaryBuy = intentWithOcc("buy-boundary", "sig-boundary", occ);
     boundaryBuy.setSide(OrderIntent.Side.BUY);
     journal.upsertIntent(boundaryBuy);
     journal.markSubmittedIfRecorded("buy-boundary", "brk-boundary");
-    journal.markFilled("buy-boundary", 3L, new BigDecimal("2.22"), boundaryDay);
+    journal.markFilled("buy-boundary", 3L, new BigDecimal("2.22"), boundaryDay, "ws");
 
     LocalDate since = LocalDate.of(2026, 4, 23); // 14:00Z on this date == 10:00 EDT, same ET day
     var buys = journal.findFilledBySide("dev", "copytrade-v1", "BUY", since);

@@ -22,6 +22,24 @@ import org.junit.jupiter.api.Test;
  */
 class ReconciliationExecActivityImplTest {
 
+  /**
+   * #836 (review catch): the 'recon' attribution was never asserted anywhere. The orchestrator-
+   * driven journalReconcileToFilled (#239 stale-entry reconcile) must tag its own mechanism, not
+   * inherit a caller's.
+   */
+  @Test
+  void journalReconcileToFilled_tagsReconAttribution() {
+    OrderIntentJournal journal = mock(OrderIntentJournal.class);
+    ReconciliationExecActivityImpl exec =
+        new ReconciliationExecActivityImpl(
+            journal, mock(BrokerClientRegistry.class), "alpaca-paper");
+    java.time.OffsetDateTime at = java.time.OffsetDateTime.parse("2026-08-25T14:25:48Z");
+
+    exec.journalReconcileToFilled("wf-1:entry", 5L, new java.math.BigDecimal("2.79"), at);
+
+    verify(journal).markFilled("wf-1:entry", 5L, new java.math.BigDecimal("2.79"), at, "recon");
+  }
+
   // P4-a / Phase B: a present tenant_id resolves THAT tenant's broker (keyed on the tenant, not the
   // ACCOUNT_LEVEL sentinel) so recon lists the tenant's own open orders.
   @Test

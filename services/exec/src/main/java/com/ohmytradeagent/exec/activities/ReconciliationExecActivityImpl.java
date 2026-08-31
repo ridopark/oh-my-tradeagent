@@ -107,7 +107,7 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
       java.time.OffsetDateTime filledAt) {
     // Issue #239: terminalize the stale entry row to FILLED. markFilled is conditional on the
     // current state being in (RECORDED, SUBMITTED), so a repeat call is an idempotent no-op.
-    return journal.markFilled(intentKey, filledQty, avgFillPrice, filledAt);
+    return journal.markFilled(intentKey, filledQty, avgFillPrice, filledAt, "recon");
   }
 
   private static JournalEntry toContract(JournaledOrder row) {

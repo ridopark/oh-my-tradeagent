@@ -314,7 +314,11 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   @Override
   public boolean markFilled(
-      String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt) {
+      String intentKey,
+      long filledQty,
+      BigDecimal avgFillPrice,
+      OffsetDateTime filledAt,
+      String detectedVia) {
     OffsetDateTime now = OffsetDateTime.now();
     int updated =
         dsl.update(TABLE)
@@ -322,6 +326,7 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
             .set(field("filled_qty"), filledQty)
             .set(field("avg_fill_price"), avgFillPrice)
             .set(field("filled_at"), filledAt)
+            .set(field("detected_via"), detectedVia)
             .setNull(field("last_error"))
             .set(field("last_state_at"), now)
             .set(field("version"), field("version", Long.class).plus(1))

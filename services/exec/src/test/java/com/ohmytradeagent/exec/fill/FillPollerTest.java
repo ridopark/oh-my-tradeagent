@@ -216,7 +216,7 @@ class FillPollerTest {
             new BrokerFillDetail(
                 5L, new BigDecimal("0.84"), OffsetDateTime.parse("2026-05-23T19:58:00Z")));
     when(realJournal.findByBrokerOrderId("brk-missed")).thenReturn(Optional.of(submittedRow));
-    when(realJournal.markFilled(eq("ck-missed"), anyLong(), any(), any())).thenReturn(true);
+    when(realJournal.markFilled(eq("ck-missed"), anyLong(), any(), any(), any())).thenReturn(true);
     when(workflowClient.newUntypedWorkflowStub(anyString())).thenReturn(stub);
     WorkflowExecution exec =
         WorkflowExecution.newBuilder()
@@ -235,7 +235,8 @@ class FillPollerTest {
             eq("ck-missed"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-23T19:58:00Z")));
+            eq(OffsetDateTime.parse("2026-05-23T19:58:00Z")),
+            any());
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
   }

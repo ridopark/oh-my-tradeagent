@@ -151,7 +151,7 @@ class FillDispatcherImplTest {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
     // markFilled is conditional on state in (RECORDED, SUBMITTED): the WS wins the race and
     // terminalizes; the poll repeat finds the row already FILLED and returns false.
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true, false);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true, false);
 
     BrokerFillEvent viaPoll =
         new BrokerFillEvent(
@@ -169,8 +169,13 @@ class FillDispatcherImplTest {
     // that it re-attempts rather than short-circuiting. The journal is mocked here, so the guard
     // that actually makes the repeat safe (UPDATE ... WHERE state IN (RECORDED, SUBMITTED)) is
     // proven against a real database in JooqOrderIntentJournalIT#markFilled_onTerminalState_noOp,
-    // not by this test.
-    verify(journal, times(2)).markFilled(eq("ck-42"), eq(5L), any(), any());
+    // not by this test. #836: each attempt names ITS OWN net — the conditional write is what
+    // guarantees the recorded value belongs to whichever source actually won the row. IN ORDER
+    // (review catch): two unordered verifies pass with the tags SWAPPED — a ws<->poll inversion
+    // is exactly the mutant that would poison the forensic question this column exists to answer.
+    org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(journal);
+    inOrder.verify(journal).markFilled(eq("ck-42"), eq(5L), any(), any(), eq("ws"));
+    inOrder.verify(journal).markFilled(eq("ck-42"), eq(5L), any(), any(), eq("poll"));
     // Both signal — onFill is idempotent by structure (single field assign, read once through
     // Workflow.await), which is what makes the at-least-once contract safe.
     verify(workflowStub, times(2)).signal(eq("onFill"), any());
@@ -182,7 +187,7 @@ class FillDispatcherImplTest {
     // #251: stub markFilled -> true so the `if (terminalized)` info-log branch in dispatch() is
     // exercised on the happy path (Mockito otherwise returns false by default and the branch is
     // never entered here).
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(FILL);
 
@@ -193,7 +198,8 @@ class FillDispatcherImplTest {
     ArgumentCaptor<BigDecimal> avgPrice = ArgumentCaptor.forClass(BigDecimal.class);
     ArgumentCaptor<OffsetDateTime> filledAt = ArgumentCaptor.forClass(OffsetDateTime.class);
     verify(journal)
-        .markFilled(eq("ck-42"), filledQty.capture(), avgPrice.capture(), filledAt.capture());
+        .markFilled(
+            eq("ck-42"), filledQty.capture(), avgPrice.capture(), filledAt.capture(), eq("ws"));
     assertThat(filledQty.getValue()).isEqualTo(5L);
     assertThat(avgPrice.getValue()).isEqualByComparingTo(new BigDecimal("0.84"));
     assertThat(filledAt.getValue()).isEqualTo(OffsetDateTime.parse("2026-05-19T17:08:11Z"));
@@ -232,12 +238,12 @@ class FillDispatcherImplTest {
     // PositionWorkflow would block on lastFillEvent until EOD, and PartialExitFilled would
     // never land in audit_log.
     when(journal.findByBrokerOrderId("brk-stc-7")).thenReturn(Optional.of(STC_ROW));
-    when(journal.markFilled(eq(STC_INTENT_KEY), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq(STC_INTENT_KEY), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(STC_FILL);
 
     // #244: STC exit fills are terminalized to FILLED on the row keyed by the exit intent_key too.
-    verify(journal).markFilled(eq(STC_INTENT_KEY), eq(3L), any(), any());
+    verify(journal).markFilled(eq(STC_INTENT_KEY), eq(3L), any(), any(), any());
     verify(workflowClient).newUntypedWorkflowStub(STC_POSITION_WF_ID);
     ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
     verify(workflowStub).signal(eq("onFill"), arg.capture());
@@ -328,12 +334,12 @@ class FillDispatcherImplTest {
     // two agree for copytrade; the dispatcher branches on `/wl/` so copytrade never leaves the
     // reconstruct path regardless.)
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
-    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any(), any()))
         .thenReturn(true);
 
     dispatcher.dispatch(FILL);
 
-    verify(journal).markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), eq(5L), any(), any());
+    verify(journal).markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), eq(5L), any(), any(), any());
     verify(workflowClient).newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42");
     verify(workflowClient, never()).newUntypedWorkflowStub(COPYTRADE_ENTRY_INTENT_KEY);
     verify(workflowClient, never()).newUntypedWorkflowStub(WATCHLIST_LEG_WF_ID);
@@ -351,12 +357,12 @@ class FillDispatcherImplTest {
     // was dropped, so the leg's `Workflow.await(ttl, () -> fillEvent != null)` never woke on a real
     // fill and the lot was orphaned until the 5-minute recon sweep adopted it.
     when(journal.findByBrokerOrderId("brk-wl-9")).thenReturn(Optional.of(WATCHLIST_ENTRY_ROW));
-    when(journal.markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+    when(journal.markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), anyLong(), any(), any(), any()))
         .thenReturn(true);
 
     dispatcher.dispatch(WATCHLIST_ENTRY_FILL);
 
-    verify(journal).markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), eq(5L), any(), any());
+    verify(journal).markFilled(eq(WATCHLIST_ENTRY_INTENT_KEY), eq(5L), any(), any(), any());
     verify(workflowClient).newUntypedWorkflowStub(WATCHLIST_LEG_WF_ID);
     // NOT the reconstructed signal-workflow id (the pre-fix mis-route).
     verify(workflowClient, never()).newUntypedWorkflowStub("t-dev/s-watchlist-v1/sig/wl-sig-9");
@@ -411,7 +417,7 @@ class FillDispatcherImplTest {
             OffsetDateTime.parse("2026-05-19T17:08:11Z"),
             BrokerFillEvent.Source.WS);
     when(journal.findByBrokerOrderId("brk-bob")).thenReturn(Optional.of(bobRow));
-    when(journal.markFilled(eq("ck-bob"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-bob"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(bobFill);
 
@@ -430,7 +436,7 @@ class FillDispatcherImplTest {
 
     dispatcher.dispatch(FILL);
 
-    verify(journal, never()).markFilled(anyString(), anyLong(), any(), any());
+    verify(journal, never()).markFilled(anyString(), anyLong(), any(), any(), any());
     verify(workflowClient, never()).newUntypedWorkflowStub(anyString());
     verify(workflowStub, never()).signal(anyString(), org.mockito.ArgumentMatchers.any());
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(1.0);
@@ -473,7 +479,7 @@ class FillDispatcherImplTest {
             1L);
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.empty());
     when(journal.findByClientOrderId("ck-42")).thenReturn(Optional.of(recordedRow));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(FILL);
 
@@ -483,7 +489,8 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
     // The fill is NOT dropped as unknown.
     assertThat(registry.counter("fill_listener.events_unknown_order").count()).isEqualTo(0.0);
     // Still signals the originating workflow.
@@ -498,7 +505,7 @@ class FillDispatcherImplTest {
     // false (no-op) and qty/price are not corrupted. The dispatcher must invoke markFilled on
     // both deliveries (the journal enforces the no-op) and must not double-count or throw.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any()))
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any()))
         .thenReturn(true) // first delivery transitions SUBMITTED → FILLED
         .thenReturn(false); // second delivery is a no-op (already terminal)
 
@@ -511,7 +518,8 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
   }
 
   // ---------- #819 Phase B: entry straggler reroute ----------
@@ -525,7 +533,7 @@ class FillDispatcherImplTest {
   @Test
   void dispatch_entryStragglerWorkflowNotFound_reroutesToPositionWorkflow() {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
-    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any(), any()))
         .thenReturn(true);
     String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
     String positionId =
@@ -585,7 +593,7 @@ class FillDispatcherImplTest {
             null,
             1L);
     when(journal.findByBrokerOrderId("brk-42r")).thenReturn(Optional.of(repegRow));
-    when(journal.markFilled(eq(repegKey), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq(repegKey), anyLong(), any(), any(), any())).thenReturn(true);
     String positionId =
         com.ohmytradeagent.contract.identity.WorkflowIds.position(
             "dev", "copytrade-v1", "SPY   260519C00737000", "sig-42");
@@ -648,7 +656,7 @@ class FillDispatcherImplTest {
             null,
             1L);
     when(journal.findByBrokerOrderId("brk-77")).thenReturn(Optional.of(exitRow));
-    when(journal.markFilled(anyString(), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(anyString(), anyLong(), any(), any(), any())).thenReturn(true);
     WorkflowStub exitStub = mock(WorkflowStub.class);
     when(workflowClient.newUntypedWorkflowStub(STC_POSITION_WF_ID)).thenReturn(exitStub);
     WorkflowExecution exec =
@@ -678,7 +686,7 @@ class FillDispatcherImplTest {
   @Test
   void dispatch_rerouteThrowsNonNotFound_propagatesAndCounts() {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
-    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any(), any()))
         .thenReturn(true);
     String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
     String positionId =
@@ -736,7 +744,7 @@ class FillDispatcherImplTest {
             null,
             1L);
     when(journal.findByBrokerOrderId("brk-x")).thenReturn(Optional.of(bothRow));
-    when(journal.markFilled(anyString(), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(anyString(), anyLong(), any(), any(), any())).thenReturn(true);
     WorkflowStub primaryStub = mock(WorkflowStub.class);
     when(workflowClient.newUntypedWorkflowStub(STC_POSITION_WF_ID)).thenReturn(primaryStub);
     doThrow(
@@ -763,7 +771,7 @@ class FillDispatcherImplTest {
   @Test
   void dispatch_entryStragglerDoubleNotFound_staysBenign() {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(COPYTRADE_ENTRY_ROW));
-    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any()))
+    when(journal.markFilled(eq(COPYTRADE_ENTRY_INTENT_KEY), anyLong(), any(), any(), any()))
         .thenReturn(true);
     String parentId = "t-dev/s-copytrade-v1/sig/sig-42";
     String positionId =
@@ -800,7 +808,7 @@ class FillDispatcherImplTest {
     // FILLED — markFilled runs before the signal — so the row never sticks at SUBMITTED. Previously
     // the dispatcher only signalled and swallowed the NOT_FOUND, leaving the row stranded.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
     WorkflowExecution exec =
         WorkflowExecution.newBuilder().setWorkflowId("t-dev/s-copytrade-v1/sig/sig-42").build();
     doThrow(new WorkflowNotFoundException(exec, "CopytradeSignalWorkflow", null))
@@ -814,7 +822,8 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
@@ -826,14 +835,14 @@ class FillDispatcherImplTest {
     // failure still leaves the row FILLED and propagates for retry — the position is never
     // stranded even if the signal genuinely fails.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
     doThrow(new RuntimeException("temporal boom"))
         .when(workflowStub)
         .signal(eq("onFill"), org.mockito.ArgumentMatchers.any());
 
     assertThatThrownBy(() -> dispatcher.dispatch(FILL)).hasMessage("temporal boom");
 
-    verify(journal).markFilled(eq("ck-42"), anyLong(), any(), any());
+    verify(journal).markFilled(eq("ck-42"), anyLong(), any(), any(), any());
     assertThat(registry.counter("fill_listener.signal_errors").count()).isEqualTo(1.0);
     assertThat(registry.counter("fill_listener.signal_workflow_not_found").count()).isEqualTo(0.0);
     assertThat(registry.counter("fill_listener.events_dispatched").count()).isEqualTo(0.0);
@@ -847,7 +856,7 @@ class FillDispatcherImplTest {
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
     doThrow(new RuntimeException("journal boom"))
         .when(journal)
-        .markFilled(eq("ck-42"), anyLong(), any(), any());
+        .markFilled(eq("ck-42"), anyLong(), any(), any(), any());
 
     assertThatThrownBy(() -> dispatcher.dispatch(FILL)).hasMessage("journal boom");
 
@@ -867,7 +876,7 @@ class FillDispatcherImplTest {
 
     dispatcher.dispatch(PARTIAL_FILL);
 
-    verify(journal, never()).markFilled(anyString(), anyLong(), any(), any());
+    verify(journal, never()).markFilled(anyString(), anyLong(), any(), any(), any());
 
     verify(workflowClient).newUntypedWorkflowStub("t-dev/s-copytrade-v1/sig/sig-42");
     ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
@@ -889,7 +898,7 @@ class FillDispatcherImplTest {
     // #250 AC #2 / derived: a complete WS fill (filledQty 5 >= order.qty 5) terminalizes the
     // journal exactly as before — with the event's full qty/price/time.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(FILL);
 
@@ -898,7 +907,8 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
   }
 
   @Test
@@ -907,7 +917,7 @@ class FillDispatcherImplTest {
     // (filledQty 5) ends with the journal FILLED at the FULL qty — never at the partial qty. The
     // partial leaves the row untouched (no markFilled); only the full fill terminalizes.
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(PARTIAL_FILL);
     dispatcher.dispatch(FILL);
@@ -919,8 +929,9 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
-    verify(journal, never()).markFilled(eq("ck-42"), eq(2L), any(), any());
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
+    verify(journal, never()).markFilled(eq("ck-42"), eq(2L), any(), any(), any());
   }
 
   @Test
@@ -938,7 +949,7 @@ class FillDispatcherImplTest {
             OffsetDateTime.parse("2026-05-19T17:08:11Z"),
             BrokerFillEvent.Source.POLL);
     when(journal.findByBrokerOrderId("brk-42")).thenReturn(Optional.of(ROW));
-    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any())).thenReturn(true);
+    when(journal.markFilled(eq("ck-42"), anyLong(), any(), any(), any())).thenReturn(true);
 
     dispatcher.dispatch(pollFill);
 
@@ -947,6 +958,7 @@ class FillDispatcherImplTest {
             eq("ck-42"),
             eq(5L),
             eq(new BigDecimal("0.84")),
-            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")));
+            eq(OffsetDateTime.parse("2026-05-19T17:08:11Z")),
+            any());
   }
 }
