@@ -1415,9 +1415,23 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * {@code partialPlaceRetryArmed} is true only in the instant between the timer firing and the
    * main loop draining it. Gating on the armed bit alone was a review-caught silent-loss bug: a
    * roll inside the pending window discarded the re-drive (the 2026-06-25 QQQ incident class).
+   *
+   * <p>Issue #826: {@code Workflow.isEveryHandlerFinished()} closes the in-flight-handler window —
+   * update AND signal handlers both (SDK 1.27 counts both; queries and validators cannot yield and
+   * never register). An operator Update ({@code arm_trail}, {@code disarm_trail}, {@code
+   * correct_booked_lot}) parks on its audit activity mid-handler; the state fields it mutates are
+   * all carried, so a roll in that window loses no state — but continue-as-new ABORTS the parked
+   * handler and the operator's call errors after its effect already applied. Stricter-only and no
+   * PositionWorkflow has ever recorded a continue-as-new (verified against prod Temporal
+   * 2026-08-31), so this needs no version gate: no existing history can contain a roll this
+   * conjunct would now suppress. Accepted trade-off: the audit stub retries unbounded, so a DEAD
+   * audit service parks a handler — and now suppresses the roll — until audit recovers, while
+   * history keeps growing toward Temporal's 51.2k hard cap; months of headroom at measured tick
+   * rates, and the same unbounded-audit posture the repo already accepts elsewhere.
    */
   private boolean rollBarrierHolds() {
-    return remainingQty > 0
+    return Workflow.isEveryHandlerFinished()
+        && remainingQty > 0
         && positionConfirmed
         && !exitInFlight
         && lastFillEvent == null
