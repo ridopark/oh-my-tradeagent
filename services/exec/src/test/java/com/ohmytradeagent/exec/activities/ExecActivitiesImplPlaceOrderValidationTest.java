@@ -278,7 +278,11 @@ class ExecActivitiesImplPlaceOrderValidationTest {
 
     @Override
     public boolean markFilled(
-        String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt) {
+        String intentKey,
+        long filledQty,
+        BigDecimal avgFillPrice,
+        OffsetDateTime filledAt,
+        String detectedVia) {
       throw fail();
     }
 

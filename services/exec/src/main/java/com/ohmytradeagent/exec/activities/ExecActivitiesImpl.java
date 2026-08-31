@@ -241,7 +241,11 @@ public class ExecActivitiesImpl implements ExecActivities {
         }
         if (detail != null && detail.filledQty() >= row.qty()) {
           journal.markFilled(
-              intentKey, detail.filledQty(), detail.avgFillPrice(), detail.filledAt());
+              intentKey,
+              detail.filledQty(),
+              detail.avgFillPrice(),
+              detail.filledAt(),
+              "cancel_reconcile");
         } else if (detail != null && detail.filledQty() > 0) {
           journal.markCancelledWithFill(
               intentKey, detail.filledQty(), detail.avgFillPrice(), detail.filledAt());
@@ -256,7 +260,8 @@ public class ExecActivitiesImpl implements ExecActivities {
         // can spawn the missing PositionWorkflow instead of orphaning the position. A repeat
         // call lands as a no-op (markFilled is conditional on RECORDED/SUBMITTED state).
         BrokerFillDetail fill = broker.getFillDetail(row.brokerOrderId());
-        journal.markFilled(intentKey, fill.filledQty(), fill.avgFillPrice(), fill.filledAt());
+        journal.markFilled(
+            intentKey, fill.filledQty(), fill.avgFillPrice(), fill.filledAt(), "cancel_reconcile");
       }
     }
     return journal.findByIntentKey(intentKey).map(ExecActivitiesImpl::result).orElseThrow();

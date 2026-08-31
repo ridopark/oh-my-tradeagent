@@ -177,9 +177,19 @@ public interface OrderIntentJournal {
    * via reconciliation. Transitions state to FILLED and records fill detail. Conditional on current
    * state in (RECORDED, SUBMITTED) so a repeat call is a no-op; returns true iff the row was
    * updated.
+   *
+   * <p>Issue #836: {@code detectedVia} names the mechanism that DISCOVERED the fill ('ws', 'poll',
+   * 'cancel_reconcile', 'recon') — durable per-order attribution, because metrics counters and pod
+   * logs die with the pod and the #719 soak closed with two real-money late catches nobody could
+   * attribute. Written only on the winning (state-transitioning) call, so a WS/POLL redelivery race
+   * records whichever net actually terminalized the row.
    */
   boolean markFilled(
-      String intentKey, long filledQty, BigDecimal avgFillPrice, OffsetDateTime filledAt);
+      String intentKey,
+      long filledQty,
+      BigDecimal avgFillPrice,
+      OffsetDateTime filledAt,
+      String detectedVia);
 
   /**
    * Terminalizes a row whose broker order expired unfilled. Guarded, boolean-returning (modeled on

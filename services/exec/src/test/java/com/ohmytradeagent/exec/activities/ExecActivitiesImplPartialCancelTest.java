@@ -107,9 +107,25 @@ class ExecActivitiesImplPartialCancelTest {
 
     exec.cancelOrder("wf-1:entry");
 
-    verify(journal).markFilled("wf-1:entry", 21L, new BigDecimal("2.79"), T);
+    verify(journal).markFilled("wf-1:entry", 21L, new BigDecimal("2.79"), T, "cancel_reconcile");
     verify(journal, never()).markCancelledWithFill(anyString(), anyLong(), any(), any());
     verify(journal, never()).markCancelled(anyString());
+  }
+
+  /**
+   * #836 (review catch): the ALREADY_FILLED branch's attribution was never asserted anywhere — the
+   * IT checks state/qty/price but not detected_via, so a mis-tag there survived the suite. Same
+   * mechanism family as the stale-cancel-response race above: a cancel DISCOVERED the fill.
+   */
+  @Test
+  void alreadyFilled_reconcilesWithCancelReconcileAttribution() {
+    when(broker.cancelOrder("brk-1")).thenReturn(CancelResponse.alreadyFilled("already filled"));
+    when(broker.getFillDetail("brk-1"))
+        .thenReturn(new BrokerFillDetail(21L, new BigDecimal("2.79"), T));
+
+    exec.cancelOrder("wf-1:entry");
+
+    verify(journal).markFilled("wf-1:entry", 21L, new BigDecimal("2.79"), T, "cancel_reconcile");
   }
 
   @Test

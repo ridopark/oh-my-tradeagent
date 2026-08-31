@@ -138,15 +138,24 @@ public class FillDispatcherImpl implements FillDispatcher {
     // terminalizes, and it carries the full qty. The onFill signal below is intentionally still
     // sent for partials so partial-fill signalling is preserved.
     if (event.filledQty() >= order.qty()) {
+      // #836: attribute the terminalization to the net that delivered it. The conditional
+      // markFilled means a WS/POLL redelivery race records whichever actually won the row.
+      String detectedVia = event.source() == BrokerFillEvent.Source.POLL ? "poll" : "ws";
       boolean terminalized =
           journal.markFilled(
-              order.intentKey(), event.filledQty(), event.avgFillPrice(), event.filledAt());
+              order.intentKey(),
+              event.filledQty(),
+              event.avgFillPrice(),
+              event.filledAt(),
+              detectedVia);
       if (terminalized) {
         log.info(
-            "fill-dispatcher journal terminalized FILLED intent_key={} broker_order_id={} qty={}",
+            "fill-dispatcher journal terminalized FILLED intent_key={} broker_order_id={} qty={}"
+                + " detected_via={}",
             order.intentKey(),
             event.brokerOrderId(),
-            event.filledQty());
+            event.filledQty(),
+            detectedVia);
       }
     } else {
       log.debug(
