@@ -804,6 +804,141 @@ class PositionWorkflowImplContinueAsNewTest {
     assertThat(after.peakPremium()).isEqualByComparingTo(new BigDecimal("3.00"));
   }
 
+  /**
+   * Issue #837 (companion to the #826 barrier tests above, reusing this file's parked-handler
+   * machinery): NORMAL COMPLETION must also wait for an in-flight handler. A full exit drains
+   * {@code remainingQty} to 0 while a {@code disarm_trail} handler is parked on its audit activity
+   * — without the completion await, {@code run()} returns and the parked handler is abandoned
+   * (state applied, operator's call errors), the exact #826 symptom at a different exit door. The
+   * watermark stays at its 10k default here, so the roll barrier never participates.
+   */
+  @Test
+  void completion_awaitsParkedUpdateHandler() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("TrailDisarmed".equals(e.getKind())) {
+                auditGate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    String wfId = "pos-close-update-parked";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
+    confirmEntry(stub, 4L);
+    stub.armChandelier(armPayload(wfId, "src-1", new BigDecimal("3.00"), new BigDecimal("0.20")));
+    waitForArmed(stub);
+
+    com.ohmytradeagent.contract.DisarmTrailRequest disarm =
+        new com.ohmytradeagent.contract.DisarmTrailRequest();
+    disarm.setSchemaVersion(1L);
+    disarm.setOperatorId("ops-1");
+    disarm.setReason("837 completion test");
+    io.temporal.client.WorkflowUpdateHandle<com.ohmytradeagent.contract.DisarmTrailResult> handle =
+        WorkflowStub.fromTyped(stub)
+            .startUpdate(
+                "disarm_trail",
+                io.temporal.client.WorkflowUpdateStage.ACCEPTED,
+                com.ohmytradeagent.contract.DisarmTrailResult.class,
+                disarm);
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline && stub.trailingState().armed()) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.trailingState().armed()).isFalse();
+
+    // Full exit while the handler is parked: places, fills, drains remainingQty to 0 — the run()
+    // epilogue is now free to return, and only the completion await stands between it and
+    // abandoning the operator's update.
+    stub.partialExit(partialExitRequest("sig-full", wfId, 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-exit", 4L, new BigDecimal("2.60")));
+
+    Thread.sleep(1000);
+    assertThat(describe(wfId).getWorkflowExecutionInfo().getStatus())
+        .as("the workflow must stay RUNNING while an update handler is parked")
+        .isEqualTo(
+            io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING);
+
+    auditGate.countDown();
+    com.ohmytradeagent.contract.DisarmTrailResult result =
+        handle.getResultAsync().get(50, java.util.concurrent.TimeUnit.SECONDS);
+    assertThat(result.getStatus())
+        .as("the update must complete, not be abandoned by workflow completion")
+        .isEqualTo(com.ohmytradeagent.contract.DisarmTrailResult.Status.DISARMED);
+    // And the workflow now completes normally.
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(describe(wfId).getWorkflowExecutionInfo().getStatus())
+        .isEqualTo(
+            io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_COMPLETED);
+  }
+
+  /**
+   * Issue #837, never-filled door (review catch: a mutant deleting the awaits at ONLY the
+   * never-filled + worthless-expiry sites survived the suite). {@code arm_trail} has no fill gate,
+   * so an operator arm can park on its ChandelierArmed audit while the first-fill TTL expires — the
+   * never-filled return must wait for it exactly like the epilogue doors.
+   */
+  @Test
+  void neverFilledCompletion_awaitsParkedArmTrailHandler() throws Exception {
+    java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("ChandelierArmed".equals(e.getKind())) {
+                auditGate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    String wfId = "pos-neverfilled-arm-parked";
+    PositionWorkflow stub = newStub(wfId);
+    PositionWorkflowInput in = futureInput(5);
+    in.setFirstFillTtlSecs(2L);
+    WorkflowStub.fromTyped(stub).start(in);
+    // NO confirmEntry — the position never fills and the 2s TTL expires underneath the parked arm.
+
+    ArmTrailRequest arm = new ArmTrailRequest();
+    arm.setSchemaVersion(1L);
+    arm.setOperatorId("ops-1");
+    arm.setPeakPremium(new BigDecimal("3.00"));
+    arm.setGivebackPct(new BigDecimal("0.20"));
+    io.temporal.client.WorkflowUpdateHandle<com.ohmytradeagent.contract.ArmTrailResult> handle =
+        WorkflowStub.fromTyped(stub)
+            .startUpdate(
+                "arm_trail",
+                io.temporal.client.WorkflowUpdateStage.ACCEPTED,
+                com.ohmytradeagent.contract.ArmTrailResult.class,
+                arm);
+    waitForArmed(stub);
+    assertThat(stub.trailingState().armed()).isTrue();
+
+    // Let the first-fill TTL fire (PositionNeverFilled audits and run() reaches the never-filled
+    // return) while the arm handler is still parked on its latched audit.
+    Thread.sleep(3500);
+    assertThat(describe(wfId).getWorkflowExecutionInfo().getStatus())
+        .as("the never-filled return must stay RUNNING while an update handler is parked")
+        .isEqualTo(
+            io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING);
+
+    auditGate.countDown();
+    com.ohmytradeagent.contract.ArmTrailResult result =
+        handle.getResultAsync().get(50, java.util.concurrent.TimeUnit.SECONDS);
+    assertThat(result.getStatus())
+        .isEqualTo(com.ohmytradeagent.contract.ArmTrailResult.Status.ARMED);
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+    assertThat(describe(wfId).getWorkflowExecutionInfo().getStatus())
+        .isEqualTo(
+            io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_COMPLETED);
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {
