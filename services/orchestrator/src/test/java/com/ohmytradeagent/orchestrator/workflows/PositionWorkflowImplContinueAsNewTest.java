@@ -650,6 +650,160 @@ class PositionWorkflowImplContinueAsNewTest {
     assertThat(intent.getValue().getSide()).isEqualTo(OrderIntent.Side.SELL);
   }
 
+  /**
+   * Issue #826: an operator Update parked on its audit activity must block the roll. The disarm
+   * handler resets the trail FIRST and audits AFTER, so while the audit is latched the position
+   * looks perfectly quiet to every other barrier conjunct — without {@code
+   * Workflow.isEveryHandlerFinished()} the roll fires here and continue-as-new aborts the parked
+   * handler: the operator's call errors even though the disarm already applied. The test parks the
+   * handler, pushes history far past the watermark (no roll may happen), then releases the audit
+   * and requires BOTH that the update completes with DISARMED and that the roll then proceeds.
+   */
+  @Test
+  void inFlightUpdateHandler_blocksRoll_untilFinished() throws Exception {
+    setWatermark(60L);
+    java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("TrailDisarmed".equals(e.getKind())) {
+                auditGate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    String wfId = "pos-can-update-parked";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    String firstRunId = currentRunId(wfId);
+    confirmEntry(stub, 5L);
+    stub.armChandelier(armPayload(wfId, "src-1", new BigDecimal("3.00"), new BigDecimal("0.20")));
+    waitForArmed(stub);
+
+    com.ohmytradeagent.contract.DisarmTrailRequest disarm =
+        new com.ohmytradeagent.contract.DisarmTrailRequest();
+    disarm.setSchemaVersion(1L);
+    disarm.setOperatorId("ops-1");
+    disarm.setReason("826 barrier test");
+    io.temporal.client.WorkflowUpdateHandle<com.ohmytradeagent.contract.DisarmTrailResult> handle =
+        WorkflowStub.fromTyped(stub)
+            .startUpdate(
+                "disarm_trail",
+                io.temporal.client.WorkflowUpdateStage.ACCEPTED,
+                com.ohmytradeagent.contract.DisarmTrailResult.class,
+                disarm);
+
+    // The handler is genuinely mid-flight: its state reset is already visible while its audit
+    // activity is still latched open.
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline && stub.trailingState().armed()) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.trailingState().armed()).isFalse();
+
+    // Tick pressure far past the watermark: everything else is quiet, so only the unfinished
+    // handler stands between this position and a roll that would abort the operator's update.
+    for (int i = 0; i < 30; i++) {
+      stub.chandelierTick(tick(new BigDecimal("2.50")));
+      Thread.sleep(20);
+    }
+    Thread.sleep(500);
+    assertThat(currentRunId(wfId))
+        .as("a parked update handler must block the roll")
+        .isEqualTo(firstRunId);
+
+    auditGate.countDown();
+    com.ohmytradeagent.contract.DisarmTrailResult result =
+        handle.getResultAsync().get(50, java.util.concurrent.TimeUnit.SECONDS);
+    assertThat(result.getStatus())
+        .as("the update must complete, not be aborted by a roll")
+        .isEqualTo(com.ohmytradeagent.contract.DisarmTrailResult.Status.DISARMED);
+
+    // Handler finished — the barrier reopens and the roll proceeds.
+    String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
+    assertThat(newRunId)
+        .as("once the handler finishes, the roll proceeds")
+        .isNotEqualTo(firstRunId);
+    assertThat(stub.trailingState().armed()).isFalse();
+    assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+  }
+
+  /**
+   * Issue #826 companion: the ARM window. Unlike disarm, a parked {@code arm_trail} handler runs
+   * with {@code trailingArmed} already true (state is set before its ChandelierArmed audit), so
+   * this pins the barrier for the opposite trail state — a mutant that opens the barrier whenever
+   * {@code trailingArmed} is true (e.g. {@code trailingArmed || isEveryHandlerFinished()}) passes
+   * the disarm test but is killed here.
+   */
+  @Test
+  void inFlightArmTrailHandler_blocksRoll_untilFinished() throws Exception {
+    setWatermark(60L);
+    java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("ChandelierArmed".equals(e.getKind())) {
+                auditGate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    String wfId = "pos-can-arm-parked";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(5));
+    String firstRunId = currentRunId(wfId);
+    confirmEntry(stub, 5L);
+
+    ArmTrailRequest arm = new ArmTrailRequest();
+    arm.setSchemaVersion(1L);
+    arm.setOperatorId("ops-1");
+    arm.setPeakPremium(new BigDecimal("3.00"));
+    arm.setGivebackPct(new BigDecimal("0.20"));
+    io.temporal.client.WorkflowUpdateHandle<com.ohmytradeagent.contract.ArmTrailResult> handle =
+        WorkflowStub.fromTyped(stub)
+            .startUpdate(
+                "arm_trail",
+                io.temporal.client.WorkflowUpdateStage.ACCEPTED,
+                com.ohmytradeagent.contract.ArmTrailResult.class,
+                arm);
+
+    // Mid-flight discriminator for THIS window: armed is already true while the ChandelierArmed
+    // audit is still latched open.
+    waitForArmed(stub);
+    assertThat(stub.trailingState().armed()).isTrue();
+
+    // Neutral ticks (below peak 3.00, above threshold 2.40) push history past the watermark while
+    // the handler is parked WITH an armed trail — the arm-window twin of the disarm test.
+    for (int i = 0; i < 30; i++) {
+      stub.chandelierTick(tick(new BigDecimal("2.50")));
+      Thread.sleep(20);
+    }
+    Thread.sleep(500);
+    assertThat(currentRunId(wfId))
+        .as("a parked arm_trail handler must block the roll")
+        .isEqualTo(firstRunId);
+
+    auditGate.countDown();
+    com.ohmytradeagent.contract.ArmTrailResult result =
+        handle.getResultAsync().get(50, java.util.concurrent.TimeUnit.SECONDS);
+    assertThat(result.getStatus())
+        .as("the update must complete, not be aborted by a roll")
+        .isEqualTo(com.ohmytradeagent.contract.ArmTrailResult.Status.ARMED);
+
+    // Handler finished — the roll proceeds and the just-armed trail survives it intact.
+    String newRunId = feedTicksUntilRolled(stub, wfId, firstRunId);
+    assertThat(newRunId)
+        .as("once the handler finishes, the roll proceeds")
+        .isNotEqualTo(firstRunId);
+    TrailingState after = stub.trailingState();
+    assertThat(after.armed()).isTrue();
+    assertThat(after.peakPremium()).isEqualByComparingTo(new BigDecimal("3.00"));
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {
