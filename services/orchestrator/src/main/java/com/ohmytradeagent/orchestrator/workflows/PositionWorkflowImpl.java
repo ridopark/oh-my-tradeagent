@@ -1549,6 +1549,31 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     return next;
   }
 
+  /**
+   * Issue #837: completing the workflow ABANDONS any in-flight update/signal handler (default
+   * {@code HandlerUnfinishedPolicy} WARN_AND_ABANDON) — the same operator-visible symptom the #826
+   * barrier conjunct fixed at the roll: an operator's {@code disarm_trail}/{@code arm_trail}/{@code
+   * correct_booked_lot} parked on its audit activity has its state applied but its call errors.
+   * Called before every {@code run()} return so the parked handler finishes (audit row lands, the
+   * operator gets their response) before the workflow closes.
+   *
+   * <p>Replay-safe UN-gated: {@code Workflow.await} emits no command ever, and when every handler
+   * is already finished (the overwhelmingly common case) it does not even yield. A RUNNING
+   * execution's recorded prefix cannot contain a return-site traversal (it would be completed), and
+   * completed histories are only replayed by the legacy fixtures — none of which parks a handler
+   * across its close. Accepted trade-off, same as the #826 conjunct's: a handler parked on the
+   * unbounded-retry audit stub holds the workflow OPEN until audit recovers.
+   *
+   * <p>Two doors deliberately stay open: a workflow FAILURE (a non-retryable ApplicationFailure
+   * propagating out of {@code run()}) still abandons parked handlers — failure paths must not be
+   * delayed by an audit outage; and a PRE-fix completed history in which a handler really was
+   * abandoned at close would, if ever replayed (reset), block at this await — rare, and the blast
+   * radius is a failed workflow task, not a trade.
+   */
+  private void awaitHandlersFinishedBeforeClose() {
+    Workflow.await(Workflow::isEveryHandlerFinished);
+  }
+
   @Override
   public String run(PositionWorkflowInput in) {
     this.input = in;
@@ -1745,6 +1770,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                 expectedQty,
                 "ttl_secs",
                 firstFillTtlSecs));
+        awaitHandlersFinishedBeforeClose();
         return Workflow.getInfo().getWorkflowId();
       }
       // First fill confirms the position. remainingQty MUST come from the fill, not input.qty —
@@ -1814,6 +1840,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
         && expiryDate != null
         && !expiryDate.isAfter(currentEtDate())
         && maybeCloseWorthlessAtExpiry("expiry")) {
+      awaitHandlersFinishedBeforeClose();
       return Workflow.getInfo().getWorkflowId();
     }
 
@@ -2109,6 +2136,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               "contract_symbol", input.getContractSymbol(),
               "remaining_qty", remainingQty));
 
+      awaitHandlersFinishedBeforeClose();
       return Workflow.getInfo().getWorkflowId();
     }
 
@@ -2313,6 +2341,7 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             "contract_symbol", input.getContractSymbol(),
             "remaining_qty", remainingQty));
 
+    awaitHandlersFinishedBeforeClose();
     return Workflow.getInfo().getWorkflowId();
   }
 
