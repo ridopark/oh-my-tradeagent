@@ -939,6 +939,97 @@ class PositionWorkflowImplContinueAsNewTest {
             io.temporal.api.enums.v1.WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_COMPLETED);
   }
 
+  /**
+   * Issue #840 (found by #837's review): an {@code arm_trail} landing in the alive-but-done window
+   * — position drained to zero while a sibling handler holds the workflow open at the completion
+   * await — must be REJECTED ({@code position_drained}) and must open NO premium subscription,
+   * instead of returning ARMED on a position that no longer exists and leaking the subscription.
+   */
+  @Test
+  void armTrail_onDrainedPosition_rejectsAndOpensNoSubscription() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
+    Mockito.doAnswer(
+            inv -> {
+              AuditEvent e = inv.getArgument(0);
+              if ("TrailDisarmed".equals(e.getKind())) {
+                auditGate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+              }
+              return null;
+            })
+        .when(audit)
+        .log(any());
+
+    String wfId = "pos-drained-arm-rejected";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub).start(futureInput(4));
+    confirmEntry(stub, 4L);
+    stub.armChandelier(armPayload(wfId, "src-1", new BigDecimal("3.00"), new BigDecimal("0.20")));
+    waitForArmed(stub);
+
+    com.ohmytradeagent.contract.DisarmTrailRequest disarm =
+        new com.ohmytradeagent.contract.DisarmTrailRequest();
+    disarm.setSchemaVersion(1L);
+    disarm.setOperatorId("ops-1");
+    disarm.setReason("hold the workflow open");
+    io.temporal.client.WorkflowUpdateHandle<com.ohmytradeagent.contract.DisarmTrailResult>
+        disarmHandle =
+            WorkflowStub.fromTyped(stub)
+                .startUpdate(
+                    "disarm_trail",
+                    io.temporal.client.WorkflowUpdateStage.ACCEPTED,
+                    com.ohmytradeagent.contract.DisarmTrailResult.class,
+                    disarm);
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (System.currentTimeMillis() < deadline && stub.trailingState().armed()) {
+      Thread.sleep(50);
+    }
+    assertThat(stub.trailingState().armed()).isFalse();
+
+    // Drain the lot: the workflow is now alive-but-done, held open only by the parked disarm.
+    stub.partialExit(partialExitRequest("sig-full", wfId, 1.0));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-exit", 4L, new BigDecimal("2.60")));
+    Thread.sleep(500);
+    assertThat(stub.positionState().remainingQty()).isZero();
+
+    long subscriptionsBefore =
+        Mockito.mockingDetails(marketData).getInvocations().stream()
+            .filter(i -> i.getMethod().getName().equals("subscribePremium"))
+            .count();
+
+    ArmTrailRequest arm = new ArmTrailRequest();
+    arm.setSchemaVersion(1L);
+    arm.setOperatorId("ops-2");
+    arm.setPeakPremium(new BigDecimal("3.00"));
+    arm.setGivebackPct(new BigDecimal("0.20"));
+    com.ohmytradeagent.contract.ArmTrailResult armResult =
+        WorkflowStub.fromTyped(stub)
+            .update("arm_trail", com.ohmytradeagent.contract.ArmTrailResult.class, arm);
+
+    assertThat(armResult.getStatus())
+        .as("arming a drained position must reject, not report ARMED")
+        .isEqualTo(com.ohmytradeagent.contract.ArmTrailResult.Status.REJECTED);
+    assertThat(armResult.getReason()).isEqualTo("position_drained");
+    long subscriptionsAfter =
+        Mockito.mockingDetails(marketData).getInvocations().stream()
+            .filter(i -> i.getMethod().getName().equals("subscribePremium"))
+            .count();
+    assertThat(subscriptionsAfter)
+        .as("a rejected arm must open NO premium subscription")
+        .isEqualTo(subscriptionsBefore);
+    assertThat(stub.trailingState().armed()).isFalse();
+
+    auditGate.countDown();
+    assertThat(
+            disarmHandle
+                .getResultAsync()
+                .get(50, java.util.concurrent.TimeUnit.SECONDS)
+                .getStatus())
+        .isEqualTo(com.ohmytradeagent.contract.DisarmTrailResult.Status.DISARMED);
+    WorkflowStub.fromTyped(stub).getResult(String.class);
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {

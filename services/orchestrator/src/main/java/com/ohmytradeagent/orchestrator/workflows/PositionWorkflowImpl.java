@@ -3129,6 +3129,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     ArmTrailResult result = new ArmTrailResult();
     result.setSchemaVersion(1L);
 
+    // #840: a DRAINED position (was filled, remaining lot now zero) must reject honestly, BEFORE
+    // any activity — every sibling operator entry point already does (partialExit
+    // position_already_drained, forceClose/partialClose NOOP_ALREADY_CLOSED, correct_booked_lot
+    // REJECTED_NOT_CORRECTABLE). Without this, an arm landing in the alive-but-done window (#837
+    // widened it from milliseconds to as long as a sibling handler stays parked) opened a premium
+    // subscription nothing tears down and told the operator ARMED on a position that no longer
+    // exists. Gated on positionConfirmed: a PRE-fill position also has remainingQty == 0, and
+    // arming ahead of the first fill is legitimate (the trail activates with the lot).
+    if (positionConfirmed && remainingQty <= 0) {
+      auditLog(
+          KIND_CHANDELIER_ARM_REJECTED,
+          subject(
+              "reason", "position_drained",
+              "source", "operator",
+              "operator_id", request.getOperatorId(),
+              "peak_premium", request.getPeakPremium(),
+              "giveback_pct", request.getGivebackPct()));
+      result.setStatus(ArmTrailResult.Status.REJECTED);
+      result.setReason("position_drained");
+      return result;
+    }
+
     if (trailingArmed) {
       // Idempotent, and deliberately does NOT re-arm: a double-click (or two operators, or two
       // tabs) must never widen a stop that is already protecting this lot. Echoes what is actually
