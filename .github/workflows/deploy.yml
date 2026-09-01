@@ -109,6 +109,11 @@ on:
 
 permissions:
   contents: read
+  # #842: the baseline query reads this workflow's own run history + per-run jobs
+  # (/actions/workflows/deploy.yml/runs, /actions/runs/{id}/jobs). Without this the
+  # calls 403 into their || true guards and the whole baseline mechanism silently
+  # no-ops back to single-commit diffing — the bug it exists to fix.
+  actions: read
 
 concurrency:
   group: deploy-homelab
@@ -163,9 +168,12 @@ jobs:
         # All inputs handed through `env:` so the script is pure shell — no
         # mixing of GitHub-expression and shell-expression contexts.
         #   - workflow_dispatch: the chosen service, or `all` (operator reconcile).
-        #   - workflow_run (auto): DIFF-SCOPED — map the triggering commit's changed
-        #     files to affected services so we never roll an unrelated service. gh is
-        #     preinstalled on ubuntu runners; contents:read covers the commits API.
+        #   - workflow_run (auto): DIFF-SCOPED — map the changed files SINCE THE LAST
+        #     SUCCESSFUL auto-deploy to affected services so we never roll an
+        #     unrelated service, and never DROP a superseded commit's services
+        #     (#842). gh is preinstalled on ubuntu runners; contents:read covers
+        #     the commits + compare APIs, and the actions-runs/jobs baseline
+        #     queries need the workflow-level `actions: read` grant.
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_SERVICE: ${{ github.event.inputs.service }}
@@ -187,7 +195,61 @@ jobs:
           fi
 
           # --- workflow_run: diff-based matrix ---
-          files=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" --jq '.files[].filename' || true)
+          # #842: diff since the LAST SUCCESSFUL auto-deploy, not the triggering commit
+          # alone. Observed 2026-08-31: two merges minutes apart — the first commit's
+          # image build was CANCELLED by the concurrency group, its deploy skipped
+          # (correctly), and the second commit's deploy diff-scoped to ITS OWN files
+          # only, silently leaving the first commit's exec change built, tagged, and
+          # unrolled. Nothing was red. Baseline = the newest SUCCESSFUL workflow_run
+          # deploy of this workflow (dispatch successes are deliberately NOT baselines:
+          # a single-service dispatch at sha X proves nothing about X's other
+          # services; skipping them only widens the diff, and over-rolling is the safe
+          # direction). The compare API returns at most 300 files — far above any
+          # realistic merge gap here; if it ever truncates, extra services simply
+          # fall out of the diff-scope into the manual-dispatch path like today.
+          # Review F1: a run can conclude "success" having deployed NOTHING — preflight
+          # exits 0 with enabled=false (DEPLOY_ENABLED off / kubeconfig absent) and every
+          # other job skips. Such a run must NOT be a baseline, or a re-enable after a
+          # disabled window silently drops the window's merges (the #842 class through a
+          # different door). A real baseline has EITHER a successful "Roll *" job OR the
+          # successful "Notify (nothing to roll)" job (docs-only runs ARE valid baselines:
+          # nothing needed rolling, so the estate matches that sha). Candidates capped at
+          # 10 jobs-API lookups; in practice the first candidate matches.
+          BASE_SHA=""
+          candidates=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?status=success&per_page=50" \
+            --jq '[.workflow_runs[] | select(.event == "workflow_run")][:10][] | [(.id|tostring), .head_sha] | @tsv' 2>/dev/null || true)
+          while IFS=$'\t' read -r rid rsha; do
+            [ -z "$rid" ] && continue
+            rolled=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}/jobs?per_page=50" \
+              --jq '[.jobs[] | select(((.name | startswith("Roll ")) or .name == "Notify (nothing to roll)") and .conclusion == "success")] | length' 2>/dev/null || echo 0)
+            if [ "${rolled:-0}" -gt 0 ]; then
+              BASE_SHA="$rsha"
+              break
+            fi
+            echo "::notice::Skipping phantom baseline candidate ${rsha} (run ${rid}: success but nothing rolled)"
+          done <<< "$candidates"
+          files=""
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "null" ] && [ "$BASE_SHA" != "$HEAD_SHA" ]; then
+            echo "::notice::Diff baseline: last successful auto-deploy ${BASE_SHA} -> ${HEAD_SHA}"
+            files=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.files[].filename' || true)
+          fi
+          if [ -z "$files" ]; then
+            # No usable baseline (first-ever auto-deploy, same-sha re-run, a compare
+            # failure, or a genuinely net-empty span such as a clean revert of an
+            # un-deployed commit) — fall back to the triggering commit's own diff,
+            # today's behavior. Over-rolls on the net-empty case; never under-rolls.
+            echo "::notice::Compare yielded no files (base='${BASE_SHA:-none}'); falling back to single-commit diff of ${HEAD_SHA}"
+            files=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" --jq '.files[].filename' || true)
+          fi
+          # Review F3: the compare API silently caps .files at 300. A truncated list
+          # under-rolls while looking complete — the one failure mode worse than an
+          # extra restart. 300 files needs a baseline that aged across many merges
+          # (deploys red for days), so over-roll everything and say so.
+          ROLL_ALL_TRUNCATED=""
+          if [ "$(printf '%s\n' "$files" | wc -l)" -ge 300 ]; then
+            echo "::warning::Compare returned >=300 files (API cap) — diff may be TRUNCATED; rolling ALL services (over-roll is the safe direction)."
+            ROLL_ALL_TRUNCATED=1
+          fi
           if [ -z "$files" ]; then
             echo "::warning::Could not determine changed files for ${HEAD_SHA}; deploying nothing. Run deploy.yml manually (workflow_dispatch) if a rollout is needed."
             echo 'matrix={"service":[]}' >> "$GITHUB_OUTPUT"
@@ -195,6 +257,9 @@ jobs:
           fi
 
           declare -A want
+          if [ -n "$ROLL_ALL_TRUNCATED" ]; then
+            for s in $SERVICES; do want["$s"]=1; done
+          fi
           add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
           # ONE sidecar image, THREE Deployments — see the services/signal-source-discord case below.
           add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror; do want["$s"]=1; done; }
@@ -299,7 +364,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK_URL }}
         run: |
           set -uo pipefail
-          msg="CI passed and images built for \`${SHA:0:8}\`, but no service's code or manifest changed in that commit — nothing was rolled to homelab. This is expected for docs/config-only merges. If a rollout WAS expected, dispatch 'Deploy to homelab' manually. Build run: ${RUN_URL}"
+          msg="CI passed and images built for \`${SHA:0:8}\`, but no service's code or manifest changed since the last successful auto-deploy — nothing was rolled to homelab. This is expected for docs/config-only merges. If a rollout WAS expected, dispatch 'Deploy to homelab' manually. Build run: ${RUN_URL}"
           echo "$msg"
           { echo "## 🟡 Deploy ran, nothing to roll"; echo ""; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
