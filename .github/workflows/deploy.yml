@@ -1,4 +1,8 @@
 name: Deploy to homelab
+run-name: >-
+  Deploy to homelab — ${{ github.event_name }}
+  from ${{ github.event.workflow_run.head_repository.full_name || github.repository }}@${{ github.event.workflow_run.head_branch || github.ref_name }}
+  (by ${{ github.actor }})
 
 # Rolls one or more service Deployments on the homelab k3s cluster so they
 # re-pull the `:latest` image pushed by `build-images.yml`. All manifests in
@@ -140,7 +144,10 @@ jobs:
     # (workflow_dispatch always proceeds to the gate check below.)
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     outputs:
       enabled: ${{ steps.gate.outputs.enabled }}
       matrix: ${{ steps.matrix.outputs.matrix }}

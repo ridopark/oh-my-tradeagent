@@ -18,11 +18,20 @@ name: Deploy notifications
 #    (untrusted, PR-author-controlled code). This job only needs
 #    `scripts/discord-notify.sh`, nothing from the triggering commit, so its
 #    checkout intentionally takes NO `ref:` — it defaults to this
-#    workflow's own ref (`main`), never an attacker-controlled SHA, even
-#    though `branches: [main]` on the trigger below already excludes
-#    PR-triggered runs in practice (verified empirically: no `Deploy
-#    to homelab`-family run has ever fired off a `pull_request`-triggered
-#    build). Belt and suspenders, at zero functional cost.
+#    workflow's own ref (`main`), never an attacker-controlled SHA. This
+#    is load-bearing, NOT belt-and-suspenders.
+#
+#    CORRECTED: this comment previously claimed `branches: [main]` on the
+#    trigger below "already excludes PR-triggered runs in practice". It does
+#    not. `branches:` filters `workflow_run.head_branch` -- the head branch
+#    *name* of the triggering run -- and asserts nothing about which
+#    repository that run came from. A fork whose branch is named `main`
+#    satisfies it, and "Build and push images" triggers on `pull_request`
+#    (build-images.yml), so fork PRs do reach this trigger. The empirical
+#    check behind the old claim (no such run has ever fired) measured that
+#    nobody had tried, not that it was prevented. The `if:` below now
+#    asserts `head_repository.full_name == github.repository`, which is
+#    what `branches:` is commonly mistaken for.
 #
 # Two silent cases, two jobs:
 #   - notify-ci-failure: `build-images.yml` concluded anything other than
@@ -68,7 +77,11 @@ permissions:
 jobs:
   notify-ci-failure:
     name: Notify (deploy chain did not fire)
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success'
+    if: |
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       # Deliberately NO `ref:` override — see the file header. Checks out
