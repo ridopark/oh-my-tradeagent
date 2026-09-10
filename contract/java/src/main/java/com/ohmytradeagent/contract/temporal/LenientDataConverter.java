@@ -34,6 +34,16 @@ import io.temporal.common.converter.JacksonJsonPayloadConverter;
  * <p>The mapper starts from {@link JacksonJsonPayloadConverter#newDefaultObjectMapper()} so every
  * other serialization behavior (JavaTime handling, non-null inclusion) is byte-identical to the SDK
  * default — replay determinism depends on serialized payloads not changing shape.
+ *
+ * <p><b>What this leniency does NOT cover:</b> removed <i>enum constants</i>. {@code
+ * FAIL_ON_UNKNOWN_PROPERTIES} forgives an unknown KEY; an unknown VALUE for a known enum-typed
+ * field still throws {@code InvalidFormatException} (measured, not assumed). So deleting a constant
+ * from an enum that appears in any workflow input or activity result — {@code RejectionReason} on
+ * {@code RiskDecision}, for one — can wedge the replay of a history that recorded it. Before
+ * removing one, prove it was never emitted: {@code git log --all -S CONSTANT_NAME} and confirm it
+ * never appears outside the enum declaration and tests. If it WAS ever emitted, the constant has to
+ * stay (or the converter needs {@code READ_UNKNOWN_ENUM_VALUES_AS_NULL}, which would silently turn
+ * a real recorded reason into null — think before reaching for it).
  */
 public final class LenientDataConverter {
 
