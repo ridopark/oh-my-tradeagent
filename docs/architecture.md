@@ -161,7 +161,7 @@ flowchart TB
         CSW["CopytradeSignalWorkflow<br/>id: t-{t}/s-{s}/sig/{signal_id}<br/>signals: onFill, riskBreach<br/>query: entryStatus"]
         DRK["CopytradeDeriskWorkflow<br/>id: t-{t}/s-{s}/derisk/{signal_id}<br/>trim + arm trail on author cue"]
         WSESS["WatchlistTriggerSessionWorkflow<br/>id: t-{t}/s-{s}/wl/{et_date}/session<br/>fan-out ≤ 64 legs, EOD cancel sweep"]
-        WLEG["WatchlistTriggerWorkflow (child)<br/>id: …/wl/{et_date}/{ticker}/{C|P}<br/>signals: equityTick, onFill, cancel<br/>query: entryProximity"]
+        WLEG["WatchlistTriggerWorkflow (child)<br/>id: …/wl/{et_date}/{ticker}/{right}<br/>signals: equityTick, onFill, cancel<br/>query: entryProximity"]
         WMIR["WatchlistMirrorWorkflow<br/>id: t-{t}/s-{s}/watchlist/{msg_id}<br/>+ WatchlistDigestMarkerWorkflow (dedupe)"]
         POS["PositionWorkflow<br/>id: t-{t}/s-{s}/pos/{occ}/{entry_signal_id}<br/>signals: onFill, partialExit, armChandelier,<br/>chandelierTick, riskBreach, supersede<br/>updates: force_close, partial_close, arm_trail<br/>queries: state, exit/entry proximity"]
         KSW["KillSwitchWorkflow<br/>id: t-{t}/s-{s}/killswitch<br/>updates: trip, reset<br/>query: killswitchState"]
@@ -290,7 +290,8 @@ flowchart TB
   account-level cascade is scoped to the tenant's `broker_target` and spans **every** strategy.
 - A watchlist leg is one-shot and self-cancelling: the child either FIREs once, SKIPs definitively,
   or is cancelled by the parent's EOD sweep. The session is keyed on `et_date`, so a same-day
-  re-post of the watchlist is idempotent via `REJECT_DUPLICATE`.
+  re-post of the watchlist is idempotent via `REJECT_DUPLICATE`. In the child id, `{right}` is the
+  option right — `C` or `P` — so one ticker can carry at most one call leg and one put leg per day.
 - `PositionWorkflow` is the convergence point. Whatever opened the position — copytrade signal,
   watchlist leg, operator manual entry, or adoption of an orphan — the exit path is the same one.
 - Anything a Temporal *client* needs from a broker has to go through a short-lived workflow, because

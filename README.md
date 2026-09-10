@@ -54,8 +54,10 @@ the position to a keep-fraction and arms the trailing stop on the remainder.
 
 A daily watchlist message becomes a `WatchlistTriggerSessionWorkflow` for one
 `(tenant, strategy, et_date)`. It arms one child `WatchlistTriggerWorkflow` per
-qualifying leg, each running a pure [`EntryStateMachine`](services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/domain/EntryStateMachine.java)
-over the streaming equity feed:
+qualifying leg, each running a pure [`EntryStateMachine`][esm] over the
+streaming equity feed:
+
+[esm]: services/orchestrator/src/main/java/com/ohmytradeagent/orchestrator/domain/EntryStateMachine.java
 
 - **`BREAKOUT`** — fires when the underlying first *crosses* the trigger level in
   the leg's direction, and skips the leg entirely if that first cross gaps past
@@ -206,7 +208,8 @@ per request, never per deployment.
 - **Core services:** Java 21 · Spring Boot 3.4 · Temporal SDK 1.27 · jOOQ · Maven (multi-module `pom.xml`).
 - **Python services:** Python 3.12 · Playwright · Temporal Python client · `uv`.
 - **Dashboard:** Next.js · TypeScript · NextAuth (Google OAuth).
-- **State:** Temporal 1.27 (workflow history) · Postgres 16 (`orchestrator` + `exec_*` databases) · Redis (positionWorkflowId cache).
+- **State:** Temporal 1.27 (workflow history) · Postgres 16 (`orchestrator` +
+  `exec_*` databases) · Redis (positionWorkflowId cache).
 - **Deployment:** k3s on the homelab; Prometheus + OpenTelemetry for observability.
 
 ---
