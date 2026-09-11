@@ -63,7 +63,7 @@ flowchart LR
 
     %% =========== Tenants ===========
     subgraph TENANTS["tenants/"]
-        TYAML["dev/tenant.yaml<br/>strategies/copytrade-v1.yaml<br/>strategies/watchlist-trigger-v1.yaml<br/>(ConfigMap-mounted)"]
+        TYAML["dev/tenant.yaml<br/>strategies/copytrade-v1.yaml<br/>strategies/watchlist-trigger-v1.yaml<br/>(LOCAL docker-compose only)"]
     end
 
     %% =========== Telemetry ===========
@@ -100,7 +100,7 @@ flowchart LR
     DASH -- "HTTP" --> BFF
     OPERATOR -- "HTTP (LAN)" --> API
 
-    TYAML -. "boot enum + seeding scan" .-> ORCH
+    TYAML -. "local stack only<br/>(k8s reads config from PG)" .-> ORCH
     SCHEMA -. "compile-time" .-> ORCH
     SCHEMA -. "compile-time" .-> EXEC
     SCHEMA -. "compile-time" .-> MD
@@ -366,7 +366,7 @@ flowchart TB
             subgraph OBS["Observability"]
                 O_PROM["prometheus"]
                 O_OTEL["otel-collector"]
-                O_SM["copytrade-actuator<br/>(ServiceMonitor)"]
+                O_SM["copytrade-actuator<br/>(ServiceMonitor)<br/>orchestrator NOT scrapeable — #795"]
             end
 
             subgraph SA["RBAC"]
@@ -432,7 +432,7 @@ flowchart TB
     D_API --> O_OTEL
     D_BFF --> O_OTEL
     O_OTEL --> O_PROM
-    O_SM -. "scrapes /actuator" .-> O_PROM
+    O_SM -. "scrapes /actuator<br/>(where a listener exists)" .-> O_PROM
 
     GH -. "drift check (read-only)" .-> CISA
 
@@ -463,14 +463,18 @@ flowchart TB
 - Local-dev `infra/docker-compose.yml` is not shown; it mirrors the k8s view minus
   ingress + RBAC.
 
-**Two deploy caveats the diagram cannot show**
+**Three caveats the diagram cannot show**
 
-- A CI deploy applies only **per-service** manifests. Shared manifests — the tenants ConfigMap,
-  secrets, the ServiceMonitor, the CronJobs — need a manual `kubectl apply`. A naive apply of
-  `40-tenants-config.yaml` can delete live blocks, so diff before applying.
+- A CI deploy applies only **per-service** manifests. Shared manifests — secrets, the
+  ServiceMonitor, the CronJobs — need a manual `kubectl apply`.
 - Images are pulled by tag, so a **node reboot is an uncontrolled deploy**: the whole estate
   re-pulls onto the newest `main` with no deploy run. When asking "what is running?", trust the
   image digest, not a deploy timestamp.
+- The `copytrade-actuator` ServiceMonitor cannot scrape the **orchestrator** — that service runs no
+  HTTP listener at all, so its history-length gauges are dark. Verified live: `curl
+  localhost:8080/actuator/health` inside the pod returns nothing, despite the manifest declaring
+  `containerPort: 8080`. Tracked in #795; orchestrator metrics reach Prometheus via OTel, not the
+  scrape.
 
 ---
 
