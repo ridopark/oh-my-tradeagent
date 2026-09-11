@@ -164,9 +164,11 @@ per request, never per deployment.
 
 - **Config** lives in Postgres (`tenant_config`, strategy config rows), edited
   through `TenantConfigUpdateWorkflow` / `StrategyConfigUpdateWorkflow` —
-  tighten-only where a loosened value would raise risk. The per-tenant YAML under
-  `tenants/` is still mounted as a ConfigMap because boot-time enum + seeding
-  scans read it.
+  tighten-only where a loosened value would raise risk. In k8s this is the *only*
+  source: the orchestrator runs with `TENANT_CONFIG_SOURCE=db` and
+  `STRATEGY_CONFIG_SOURCE=db` and mounts no tenants ConfigMap. The YAML under
+  `tenants/` is for the **local Docker stack**, which mounts it at
+  `/etc/copytrade/tenants`.
 - **Broker credentials** are envelope-encrypted in a Postgres column (not k8s
   Secrets, not Vault), resolved per tenant at order time, with an account-identity
   probe that refuses to trade an account whose number does not match the declared
@@ -195,7 +197,7 @@ per request, never per deployment.
 | `services/stc-intent-service/` | Python service: classifies STC (sell-to-close) intent for close handling. |
 | `dashboard/` | Next.js operator/tenant dashboard (see [`dashboard/README.md`](dashboard/README.md)). |
 | `mobile/` | Expo mobile app (paused epic). |
-| `tenants/` | Per-tenant + per-strategy YAML, mounted as ConfigMaps. |
+| `tenants/` | Per-tenant + per-strategy YAML for the **local** Docker stack. In k8s, tenant + strategy config lives in Postgres instead. |
 | `infra/` | Docker Compose, k8s manifests (`infra/k8s/`), Temporal, Postgres init, Prometheus/OTel. |
 | `scripts/` | Dev wrappers (`scripts/dev/`), operator tooling ([`scripts/ops/`](scripts/ops/README.md)), prod watchdogs, broker/feed probes, `scripts/data/` (bar + psql helpers) and `scripts/research/` (latency + quote-rate analysis). |
 | `docs/` | Architecture, development, flows, ops runbooks, plans, PRDs, research. |
@@ -265,9 +267,8 @@ Update rather than as an edit to a running command sequence.
 The production target is the homelab k3s cluster (`ssh ridopark@192.168.10.123`).
 Manifests are under `infra/k8s/`. Two things to know:
 
-- A CI deploy only applies **per-service** manifests. Shared manifests (the
-  tenants ConfigMap, secrets, ServiceMonitors, CronJobs) still need a manual
-  `kubectl apply`.
+- A CI deploy only applies **per-service** manifests. Shared manifests (secrets,
+  the ServiceMonitor, the CronJobs) still need a manual `kubectl apply`.
 - Because images are pulled by tag, a node reboot re-pulls the estate onto the
   newest `main` with no deploy run. Trust the image **digest**, not deploy
   timestamps, when you ask "what is actually running?".

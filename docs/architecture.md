@@ -63,7 +63,7 @@ flowchart LR
 
     %% =========== Tenants ===========
     subgraph TENANTS["tenants/"]
-        TYAML["dev/tenant.yaml<br/>strategies/copytrade-v1.yaml<br/>strategies/watchlist-trigger-v1.yaml<br/>(ConfigMap-mounted)"]
+        TYAML["dev/tenant.yaml<br/>strategies/copytrade-v1.yaml<br/>strategies/watchlist-trigger-v1.yaml<br/>(LOCAL docker-compose only)"]
     end
 
     %% =========== Telemetry ===========
@@ -100,7 +100,7 @@ flowchart LR
     DASH -- "HTTP" --> BFF
     OPERATOR -- "HTTP (LAN)" --> API
 
-    TYAML -. "boot enum + seeding scan" .-> ORCH
+    TYAML -. "local stack only<br/>(k8s reads config from PG)" .-> ORCH
     SCHEMA -. "compile-time" .-> ORCH
     SCHEMA -. "compile-time" .-> EXEC
     SCHEMA -. "compile-time" .-> MD
@@ -465,9 +465,8 @@ flowchart TB
 
 **Two deploy caveats the diagram cannot show**
 
-- A CI deploy applies only **per-service** manifests. Shared manifests — the tenants ConfigMap,
-  secrets, the ServiceMonitor, the CronJobs — need a manual `kubectl apply`. A naive apply of
-  `40-tenants-config.yaml` can delete live blocks, so diff before applying.
+- A CI deploy applies only **per-service** manifests. Shared manifests — secrets, the
+  ServiceMonitor, the CronJobs — need a manual `kubectl apply`.
 - Images are pulled by tag, so a **node reboot is an uncontrolled deploy**: the whole estate
   re-pulls onto the newest `main` with no deploy run. When asking "what is running?", trust the
   image digest, not a deploy timestamp.
