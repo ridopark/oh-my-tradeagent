@@ -186,7 +186,15 @@ class AuditCompletenessVerifierIT {
   void pairsInWindowExcludesActivityOutsideTheWindow() throws Exception {
     truncate();
     insert(audit("corr-in", "EntryFilled", ts(0, 0)));
-    insert(auditFor("late_tenant", "copytrade-v1", "corr-late", "EntryFilled", ts(48, 0)));
+    // ts() is an hour-of-DAY offset from 14:00 on 2026-05-01, not a duration — ts(48,0) asked for
+    // hour 62. Use an explicit later day instead, which is what "outside the window" meant.
+    insert(
+        auditFor(
+            "late_tenant",
+            "copytrade-v1",
+            "corr-late",
+            "EntryFilled",
+            day(LocalDate.of(2026, 5, 3))));
 
     List<AuditPairSource.TenantStrategy> pairs =
         new JooqAuditEventSource(dsl, OM)
