@@ -19,6 +19,19 @@ import org.springframework.stereotype.Component;
 @Component
 public class CompletenessRunner {
 
+  /**
+   * The score as an operator should read it. A window whose only lifecycles are still open has
+   * NOTHING settled to score, and printing "100.00%" beside "result=FAIL" — possible when an open
+   * lifecycle also carries a genuine missing partial-exit fill — reads as a contradiction to
+   * someone scanning the streak. Reported as {@code n/a} instead of a vacuous 100%.
+   *
+   * <p>Package-private so the branch is pinned by a test rather than only by this comment (#854
+   * review).
+   */
+  static String formatScore(AuditCompletenessVerifier.Report report) {
+    return report.totalLifecycles() == 0 ? "n/a" : String.format("%.2f%%", report.score());
+  }
+
   /** Exit codes: 0 = every pair passed, 1 = at least one pair diverged. */
   static final int EXIT_PASS = 0;
 
@@ -86,11 +99,7 @@ public class CompletenessRunner {
           report.totalLifecycles(),
           report.completeLifecycles(),
           report.openLifecycles(),
-          // A window whose only lifecycles are still open has NOTHING settled to score. Printing
-          // "100.00%" beside "result=FAIL" (possible when an open lifecycle also has a genuine
-          // missing partial-exit fill) reads as a contradiction to an operator scanning the streak,
-          // so the ratio is reported as n/a rather than as a vacuous 100%.
-          report.totalLifecycles() == 0 ? "n/a" : String.format("%.2f%%", report.score()),
+          formatScore(report),
           report.divergences().size(),
           report.passed() ? "PASS" : "FAIL");
       if (!report.passed()) {

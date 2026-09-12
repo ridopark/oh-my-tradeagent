@@ -179,6 +179,31 @@ class CompletenessRunnerTest {
         .isEqualTo(CompletenessRunner.EXIT_DIVERGED);
   }
 
+  // #854 review: the n/a branch existed only to avoid an operator-facing contradiction, and nothing
+  // asserted on it — exactly the kind of formatting a refactor regresses silently.
+  @Test
+  void scoreReadsNaWhenNothingSettledAndAPercentageOtherwise() {
+    assertThat(CompletenessRunner.formatScore(report(0, 100.0)))
+        .as("nothing settled: a ratio over zero must not print as a vacuous 100%")
+        .isEqualTo("n/a");
+    assertThat(CompletenessRunner.formatScore(report(1, 100.0))).isEqualTo("100.00%");
+    assertThat(CompletenessRunner.formatScore(report(2, 50.0))).isEqualTo("50.00%");
+  }
+
+  private static AuditCompletenessVerifier.Report report(int settled, double score) {
+    return new AuditCompletenessVerifier.Report(
+        "prod_real",
+        "copytrade-v1",
+        OffsetDateTime.parse("2026-09-11T00:00:00Z"),
+        OffsetDateTime.parse("2026-09-12T00:00:00Z"),
+        0,
+        settled,
+        settled,
+        0,
+        score,
+        List.of());
+  }
+
   // Half a pair is a usage error, not a silent fall-through to verifying everything.
   @Test
   void tenantWithoutStrategyIsRejected() {

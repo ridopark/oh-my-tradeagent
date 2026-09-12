@@ -91,11 +91,10 @@ public final class AuditCompletenessVerifier {
     for (Divergence d : divergences) {
       divergentCorrelations.add(d.correlationId());
     }
-    // Only lifecycles that actually opened count toward the denominator. Unknown-kind findings on
-    // neutral events are still reported in the divergence list but do not push the score below 100%
-    // if no lifecycle is affected — they're a registry-drift signal, not a ledger-completeness one.
-    // (The intersection itself is taken against `settled` below; an earlier `divergentLifecycles`
-    // variable here was superseded by that and removed.)
+    // Only lifecycles that actually opened count toward the denominator, and the intersection is
+    // taken against `settled` below. Unknown-kind findings on neutral events are still reported in
+    // the divergence list but do not push the score below 100% when no lifecycle is affected —
+    // they're a registry-drift signal, not a ledger-completeness one.
     // Open lifecycles leave BOTH sides of the ratio: they are unfinished, not inconsistent, so they
     // can neither pass nor fail. The denominator is the lifecycles that actually SETTLED in the
     // window. A window where everything is still open therefore scores 100% over zero settled
