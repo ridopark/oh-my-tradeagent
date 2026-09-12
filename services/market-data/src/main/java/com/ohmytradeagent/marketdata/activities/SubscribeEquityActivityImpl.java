@@ -84,6 +84,19 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
   private final ConcurrentHashMap<String, ScheduledFuture<?>> watchdogTasks =
       new ConcurrentHashMap<>();
 
+  /**
+   * #848: (ticker, targetWorkflowId) -> live subscription id, so a repeat subscribe for the SAME
+   * leg reuses the feed instead of opening a second one. Two live subscriptions both signal the
+   * same workflow, so a duplicate double-delivers every qualifying print and leaves an orphaned
+   * handle. Mirrors the premium-side index in {@link SubscribePremiumActivityImpl}.
+   */
+  private final ConcurrentHashMap<String, String> subscriptionIdByKey = new ConcurrentHashMap<>();
+
+  /** NUL-separated so it cannot collide: a workflow id carries '/' and ':', a ticker neither. */
+  private static String dedupKey(String ticker, String targetWorkflowId) {
+    return ticker + '\u0000' + targetWorkflowId;
+  }
+
   @Autowired
   public SubscribeEquityActivityImpl(
       MarketDataProvider provider,
@@ -150,46 +163,69 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       final BigDecimal deltaPct = req.getEquityEmitDeltaPct();
       final BigDecimal minMove = trigger.multiply(deltaPct).abs();
 
-      final String[] subIdHolder = new String[1];
-      // Published before any tick consumer can read subIdHolder. The provider registers the
-      // consumer
-      // INSIDE subscribeEquity() and the subscription id only exists once it returns, so a tick
-      // that
-      // fires before subIdHolder is set would otherwise dispatch with a null id — and a first-tick
-      // WorkflowNotFoundException would then skip teardown (tearDown(null) is a no-op). The
-      // dispatch
-      // task awaits this latch so it never reads subIdHolder before the id is published.
-      final java.util.concurrent.CountDownLatch subIdReady =
-          new java.util.concurrent.CountDownLatch(1);
-      final ThrottleState throttle = new ThrottleState();
-
-      Subscription sub =
-          provider.subscribeEquity(
-              ticker,
-              tick -> {
-                throttle.markTickSeen();
-                if (!shouldEmit(throttle, tick, minMove)) {
-                  return;
+      // compute() holds the per-key bin lock, so the "is one already live?" check and the provider
+      // subscribe are atomic against a concurrent subscribe for the same leg — two callers cannot
+      // both see "absent" and both open one. Same discipline as the premium side. The provider
+      // subscribe is in-process (registers a listener); no network call happens under this lock.
+      String subscriptionId =
+          subscriptionIdByKey.compute(
+              dedupKey(ticker, targetWfId),
+              (k, existingId) -> {
+                // Reuse only a subscription that is still LIVE. A torn-down id lingering in the
+                // index must never be handed back as if it were feeding anything.
+                if (existingId != null && active.containsKey(existingId)) {
+                  // LOUD on purpose: a re-subscribe can now legitimately do nothing, so whoever
+                  // triggered it must be able to see WHY no new feed appeared.
+                  log.info(
+                      "subscribeEquity reuse: ticker={} target_wf={} existing_subscription_id={}"
+                          + " (no new subscription opened)",
+                      ticker,
+                      targetWfId,
+                      existingId);
+                  return existingId;
                 }
-                EquityTick equityTick = toEquityTick(tick);
-                dispatcher.submit(
-                    () -> {
-                      awaitUninterruptibly(subIdReady);
-                      dispatchTick(targetWfId, signalName, subIdHolder[0], equityTick);
-                    });
-              });
-      subIdHolder[0] = sub.subscriptionId();
-      active.put(sub.subscriptionId(), sub);
-      throttle.markTickSeen(); // seed the watchdog clock at subscribe time
-      // Arm (and register) the watchdog BEFORE releasing the dispatch, so a first-tick
-      // WorkflowNotFoundException teardown always finds the watchdog future to cancel it.
-      armNoTickWatchdog(sub.subscriptionId(), ticker, targetWfId, throttle);
-      // Release the dispatch only after subIdHolder, active, AND the watchdog are published, so a
-      // first-tick teardown can find the subscription in `active` to close it and cancel the
-      // watchdog.
-      subIdReady.countDown();
+                final String[] subIdHolder = new String[1];
+                // Published before any tick consumer can read subIdHolder. The provider registers
+                // the consumer INSIDE subscribeEquity() and the subscription id only exists once it
+                // returns, so a tick that fires before subIdHolder is set would otherwise dispatch
+                // with a null id — and a first-tick WorkflowNotFoundException would then skip
+                // teardown (tearDown(null) is a no-op). The dispatch task awaits this latch so it
+                // never reads subIdHolder before the id is published.
+                final java.util.concurrent.CountDownLatch subIdReady =
+                    new java.util.concurrent.CountDownLatch(1);
+                final ThrottleState throttle = new ThrottleState();
 
-      result.setSubscriptionId(sub.subscriptionId());
+                Subscription sub =
+                    provider.subscribeEquity(
+                        ticker,
+                        tick -> {
+                          throttle.markTickSeen();
+                          if (!shouldEmit(throttle, tick, minMove)) {
+                            return;
+                          }
+                          EquityTick equityTick = toEquityTick(tick);
+                          dispatcher.submit(
+                              () -> {
+                                awaitUninterruptibly(subIdReady);
+                                dispatchTick(targetWfId, signalName, subIdHolder[0], equityTick);
+                              });
+                        });
+                subIdHolder[0] = sub.subscriptionId();
+                active.put(sub.subscriptionId(), sub);
+                throttle.markTickSeen(); // seed the watchdog clock at subscribe time
+                // Arm (and register) the watchdog BEFORE releasing the dispatch, so a first-tick
+                // WorkflowNotFoundException teardown always finds the watchdog future to cancel it.
+                armNoTickWatchdog(sub.subscriptionId(), ticker, targetWfId, throttle);
+                // Release the dispatch only after subIdHolder, active, AND the watchdog are
+                // published, so a first-tick teardown can find the subscription in `active` to
+                // close it and cancel the watchdog.
+                subIdReady.countDown();
+                return sub.subscriptionId();
+              });
+      // NOTE: reuse deliberately does NOT touch the throttle. The re-subscribe path this dedup
+      // exists for fires after feed silence; resetting the emit baseline would let the next in-band
+      // tick through, and the entry machine requires a live cross to fire.
+      result.setSubscriptionId(subscriptionId);
       result.setStatus(SubscribeEquityResult.Status.SUBSCRIBED);
       return result;
     } catch (RuntimeException e) {
