@@ -57,6 +57,14 @@ spec:
                   value: "" # populated below via command override
                 - name: TO
                   value: ""
+                # #853: the verifier asks Temporal which positions are still open, so an unclosed
+                # lifecycle can be told apart from a lost close event — they are indistinguishable in
+                # audit_log alone. Read-only: it only lists visibility records, never starts or
+                # signals a workflow. Same target/namespace the orchestrator uses.
+                - name: TEMPORAL_TARGET
+                  value: temporal-frontend.temporal.svc.cluster.local:7233
+                - name: TEMPORAL_NAMESPACE
+                  value: copytrade
                 - name: SPRING_DATASOURCE_URL
                   value: jdbc:postgresql://postgres:5432/orchestrator
                 # Read-only path — the audit-svc CronJob shares the orchestrator_runtime role

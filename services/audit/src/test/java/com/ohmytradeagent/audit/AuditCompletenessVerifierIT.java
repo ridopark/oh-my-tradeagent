@@ -11,7 +11,9 @@ import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
@@ -67,8 +69,20 @@ class AuditCompletenessVerifierIT {
         DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
     dsl = DSL.using(conn, SQLDialect.POSTGRES);
-    verifier = new AuditCompletenessVerifier(new JooqAuditEventSource(dsl, OM));
+    verifier =
+        new AuditCompletenessVerifier(
+            new JooqAuditEventSource(dsl, OM), new LedgerRederiver(), openPositions);
   }
+
+  /**
+   * Stands in for Temporal. Defaults to "nothing is open", which keeps every pre-existing assertion
+   * meaning what it did: a suppressed close on a position that is NOT open is still a divergence.
+   * Tests that want the open-position path add the correlation id here.
+   */
+  private static final Set<String> openCorrelations = new HashSet<>();
+
+  private static final OpenPositionSource openPositions =
+      (tenantId, strategyId) -> Set.copyOf(openCorrelations);
 
   @AfterAll
   static void closeDb() throws Exception {
@@ -116,6 +130,33 @@ class AuditCompletenessVerifierIT {
     assertThat(report.divergences())
         .hasSize(1)
         .allSatisfy(d -> assertThat(d.kind()).isEqualTo(Divergence.Kind.MISSING_TERMINAL_CLOSE));
+    assertThat(report.openLifecycles()).isZero();
+  }
+
+  // #853: the same suppressed close, except the position IS still open. This is the overnight hold
+  // that made the verifier permanently red on every real tenant: it must now carry forward as OPEN,
+  // score 100% over zero settled lifecycles, and raise no divergence.
+  @Test
+  void unclosedLifecycleWhosePositionIsStillOpenIsCarriedForward() throws Exception {
+    truncate();
+    String corr = "signal-open-" + UUID.randomUUID();
+    insert(audit(corr, "EntryFilled", ts(0, 0)));
+    insert(audit(corr, "PositionEntered", ts(0, 1)));
+    // PositionClosed absent because the position is STILL OPEN, not because an event was lost.
+    openCorrelations.add(corr);
+    try {
+      AuditCompletenessVerifier.Report report =
+          verifier.verify(
+              "dev", "copytrade-v1", day(LocalDate.of(2026, 5, 1)), day(LocalDate.of(2026, 5, 2)));
+
+      assertThat(report.divergences()).isEmpty();
+      assertThat(report.openLifecycles()).isEqualTo(1);
+      assertThat(report.totalLifecycles()).as("settled lifecycles only").isZero();
+      assertThat(report.score()).isEqualTo(100.0);
+      assertThat(report.passed()).isTrue();
+    } finally {
+      openCorrelations.remove(corr);
+    }
   }
 
   @Test
