@@ -27,7 +27,7 @@ import org.springframework.stereotype.Component;
  * infra/k8s/57-audit-completeness-check-cron.yaml).
  */
 @Component
-public class JooqAuditEventSource implements AuditEventSource {
+public class JooqAuditEventSource implements AuditEventSource, AuditPairSource {
 
   private static final Logger log = LoggerFactory.getLogger(JooqAuditEventSource.class);
   private static final TypeReference<Map<String, Object>> SUBJECT_TYPE = new TypeReference<>() {};
@@ -38,6 +38,21 @@ public class JooqAuditEventSource implements AuditEventSource {
   public JooqAuditEventSource(DSLContext dsl, ObjectMapper objectMapper) {
     this.dsl = dsl;
     this.objectMapper = objectMapper;
+  }
+
+  @Override
+  public List<AuditPairSource.TenantStrategy> pairsInWindow(
+      OffsetDateTime fromInclusive, OffsetDateTime toExclusive) {
+    return dsl.fetch(
+            "SELECT DISTINCT tenant_id, strategy_id FROM audit_log "
+                + "WHERE occurred_at >= ?::timestamptz AND occurred_at < ?::timestamptz "
+                + "ORDER BY tenant_id ASC, strategy_id ASC",
+            fromInclusive,
+            toExclusive)
+        .map(
+            r ->
+                new AuditPairSource.TenantStrategy(
+                    r.get("tenant_id", String.class), r.get("strategy_id", String.class)));
   }
 
   @Override

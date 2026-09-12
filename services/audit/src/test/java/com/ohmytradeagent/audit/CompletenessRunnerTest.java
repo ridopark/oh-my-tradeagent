@@ -1,0 +1,156 @@
+package com.ohmytradeagent.audit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.ohmytradeagent.contract.AuditEvent;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import org.junit.jupiter.api.Test;
+
+/**
+ * #853: the CronJob hardcoded {@code TENANT=dev STRATEGY=copytrade-v1}, a pair with zero events, so
+ * it scored 100% on an empty set every night while five real tenants — three of them real-money —
+ * went unchecked. The pairs are now DISCOVERED from the window's own data.
+ *
+ * <p>The rule these pin is "one failing pair fails the night", which otherwise would only be
+ * provable by running the CronJob and reading its exit code.
+ */
+class CompletenessRunnerTest {
+
+  private static final LocalDate FROM = LocalDate.of(2026, 9, 11);
+  private static final LocalDate TO = LocalDate.of(2026, 9, 12);
+
+  /** The five (tenant, strategy) pairs that actually had activity on 2026-09-11, as measured. */
+  private static final List<AuditPairSource.TenantStrategy> REAL_PAIRS =
+      List.of(
+          new AuditPairSource.TenantStrategy("paper_jinchiul", "copytrade-v1"),
+          new AuditPairSource.TenantStrategy("prod-jinchul", "copytrade-v1"),
+          new AuditPairSource.TenantStrategy("prod-kipark", "copytrade-v1"),
+          new AuditPairSource.TenantStrategy("prod_real", "copytrade-v1"),
+          new AuditPairSource.TenantStrategy("staging_paper", "watchlist-trigger-v1"));
+
+  /** Events keyed by "tenant/strategy", so each pair can be given its own ledger. */
+  private final Map<String, List<AuditEvent>> eventsByPair = new LinkedHashMap<>();
+
+  private final Set<String> openCorrelations = new java.util.HashSet<>();
+
+  private CompletenessRunner runner(List<AuditPairSource.TenantStrategy> pairs) {
+    AuditEventSource source =
+        (tenantId, strategyId, from, to) ->
+            eventsByPair.getOrDefault(tenantId + "/" + strategyId, List.of());
+    OpenPositionSource openPositions = (tenantId, strategyId) -> Set.copyOf(openCorrelations);
+    AuditCompletenessVerifier verifier =
+        new AuditCompletenessVerifier(source, new LedgerRederiver(), openPositions);
+    AuditPairSource pairSource = (from, to) -> pairs;
+    return new CompletenessRunner(verifier, pairSource);
+  }
+
+  private void givePair(String tenant, String strategy, String corr, boolean closed) {
+    List<AuditEvent> events = new ArrayList<>();
+    events.add(event(tenant, strategy, corr, "EntryFilled", 0));
+    events.add(event(tenant, strategy, corr, "PositionEntered", 1));
+    if (closed) {
+      events.add(event(tenant, strategy, corr, "PositionClosed", 2));
+    }
+    eventsByPair.put(tenant + "/" + strategy, events);
+  }
+
+  private static AuditEvent event(
+      String tenant, String strategy, String corr, String kind, int minute) {
+    AuditEvent e = new AuditEvent();
+    e.setSchemaVersion(1L);
+    e.setTenantId(tenant);
+    e.setStrategyId(strategy);
+    e.setEventId(UUID.randomUUID().toString());
+    e.setOccurredAt(OffsetDateTime.parse("2026-09-11T14:00:00Z").plusMinutes(minute));
+    e.setKind(kind);
+    e.setSubject(Map.of());
+    e.setCorrelationId(corr);
+    return e;
+  }
+
+  // The regression: every real pair must be verified, not just one hardcoded name.
+  @Test
+  void discoversAndVerifiesEveryPairWithActivity() {
+    for (AuditPairSource.TenantStrategy p : REAL_PAIRS) {
+      givePair(p.tenantId(), p.strategyId(), "corr-" + p.tenantId(), true);
+    }
+
+    assertThat(runner(REAL_PAIRS).run(null, null, FROM, TO))
+        .isEqualTo(CompletenessRunner.EXIT_PASS);
+  }
+
+  // One bad pair fails the night, even when it is not the first one scanned — the aggregation must
+  // not short-circuit on the first PASS.
+  @Test
+  void oneDivergentPairFailsTheWholeRun() {
+    for (AuditPairSource.TenantStrategy p : REAL_PAIRS) {
+      givePair(p.tenantId(), p.strategyId(), "corr-" + p.tenantId(), true);
+    }
+    // prod_real is 4th of 5 in the ordering, and its close event is missing with no open position.
+    givePair("prod_real", "copytrade-v1", "corr-prod_real", false);
+
+    assertThat(runner(REAL_PAIRS).run(null, null, FROM, TO))
+        .isEqualTo(CompletenessRunner.EXIT_DIVERGED);
+  }
+
+  // An unclosed lifecycle whose position is still open must NOT fail the night — this is the
+  // overnight hold that made the job permanently red on real tenants.
+  @Test
+  void anOpenPositionDoesNotFailTheRun() {
+    givePair("prod_real", "copytrade-v1", "corr-open", false);
+    openCorrelations.add("corr-open");
+
+    assertThat(
+            runner(List.of(new AuditPairSource.TenantStrategy("prod_real", "copytrade-v1")))
+                .run(null, null, FROM, TO))
+        .isEqualTo(CompletenessRunner.EXIT_PASS);
+  }
+
+  // A weekend / holiday / idle day must not break the streak.
+  @Test
+  void anEmptyWindowPasses() {
+    assertThat(runner(List.of()).run(null, null, FROM, TO)).isEqualTo(CompletenessRunner.EXIT_PASS);
+  }
+
+  // The single-pair CLI contract still works for ad-hoc investigation, and must NOT consult the
+  // discovery source (passing a pair that discovery would not have returned still runs).
+  @Test
+  void explicitPairIsVerifiedWithoutDiscovery() {
+    givePair("prod_real", "copytrade-v1", "corr-x", false); // unclosed, nothing open -> divergence
+    AuditPairSource exploding =
+        (from, to) -> {
+          throw new AssertionError("discovery must not be consulted when a pair is given");
+        };
+    AuditEventSource source =
+        (tenantId, strategyId, from, to) ->
+            eventsByPair.getOrDefault(tenantId + "/" + strategyId, List.of());
+    CompletenessRunner runner =
+        new CompletenessRunner(
+            new AuditCompletenessVerifier(source, new LedgerRederiver(), (t, s) -> Set.of()),
+            exploding);
+
+    assertThat(runner.run("prod_real", "copytrade-v1", FROM, TO))
+        .isEqualTo(CompletenessRunner.EXIT_DIVERGED);
+  }
+
+  // Half a pair is a usage error, not a silent fall-through to verifying everything.
+  @Test
+  void tenantWithoutStrategyIsRejected() {
+    AuditCompletenessApplication app = new AuditCompletenessApplication();
+    assertThatThrownBy(
+            () ->
+                app.run(
+                    new org.springframework.boot.DefaultApplicationArguments(
+                        "--tenant=prod_real", "--from=2026-09-11", "--to=2026-09-12")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must be given together");
+  }
+}

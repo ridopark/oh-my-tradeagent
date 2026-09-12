@@ -38,8 +38,11 @@ spec:
               image: ghcr.io/ridopark/oh-my-tradeagent-audit:latest
               imagePullPolicy: Always
               args:
-                - "--tenant=$(TENANT)"
-                - "--strategy=$(STRATEGY)"
+                # #853: no --tenant/--strategy. Omitting them verifies EVERY (tenant, strategy) with
+                # activity in the window, discovered from audit_log itself. The old hardcoded
+                # TENANT=dev pair has zero events, so this job scored 100% on an empty set every
+                # night while five real tenants went unchecked. A hardcoded list was the bug; a new
+                # tenant is now covered the day it starts trading with no manifest edit.
                 # FROM/TO are populated by an init shim below — Kubernetes doesn't evaluate
                 # $(date) inside container env, so the dates are emitted by the entrypoint shim
                 # ahead of the JVM start. The pattern below is a placeholder; the shim rewrites
@@ -47,10 +50,6 @@ spec:
                 - "--from=$(FROM)"
                 - "--to=$(TO)"
               env:
-                - name: TENANT
-                  value: dev
-                - name: STRATEGY
-                  value: copytrade-v1
                 # Compute yesterday/today UTC at container start. UTC dates so the window aligns
                 # with audit_log.occurred_at which is stored TIMESTAMPTZ.
                 - name: FROM
@@ -91,8 +90,6 @@ spec:
                   TO=$(date -u '+%Y-%m-%d')
                   echo "audit-completeness-check window=[${FROM}, ${TO})"
                   exec java -jar /app/app.jar \
-                    --tenant="${TENANT}" \
-                    --strategy="${STRATEGY}" \
                     --from="${FROM}" \
                     --to="${TO}"
               resources:
