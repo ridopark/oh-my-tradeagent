@@ -114,6 +114,44 @@ class CompletenessRunnerTest {
         .isEqualTo(CompletenessRunner.EXIT_PASS);
   }
 
+  // #854 review, the major finding: a pair that THROWS must not abort the rest. The fail-closed
+  // OpenPositionSource raises on a Temporal blip, and letting that propagate meant one unlucky
+  // tenant hid real divergences on every pair scanned after it.
+  @Test
+  void aThrowingPairDoesNotAbortTheRemainingPairs() {
+    List<AuditPairSource.TenantStrategy> pairs = REAL_PAIRS;
+    for (AuditPairSource.TenantStrategy p : pairs) {
+      givePair(p.tenantId(), p.strategyId(), "corr-" + p.tenantId(), true);
+    }
+    // The LAST pair has a genuinely missing close, and an EARLIER pair throws. Before the fix the
+    // throw propagated and that last divergence was never reached.
+    givePair("staging_paper", "watchlist-trigger-v1", "corr-staging_paper", false);
+
+    List<String> verified = new ArrayList<>();
+    AuditEventSource source =
+        (tenantId, strategyId, from, to) -> {
+          verified.add(tenantId + "/" + strategyId);
+          return eventsByPair.getOrDefault(tenantId + "/" + strategyId, List.of());
+        };
+    OpenPositionSource flaky =
+        (tenantId, strategyId) -> {
+          if ("prod-kipark".equals(tenantId)) {
+            throw new IllegalStateException("Temporal visibility unavailable");
+          }
+          return Set.of();
+        };
+    CompletenessRunner runner =
+        new CompletenessRunner(
+            new AuditCompletenessVerifier(source, new LedgerRederiver(), flaky), (f, t) -> pairs);
+
+    int exit = runner.run(null, null, FROM, TO);
+
+    assertThat(exit).isEqualTo(CompletenessRunner.EXIT_DIVERGED);
+    assertThat(verified)
+        .as("every pair after the throwing one must still have been read")
+        .contains("prod_real/copytrade-v1", "staging_paper/watchlist-trigger-v1");
+  }
+
   // A weekend / holiday / idle day must not break the streak.
   @Test
   void anEmptyWindowPasses() {

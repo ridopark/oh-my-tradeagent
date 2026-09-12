@@ -1,9 +1,9 @@
 package com.ohmytradeagent.audit;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
-import io.temporal.api.workflow.v1.WorkflowExecutionInfo;
 import io.temporal.client.WorkflowClient;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +29,20 @@ public class TemporalOpenPositionSource implements OpenPositionSource {
 
   private final WorkflowClient workflowClient;
 
+  /**
+   * One snapshot of the running set per process. The CLI is a point-in-time batch check that exits,
+   * and {@link CompletenessRunner} asks once per discovered pair — 12 pairs meant 12 cluster-wide
+   * scans of every running workflow (#854 review). Caching also makes the run internally
+   * consistent: every pair is judged against the SAME snapshot rather than a set that shifts
+   * mid-run.
+   *
+   * <p>Deliberately NOT a server-side {@code TenantStrategy} search-attribute filter, which the
+   * review also suggested: a PositionWorkflow missing that attribute would silently drop out of the
+   * result, and a position wrongly believed closed becomes a fabricated MISSING_TERMINAL_CLOSE. The
+   * client-side prefix filter cannot miss one.
+   */
+  private List<String> cachedWorkflowIds;
+
   public TemporalOpenPositionSource(WorkflowClient workflowClient) {
     this.workflowClient = workflowClient;
   }
@@ -37,39 +51,14 @@ public class TemporalOpenPositionSource implements OpenPositionSource {
   public Set<String> openCorrelationIds(String tenantId, String strategyId) {
     String prefix = WorkflowIds.tenantStrategy(tenantId, strategyId) + "/pos/";
     Set<String> correlationIds = new HashSet<>();
-    try {
-      for (WorkflowExecutionInfo info :
-          workflowClient
-              .listExecutions(LIST_QUERY)
-              .map(m -> m.getWorkflowExecutionInfo())
-              .toList()) {
-        String workflowId = info.getExecution().getWorkflowId();
-        if (!workflowId.startsWith(prefix)) {
-          continue;
-        }
-        String correlationId = WorkflowIds.entrySignalIdFromPosition(workflowId);
-        if (correlationId != null) {
-          correlationIds.add(correlationId);
-        }
+    for (String workflowId : runningPositionWorkflowIds()) {
+      if (!workflowId.startsWith(prefix)) {
+        continue;
       }
-    } catch (RuntimeException e) {
-      // Fail CLOSED and loudly. Swallowing this would hand back an empty set, which reads as
-      // "nothing is open" and would convert every unclosed lifecycle into a MISSING_TERMINAL_CLOSE
-      // divergence — a fabricated red day. A red day for "could not determine" is correct; a red
-      // day
-      // blamed on the ledger is not.
-      log.error(
-          "AUDIT open-position-lookup-failed: tenant={} strategy={} err={}",
-          tenantId,
-          strategyId,
-          e.toString());
-      throw new IllegalStateException(
-          "cannot determine open positions for "
-              + tenantId
-              + "/"
-              + strategyId
-              + " — refusing to score the window (Temporal visibility unavailable)",
-          e);
+      String correlationId = WorkflowIds.entrySignalIdFromPosition(workflowId);
+      if (correlationId != null) {
+        correlationIds.add(correlationId);
+      }
     }
     log.info(
         "open-positions tenant={} strategy={} open={}",
@@ -77,5 +66,44 @@ public class TemporalOpenPositionSource implements OpenPositionSource {
         strategyId,
         correlationIds.size());
     return correlationIds;
+  }
+
+  /**
+   * Every Running {@code PositionWorkflow} id in the cluster, fetched once per process.
+   *
+   * <p>Package-private so tests can drive the prefix-matching and id-extraction logic without
+   * mocking Temporal's visibility stream — that logic is where a regression would actually hide (a
+   * changed {@code WorkflowIds.tenantStrategy} separator, say).
+   */
+  private List<String> runningPositionWorkflowIds() {
+    if (cachedWorkflowIds == null) {
+      cachedWorkflowIds = fetchRunningPositionWorkflowIds();
+    }
+    return cachedWorkflowIds;
+  }
+
+  /**
+   * The raw visibility call, separated from the caching above so BOTH are testable: a test that
+   * overrode the caching method could never observe whether the cache worked (it did not, first
+   * time round — the cache sat inside the overridden method and the test caught it).
+   */
+  List<String> fetchRunningPositionWorkflowIds() {
+    try {
+      return workflowClient
+          .listExecutions(LIST_QUERY)
+          .map(m -> m.getExecution().getWorkflowId())
+          .toList();
+    } catch (RuntimeException e) {
+      // Fail CLOSED and loudly. Swallowing this would hand back an empty set, which reads as
+      // "nothing is open" and would convert every unclosed lifecycle into a MISSING_TERMINAL_CLOSE
+      // divergence — a fabricated red day. A red day for "could not determine" is correct; a red
+      // day
+      // blamed on the ledger is not.
+      log.error("AUDIT open-position-lookup-failed: err={}", e.toString());
+      throw new IllegalStateException(
+          "cannot determine open positions — refusing to score the window"
+              + " (Temporal visibility unavailable)",
+          e);
+    }
   }
 }

@@ -57,12 +57,27 @@ public class CompletenessRunner {
     }
 
     int exitCode = EXIT_PASS;
+    int errored = 0;
     for (AuditPairSource.TenantStrategy pair : pairs) {
-      AuditCompletenessVerifier.Report report =
-          verifier.verify(pair.tenantId(), pair.strategyId(), fromTs, toTs);
+      AuditCompletenessVerifier.Report report;
+      try {
+        report = verifier.verify(pair.tenantId(), pair.strategyId(), fromTs, toTs);
+      } catch (RuntimeException e) {
+        // #854 review: a pair that THROWS must not abort the rest. The fail-closed
+        // OpenPositionSource raises on a Temporal blip, and letting that propagate meant one
+        // unlucky tenant hid real divergences on every pair after it — the exact opposite of why
+        // this loop continues past a scored FAIL. Errored is distinct from FAIL: nothing was
+        // judged, so nothing can be claimed about that pair's ledger.
+        System.out.printf(
+            "audit_completeness tenant=%s strategy=%s from=%s to=%s result=ERROR detail=%s%n",
+            pair.tenantId(), pair.strategyId(), from, to, e.getMessage());
+        errored++;
+        exitCode = EXIT_DIVERGED;
+        continue;
+      }
       System.out.printf(
           "audit_completeness tenant=%s strategy=%s from=%s to=%s events=%d settled_lifecycles=%d "
-              + "complete=%d open_carried_forward=%d score=%.2f%% divergences=%d result=%s%n",
+              + "complete=%d open_carried_forward=%d score=%s divergences=%d result=%s%n",
           report.tenantId(),
           report.strategyId(),
           from,
@@ -71,7 +86,11 @@ public class CompletenessRunner {
           report.totalLifecycles(),
           report.completeLifecycles(),
           report.openLifecycles(),
-          report.score(),
+          // A window whose only lifecycles are still open has NOTHING settled to score. Printing
+          // "100.00%" beside "result=FAIL" (possible when an open lifecycle also has a genuine
+          // missing partial-exit fill) reads as a contradiction to an operator scanning the streak,
+          // so the ratio is reported as n/a rather than as a vacuous 100%.
+          report.totalLifecycles() == 0 ? "n/a" : String.format("%.2f%%", report.score()),
           report.divergences().size(),
           report.passed() ? "PASS" : "FAIL");
       if (!report.passed()) {
@@ -86,8 +105,8 @@ public class CompletenessRunner {
       }
     }
     System.out.printf(
-        "audit_completeness from=%s to=%s pairs=%d result=%s%n",
-        from, to, pairs.size(), exitCode == EXIT_PASS ? "PASS" : "FAIL");
+        "audit_completeness from=%s to=%s pairs=%d errored=%d result=%s%n",
+        from, to, pairs.size(), errored, exitCode == EXIT_PASS ? "PASS" : "FAIL");
     return exitCode;
   }
 }
