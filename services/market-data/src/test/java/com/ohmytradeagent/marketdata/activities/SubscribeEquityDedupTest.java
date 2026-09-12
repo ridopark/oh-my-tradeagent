@@ -8,6 +8,9 @@ import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowNotFoundException;
+import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -166,6 +170,58 @@ class SubscribeEquityDedupTest {
     return r;
   }
 
+  /** Runs submissions inline, so a dispatch (and its teardown path) executes synchronously. */
+  private static ExecutorService inlineExecutor() {
+    return new AbstractExecutorService() {
+      @Override
+      public void execute(Runnable command) {
+        command.run();
+      }
+
+      @Override
+      public void shutdown() {}
+
+      @Override
+      public List<Runnable> shutdownNow() {
+        return List.of();
+      }
+
+      @Override
+      public boolean isShutdown() {
+        return false;
+      }
+
+      @Override
+      public boolean isTerminated() {
+        return false;
+      }
+
+      @Override
+      public boolean awaitTermination(long timeout, TimeUnit unit) {
+        return true;
+      }
+    };
+  }
+
+  /** A WorkflowClient whose every signal reports the target workflow as gone. */
+  private static WorkflowClient notFoundClient() {
+    WorkflowClient client = org.mockito.Mockito.mock(WorkflowClient.class);
+    WorkflowStub stub = org.mockito.Mockito.mock(WorkflowStub.class);
+    org.mockito.Mockito.when(
+            client.newUntypedWorkflowStub(org.mockito.ArgumentMatchers.anyString()))
+        .thenReturn(stub);
+    io.temporal.api.common.v1.WorkflowExecution execution =
+        io.temporal.api.common.v1.WorkflowExecution.newBuilder()
+            .setWorkflowId(WF_A)
+            .setRunId("run-1")
+            .build();
+    org.mockito.Mockito.doThrow(
+            new WorkflowNotFoundException(execution, "WatchlistTriggerWorkflow", null))
+        .when(stub)
+        .signal(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    return client;
+  }
+
   private SubscribeEquityActivityImpl activity(CountingProvider p, CountingExecutor ex) {
     watchdog = Executors.newSingleThreadScheduledExecutor();
     return new SubscribeEquityActivityImpl(p, null, ex, watchdog, RTH_CLOCK, 3600L);
@@ -217,6 +273,47 @@ class SubscribeEquityDedupTest {
 
     assertThat(second.getSubscriptionId()).isNotEqualTo(first.getSubscriptionId());
     assertThat(p.subscribeCalls.get()).isEqualTo(2);
+  }
+
+  /**
+   * Teardown must reclaim the dedup-index entry, not just the `active` entry (review finding on
+   * #851). Two things go wrong without it: the index grows by one entry per leg for the worker's
+   * life — legs are day-scoped, so that is unbounded — and a re-subscribe after teardown consults a
+   * stale mapping instead of opening a genuinely fresh subscription.
+   *
+   * <p>Drives teardown the way production does: a dispatch whose target workflow is gone. The
+   * dispatcher here runs submissions inline so the WorkflowNotFoundException path actually
+   * executes.
+   */
+  @Test
+  void afterTeardown_aResubscribeOpensAFreshSubscription() {
+    CountingProvider p = new CountingProvider();
+    watchdog = Executors.newSingleThreadScheduledExecutor();
+    // Inline executor + a WorkflowClient whose stub always reports "not found", so the first
+    // dispatch drives tearDown exactly as a closed leg does in production.
+    SubscribeEquityActivityImpl a =
+        new SubscribeEquityActivityImpl(
+            p, notFoundClient(), inlineExecutor(), watchdog, RTH_CLOCK, 3600L);
+
+    SubscribeEquityResult first = a.subscribeEquity(req(TICKER, WF_A, "0.01"));
+    p.push(TICKER, "150.00"); // dispatch -> WorkflowNotFound -> tearDown
+
+    assertThat(p.closeCalls.get()).isEqualTo(1);
+
+    // THE defect: the index entry must be reclaimed AT TEARDOWN. Asserting it only after a
+    // re-subscribe would prove nothing — compute() replaces a stale mapping on the next subscribe,
+    // so a re-subscribe self-heals and the leak hides. A leg torn down and never re-subscribed is
+    // the real case, and legs are day-scoped, so the growth is unbounded.
+    assertThat(a.dedupIndexSize()).isZero();
+
+    // And the self-healing path still has to behave: a later subscribe for the same key opens a
+    // genuinely fresh subscription rather than handing back the dead id.
+    SubscribeEquityResult afterTeardown = a.subscribeEquity(req(TICKER, WF_A, "0.01"));
+
+    assertThat(afterTeardown.getStatus()).isEqualTo(SubscribeEquityResult.Status.SUBSCRIBED);
+    assertThat(afterTeardown.getSubscriptionId()).isNotEqualTo(first.getSubscriptionId());
+    assertThat(p.subscribeCalls.get()).isEqualTo(2);
+    assertThat(a.dedupIndexSize()).isEqualTo(1);
   }
 
   /**

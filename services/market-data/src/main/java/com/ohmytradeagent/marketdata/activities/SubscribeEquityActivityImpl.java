@@ -312,14 +312,26 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       WorkflowStub stub = workflowClient.newUntypedWorkflowStub(targetWfId);
       stub.signal(signalName, tick);
     } catch (WorkflowNotFoundException notFound) {
-      tearDown(subscriptionId, targetWfId, "target workflow closed");
+      tearDown(tick.getTicker(), subscriptionId, targetWfId, "target workflow closed");
     } catch (Exception ignored) {
       // Best-effort tick dispatch — transient errors are not surfaced (premium-activity precedent).
     }
   }
 
-  /** Loud audit + subscription teardown on a dropped/closed target. */
-  private void tearDown(String subscriptionId, String targetWfId, String reason) {
+  /**
+   * Loud audit + subscription teardown on a dropped/closed target.
+   *
+   * <p>The dedup-index entry is removed with the TWO-ARG {@code remove(key, value)} so a late
+   * teardown of an OLD subscription cannot clobber a newer one that already replaced it for the
+   * same (ticker, workflow) — the same discipline premium's teardown uses. Removing it at all
+   * matters for two reasons: without it the index grows by one entry per leg for the worker's life
+   * (legs are day-scoped, so that is unbounded), and a re-subscribe after teardown should open a
+   * genuinely fresh subscription rather than consult a stale mapping.
+   *
+   * <p>Cleanup runs on BOTH paths: a subscription already gone from {@code active} (superseded, or
+   * torn down twice) still leaves an index entry to reclaim.
+   */
+  private void tearDown(String ticker, String subscriptionId, String targetWfId, String reason) {
     if (subscriptionId == null) {
       return;
     }
@@ -328,6 +340,9 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
       watchdogTask.cancel(false);
     }
     Subscription sub = active.remove(subscriptionId);
+    if (ticker != null) {
+      subscriptionIdByKey.remove(dedupKey(ticker, targetWfId), subscriptionId);
+    }
     if (sub != null) {
       log.error(
           "AUDIT equity-subscription-dropped: subscription_id={} target_wf={} reason={}",
@@ -336,6 +351,11 @@ public class SubscribeEquityActivityImpl implements SubscribeEquityActivity {
           reason);
       sub.close();
     }
+  }
+
+  /** Visible for tests: how many (ticker, workflow) entries the dedup index currently holds. */
+  int dedupIndexSize() {
+    return subscriptionIdByKey.size();
   }
 
   boolean isRegularTradingHours() {
