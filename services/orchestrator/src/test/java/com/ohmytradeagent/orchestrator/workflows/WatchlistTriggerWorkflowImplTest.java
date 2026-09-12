@@ -370,6 +370,124 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(gated.getSubject()).containsEntry("status", "GATED");
   }
 
+  // #848: an established equity feed going SILENT is what a market-data restart looks like from
+  // inside the leg — the in-process subscription registry is gone, the subscribe Activity already
+  // COMPLETED so Temporal never retries it, and the activity's own no-tick watchdog died with the
+  // pod. Without this the leg awaits until EOD and the day reads as "no trigger" rather than
+  // "feed lost". The leg must notice the silence and re-attach its own subscription.
+  @Test
+  void feedGoesSilentAfterSubscribe_legReattachesItsOwnSubscription() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-silent");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // One tick proves the feed was alive, then nothing — the restart.
+    wf.equityTick(tick(new BigDecimal("759.00"), false)); // below T, no cross
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    AuditEvent silent = captureKind("TriggerFeedSilent");
+    assertThat(silent.getSubject()).containsEntry("ticker", "NVDA");
+    // Initial subscribe + exactly one re-attach for the one elapsed window.
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
+  // #852 review: a FIXED-cadence watchdog does not actually guarantee detection within one window.
+  // A tick landing just after a timer fires re-baselines the silence clock, so the next fire sees
+  // idle just under the window, skips, and detection slips a whole cycle — worst case ~2x the
+  // window. The PR's safety argument leans on the 5-minute figure, so the loop must sleep the
+  // REMAINING time rather than a fixed period, and this test pins the guarantee it claims.
+  @Test
+  void feedSilence_isDetectedWithinOneWindow_notTwo() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-latency");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Let the first window elapse with no ticks: the watchdog re-attaches once and re-baselines.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusSeconds(10));
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+
+    // A tick now lands just AFTER that re-baseline -- the adversarial position. The feed then dies.
+    wf.equityTick(tick(new BigDecimal("759.00"), false)); // below T, no cross
+
+    // One window plus a minute of slack after the tick. A fixed-cadence loop is still waiting for
+    // its next boundary here and has NOT re-attached; sleeping the remaining time has.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    verify(subscribeEquity, times(3)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
+  // #852 review: a resumed (continue-as-new) run deliberately does NOT re-subscribe, so it must
+  // still carry silence cover -- otherwise the protection silently evaporates at the first resume,
+  // which is precisely when a long-armed leg needs it.
+  @Test
+  void afterContinueAsNew_silenceWatchdogStillReattaches() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflowImpl.historyLengthWatermark = 1L; // trip continue-as-new on each pass
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-silent-can");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Sub-trigger ticks never cross, so the machine stays ARMED and each pass continues-as-new.
+    for (int i = 0; i < 3; i++) {
+      wf.equityTick(tick(new BigDecimal("759.00").add(new BigDecimal(i % 2)), false));
+    }
+    // Now silence, on a RESUMED run that never called subscribe itself.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    AuditEvent silent = captureKind("TriggerFeedSilent");
+    assertThat(silent.getSubject()).containsEntry("ticker", "NVDA");
+    // The initial subscribe (first run only) plus the resumed run's re-attach.
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
+  // The control, and the reason the window can be as short as it is: while ticks keep arriving the
+  // watchdog must stay quiet. A re-subscribe per window on a healthy feed would be pure noise.
+  @Test
+  void feedStillDelivering_watchdogDoesNotReattach() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-alive");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Keep the feed alive across the window: a tick, then most of a window, repeatedly.
+    for (int i = 0; i < 3; i++) {
+      wf.equityTick(tick(new BigDecimal("759.00"), false)); // below T, never crosses
+      env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.minusMinutes(1));
+    }
+
+    assertNoAuditKind("TriggerFeedSilent");
+    verify(subscribeEquity, times(1)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
+  // A feed that never established is already covered loudly by TriggerSubscriptionUnavailable; the
+  // silence watchdog must not pile a second re-subscribe audit on top of it once per window.
+  @Test
+  void feedNeverEstablished_silenceWatchdogStaysOut() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    when(subscribeEquity.subscribeEquity(any()))
+        .thenReturn(subscribeResult(SubscribeEquityResult.Status.GATED));
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-never");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    assertNoAuditKind("TriggerFeedSilent");
+    captureKind("TriggerSubscriptionUnavailable"); // the existing loud path still owns this case
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
   // Finding 3: continue-as-new replay seeded with BROKEN_OUT (RETEST). The live-cross guarantee
   // must hold across resume: a first post-resume tick still beyond the band must NOT fire; only a
   // valid pull-back into the zone fires.

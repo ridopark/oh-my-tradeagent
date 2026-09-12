@@ -88,6 +88,16 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   private static final String KIND_ENTRY_FILLED = "EntryFilled";
   private static final String KIND_ENTRY_UNFILLED = "TriggerEntryUnfilled";
   private static final String KIND_FEED_STALE = "TriggerFeedStale";
+
+  /**
+   * #848: the feed went SILENT — distinct from {@link #KIND_FEED_STALE}, which means a tick arrived
+   * and was marked stale. Silence means no tick arrived at all, which is what a market-data restart
+   * looks like from in here: the in-process subscription registry is gone, the activity already
+   * COMPLETED so Temporal never retries it, and the leg would otherwise await until EOD and read as
+   * "no trigger today" rather than "the feed was lost".
+   */
+  private static final String KIND_FEED_SILENT = "TriggerFeedSilent";
+
   private static final String KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE =
       "TriggerSubscriptionUnavailable";
   private static final String KIND_TRIGGER_SUBSCRIPTION_DEFERRED = "TriggerSubscriptionDeferred";
@@ -95,6 +105,13 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // getVersion change id for the pre-open equity-subscribe deferral. In-flight/old legs replay on
   // DEFAULT_VERSION (no new timer command); new legs get the deferred re-subscribe.
   private static final String VERSION_EQUITY_RESUBSCRIBE = "watchlist-equity-resubscribe";
+
+  /**
+   * #848 feed-silence watchdog: adds a repeating timer, so in-flight legs must replay unchanged.
+   */
+  private static final String VERSION_EQUITY_SILENCE_WATCHDOG =
+      "watchlist-equity-silence-watchdog-v1";
+
   // getVersion change id for resolving the leg's OCC at arm (display-only, for entryProximity).
   private static final String VERSION_ARM_OCC_RESOLVE = "watchlist-arm-occ-resolve";
   // Issue #165 port to the watchlist path: gate the new EntryFilled-log + child-start commands the
@@ -201,6 +218,32 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   // Signal-buffered state: handlers only enqueue/flag.
   private final ArrayDeque<EquityTick> pendingTicks = new ArrayDeque<>();
   private boolean cancelRequested;
+
+  /**
+   * How long the leg tolerates feed silence before re-attaching. Deliberately a constant, not
+   * config: {@code equity_emit_delta_pct} defaults to 0.0005 (0.05%), so during RTH a watchlist
+   * name clears that band constantly and multi-minute silence is abnormal. A re-subscribe is
+   * idempotent per (ticker, workflowId) since #848 Phase 1, so a spurious fire costs ONE activity
+   * call that returns the existing subscription — which is what lets this be short rather than
+   * cautious.
+   *
+   * <p>The watchdog sleeps the time REMAINING in the window rather than polling on a fixed cadence,
+   * so silence is detected within ONE window of the last tick. A fixed cadence would have made the
+   * real worst case ~2x this value, which {@code feedSilence_isDetectedWithinOneWindow_notTwo}
+   * pins.
+   */
+  static final Duration FEED_SILENCE_WINDOW = Duration.ofMinutes(5);
+
+  /** Workflow-clock millis of the last evidence the feed was alive. Never a wall-clock read. */
+  private long lastFeedActivityMillis;
+
+  /**
+   * True once a subscribe has reported SUBSCRIBED (or a resumed run inherited a live subscription).
+   * The watchdog only acts when the feed was believed live and then went quiet; a never-established
+   * feed is already covered loudly by the deferred / unavailable audits.
+   */
+  private boolean feedLive;
+
   private FillSignalPayload fillEvent;
 
   // Hoisted from run() so entryProximity() can read live entry state. Rebuilt + re-seeded from
@@ -216,6 +259,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
   @Override
   public void equityTick(EquityTick tick) {
     pendingTicks.add(tick);
+    // Signal handlers may run before run() gets the CPU; currentTimeMillis() is
+    // replay-deterministic.
+    lastFeedActivityMillis = Workflow.currentTimeMillis();
   }
 
   @Override
@@ -296,6 +342,13 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     // resumed run the existing subscription (keyed to the SAME workflow id) keeps signalling ticks
     // into the new run, so re-subscribing here would stack a duplicate listener per resume.
     boolean firstRun = input.getEtDate() == null;
+    if (!firstRun) {
+      // A continue-as-new resumption deliberately does NOT re-subscribe: the existing subscription
+      // is keyed to the SAME workflow id and keeps signalling into the new run. So the feed is
+      // believed live here for exactly the reason the re-subscribe is skipped, and the silence
+      // watchdog must carry over — otherwise a resumed leg loses its protection.
+      markFeedLive();
+    }
     if (firstRun) {
       logAudit(
           payload,
@@ -339,6 +392,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
       // this audit the leg would silently await until EOD. We still continue to the await/EOD path
       // (the fail-safe is the EOD cancel), but the dead-feed condition is now observable.
       SubscribeEquityResult subResult = subscribeAsync(payload, config).get();
+      if (subResult != null && subResult.getStatus() == SubscribeEquityResult.Status.SUBSCRIBED) {
+        markFeedLive();
+      }
       if (subResult == null || subResult.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
         boolean gated =
             subResult != null && subResult.getStatus() == SubscribeEquityResult.Status.GATED;
@@ -364,6 +420,9 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
               () -> {
                 Workflow.newTimer(deferUntilOpen).get();
                 SubscribeEquityResult retry = subscribeAsync(payload, config).get();
+                if (retry != null && retry.getStatus() == SubscribeEquityResult.Status.SUBSCRIBED) {
+                  markFeedLive();
+                }
                 if (retry == null || retry.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
                   logAudit(
                       payload,
@@ -412,6 +471,21 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
             Workflow.newTimer(eod).get();
             eodFired[0] = true;
           });
+    }
+
+    // #848 feed-silence watchdog. A market-data restart drops the in-process subscription registry;
+    // the subscribe Activity already COMPLETED, so Temporal never retries it, and nothing
+    // in-process
+    // survives to notice (the activity's own no-tick watchdog dies with the pod). From in here the
+    // only evidence is silence, so the leg watches for it and re-attaches its own feed.
+    //
+    // Version-gated because it adds a repeating timer: a v=0 replay of an in-flight leg takes no
+    // new
+    // command. Safe to re-dispatch at all only because #848 Phase 1 made subscribeEquity idempotent
+    // per (ticker, workflowId) — before that, this would have stacked a duplicate listener per
+    // fire.
+    if (Workflow.getVersion(VERSION_EQUITY_SILENCE_WATCHDOG, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      Async.procedure(() -> runFeedSilenceWatchdog(payload, config, eodFired));
     }
 
     while (true) {
@@ -1056,6 +1130,73 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
     return config.getGapTolerancePct() != null
         ? config.getGapTolerancePct()
         : new BigDecimal("0.005");
+  }
+
+  /** Records that the feed is believed live, and re-baselines the silence clock. */
+  private void markFeedLive() {
+    feedLive = true;
+    lastFeedActivityMillis = Workflow.currentTimeMillis();
+  }
+
+  /**
+   * Re-attaches the equity feed when it goes silent. Runs in its own coroutine until the leg is
+   * terminal; the workflow completing on FIRE/SKIP abandons the pending timer.
+   *
+   * <p>Only acts when the feed was believed live and then went quiet. A feed that never established
+   * is already covered loudly by {@code TriggerSubscriptionDeferred} / {@code
+   * TriggerSubscriptionUnavailable}, and re-subscribing on its behalf would just re-audit GATED
+   * once per window.
+   */
+  private void runFeedSilenceWatchdog(
+      WatchlistTriggerPayload payload, StrategyConfig config, boolean[] eodFired) {
+    final long windowMillis = FEED_SILENCE_WINDOW.toMillis();
+    while (true) {
+      // Sleep the time REMAINING in the window, not a fixed period. A fixed cadence does not
+      // actually guarantee detection within one window (#852 review): a tick landing just after a
+      // timer fires re-baselines the silence clock, the next fire then sees idle just under the
+      // window and skips, and detection slips a whole cycle — worst case ~2x the window. Sleeping
+      // the remainder re-converges on the real deadline after every tick.
+      long idleMillis = feedLive ? Workflow.currentTimeMillis() - lastFeedActivityMillis : 0L;
+      long remainingMillis = windowMillis - idleMillis;
+      if (remainingMillis > 0) {
+        Workflow.newTimer(Duration.ofMillis(remainingMillis)).get();
+        if (cancelRequested || eodFired[0]) {
+          return;
+        }
+        // Re-evaluate rather than act: a tick may have arrived while this timer was pending, which
+        // pushes the deadline out and is the whole point of re-reading idle here.
+        continue;
+      }
+      if (cancelRequested || eodFired[0]) {
+        return;
+      }
+      logAudit(
+          payload,
+          KIND_FEED_SILENT,
+          subject(
+              "ticker", payload.getTicker(),
+              "idle_secs", idleMillis / 1000,
+              "window_secs", FEED_SILENCE_WINDOW.toSeconds()));
+      SubscribeEquityResult again = subscribeAsync(payload, config).get();
+      // Re-baseline either way. On success the feed is live again; on failure this bounds retries
+      // to
+      // one per window instead of re-firing on every tick of a permanently dead feed.
+      lastFeedActivityMillis = Workflow.currentTimeMillis();
+      if (again == null || again.getStatus() != SubscribeEquityResult.Status.SUBSCRIBED) {
+        logAudit(
+            payload,
+            KIND_TRIGGER_SUBSCRIPTION_UNAVAILABLE,
+            subject(
+                "ticker",
+                payload.getTicker(),
+                "status",
+                again == null ? "null" : again.getStatus().value(),
+                "detail",
+                again == null ? "" : again.getError(),
+                "phase",
+                "silence_resubscribe"));
+      }
+    }
   }
 
   private static BigDecimal emitDeltaPct(StrategyConfig config) {

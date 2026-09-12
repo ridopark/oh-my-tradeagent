@@ -514,6 +514,15 @@ public final class AuditEventKinds {
           "TriggerCancelled",
           "TriggerFireRejected",
           "TriggerFeedStale",
+          // Emitted by WatchlistTriggerWorkflowImpl when an established equity feed goes SILENT (no
+          // ticks for the silence window) and the leg re-attaches its own subscription. Distinct
+          // from TriggerFeedStale, which means a tick DID arrive and was marked stale. The silent
+          // case is what a market-data restart looks like from inside the leg: the in-process
+          // subscription registry is gone and the subscribe Activity already completed, so without
+          // this the leg awaits until EOD and the day reads as "no trigger" rather than "feed
+          // lost".
+          // Neutral observability event -- registered in ALL_KINDS only.
+          "TriggerFeedSilent",
           // Emitted by WatchlistTriggerWorkflowImpl when the entry order receives no fill within
           // the
           // pending TTL: the resting order is best-effort cancelled and the leg completes WITHOUT
