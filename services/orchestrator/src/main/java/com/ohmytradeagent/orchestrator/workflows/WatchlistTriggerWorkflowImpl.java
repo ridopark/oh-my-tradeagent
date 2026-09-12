@@ -226,6 +226,11 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
    * idempotent per (ticker, workflowId) since #848 Phase 1, so a spurious fire costs ONE activity
    * call that returns the existing subscription — which is what lets this be short rather than
    * cautious.
+   *
+   * <p>The watchdog sleeps the time REMAINING in the window rather than polling on a fixed cadence,
+   * so silence is detected within ONE window of the last tick. A fixed cadence would have made the
+   * real worst case ~2x this value, which {@code feedSilence_isDetectedWithinOneWindow_notTwo}
+   * pins.
    */
   static final Duration FEED_SILENCE_WINDOW = Duration.ofMinutes(5);
 
@@ -1144,17 +1149,26 @@ public class WatchlistTriggerWorkflowImpl implements WatchlistTriggerWorkflow {
    */
   private void runFeedSilenceWatchdog(
       WatchlistTriggerPayload payload, StrategyConfig config, boolean[] eodFired) {
+    final long windowMillis = FEED_SILENCE_WINDOW.toMillis();
     while (true) {
-      Workflow.newTimer(FEED_SILENCE_WINDOW).get();
+      // Sleep the time REMAINING in the window, not a fixed period. A fixed cadence does not
+      // actually guarantee detection within one window (#852 review): a tick landing just after a
+      // timer fires re-baselines the silence clock, the next fire then sees idle just under the
+      // window and skips, and detection slips a whole cycle — worst case ~2x the window. Sleeping
+      // the remainder re-converges on the real deadline after every tick.
+      long idleMillis = feedLive ? Workflow.currentTimeMillis() - lastFeedActivityMillis : 0L;
+      long remainingMillis = windowMillis - idleMillis;
+      if (remainingMillis > 0) {
+        Workflow.newTimer(Duration.ofMillis(remainingMillis)).get();
+        if (cancelRequested || eodFired[0]) {
+          return;
+        }
+        // Re-evaluate rather than act: a tick may have arrived while this timer was pending, which
+        // pushes the deadline out and is the whole point of re-reading idle here.
+        continue;
+      }
       if (cancelRequested || eodFired[0]) {
         return;
-      }
-      if (!feedLive) {
-        continue;
-      }
-      long idleMillis = Workflow.currentTimeMillis() - lastFeedActivityMillis;
-      if (idleMillis < FEED_SILENCE_WINDOW.toMillis()) {
-        continue;
       }
       logAudit(
           payload,

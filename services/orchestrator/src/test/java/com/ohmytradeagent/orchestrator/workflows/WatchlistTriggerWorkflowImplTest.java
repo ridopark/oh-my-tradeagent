@@ -394,6 +394,60 @@ class WatchlistTriggerWorkflowImplTest {
     assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
   }
 
+  // #852 review: a FIXED-cadence watchdog does not actually guarantee detection within one window.
+  // A tick landing just after a timer fires re-baselines the silence clock, so the next fire sees
+  // idle just under the window, skips, and detection slips a whole cycle — worst case ~2x the
+  // window. The PR's safety argument leans on the 5-minute figure, so the loop must sleep the
+  // REMAINING time rather than a fixed period, and this test pins the guarantee it claims.
+  @Test
+  void feedSilence_isDetectedWithinOneWindow_notTwo() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-latency");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Let the first window elapse with no ticks: the watchdog re-attaches once and re-baselines.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusSeconds(10));
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+
+    // A tick now lands just AFTER that re-baseline -- the adversarial position. The feed then dies.
+    wf.equityTick(tick(new BigDecimal("759.00"), false)); // below T, no cross
+
+    // One window plus a minute of slack after the tick. A fixed-cadence loop is still waiting for
+    // its next boundary here and has NOT re-attached; sleeping the remaining time has.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    verify(subscribeEquity, times(3)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
+  // #852 review: a resumed (continue-as-new) run deliberately does NOT re-subscribe, so it must
+  // still carry silence cover -- otherwise the protection silently evaporates at the first resume,
+  // which is precisely when a long-armed leg needs it.
+  @Test
+  void afterContinueAsNew_silenceWatchdogStillReattaches() throws Exception {
+    when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+    WatchlistTriggerWorkflowImpl.historyLengthWatermark = 1L; // trip continue-as-new on each pass
+    WatchlistTriggerWorkflow wf = newStub("wl-feed-silent-can");
+    WorkflowStub.fromTyped(wf).start(input(breakoutAbovePayload(), config()));
+
+    // Sub-trigger ticks never cross, so the machine stays ARMED and each pass continues-as-new.
+    for (int i = 0; i < 3; i++) {
+      wf.equityTick(tick(new BigDecimal("759.00").add(new BigDecimal(i % 2)), false));
+    }
+    // Now silence, on a RESUMED run that never called subscribe itself.
+    env.sleep(WatchlistTriggerWorkflowImpl.FEED_SILENCE_WINDOW.plusMinutes(1));
+
+    AuditEvent silent = captureKind("TriggerFeedSilent");
+    assertThat(silent.getSubject()).containsEntry("ticker", "NVDA");
+    // The initial subscribe (first run only) plus the resumed run's re-attach.
+    verify(subscribeEquity, times(2)).subscribeEquity(any());
+
+    wf.cancel();
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).endsWith(":cancelled");
+  }
+
   // The control, and the reason the window can be as short as it is: while ticks keep arriving the
   // watchdog must stay quiet. A re-subscribe per window on a healthy feed would be pure noise.
   @Test
