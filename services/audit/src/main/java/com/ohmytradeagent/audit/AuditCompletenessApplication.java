@@ -1,8 +1,6 @@
 package com.ohmytradeagent.audit;
 
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
@@ -15,8 +13,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * Issue #90 CLI entry point. Run as:
  *
  * <pre>
+ * # every (tenant, strategy) with activity in the window — the CronJob's mode
+ * java -jar audit-svc-0.1.0-SNAPSHOT.jar --from=2026-05-01 --to=2026-05-02
+ *
+ * # one pair, for ad-hoc investigation
  * java -jar audit-svc-0.1.0-SNAPSHOT.jar \
- *   --tenant=dev --strategy=copytrade-v1 \
+ *   --tenant=prod_real --strategy=copytrade-v1 \
  *   --from=2026-05-01 --to=2026-05-02
  * </pre>
  *
@@ -33,7 +35,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 @SpringBootApplication
 public class AuditCompletenessApplication implements ApplicationRunner, ExitCodeGenerator {
 
-  @Autowired private AuditCompletenessVerifier verifier;
+  @Autowired private CompletenessRunner runner;
 
   private int exitCode = 0;
 
@@ -52,37 +54,24 @@ public class AuditCompletenessApplication implements ApplicationRunner, ExitCode
 
   @Override
   public void run(ApplicationArguments args) {
-    String tenant = requiredArg(args, "tenant");
-    String strategy = requiredArg(args, "strategy");
+    // tenant/strategy are now OPTIONAL. Omitted (the CronJob's mode) means "every pair with
+    // activity
+    // in the window", so a new tenant is covered without editing a manifest — the hardcoded
+    // TENANT=dev is exactly what made this job verify nothing for months (#853).
+    String tenant = optionalArg(args, "tenant");
+    String strategy = optionalArg(args, "strategy");
+    if ((tenant == null) != (strategy == null)) {
+      throw new IllegalArgumentException(
+          "--tenant and --strategy must be given together, or both omitted to verify every pair");
+    }
     LocalDate from = LocalDate.parse(requiredArg(args, "from"));
     LocalDate to = LocalDate.parse(requiredArg(args, "to"));
+    exitCode = runner.run(tenant, strategy, from, to);
+  }
 
-    OffsetDateTime fromTs = from.atStartOfDay(ZoneOffset.UTC).toOffsetDateTime();
-    OffsetDateTime toTs = to.atStartOfDay(ZoneOffset.UTC).toOffsetDateTime();
-
-    AuditCompletenessVerifier.Report report = verifier.verify(tenant, strategy, fromTs, toTs);
-
-    System.out.printf(
-        "audit_completeness tenant=%s strategy=%s from=%s to=%s events=%d lifecycles=%d "
-            + "complete=%d score=%.2f%% divergences=%d result=%s%n",
-        report.tenantId(),
-        report.strategyId(),
-        from,
-        to,
-        report.totalEvents(),
-        report.totalLifecycles(),
-        report.completeLifecycles(),
-        report.score(),
-        report.divergences().size(),
-        report.passed() ? "PASS" : "FAIL");
-    if (!report.passed()) {
-      for (Divergence d : report.divergences()) {
-        System.out.printf(
-            "  divergence kind=%s correlation_id=%s detail=%s%n",
-            d.kind(), d.correlationId(), d.detail());
-      }
-      exitCode = 1;
-    }
+  private static String optionalArg(ApplicationArguments args, String name) {
+    List<String> vals = args.getOptionValues(name);
+    return (vals == null || vals.isEmpty() || vals.get(0).isBlank()) ? null : vals.get(0);
   }
 
   private static String requiredArg(ApplicationArguments args, String name) {

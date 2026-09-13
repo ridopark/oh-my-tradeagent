@@ -11,7 +11,10 @@ import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
@@ -67,8 +70,20 @@ class AuditCompletenessVerifierIT {
         DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
     dsl = DSL.using(conn, SQLDialect.POSTGRES);
-    verifier = new AuditCompletenessVerifier(new JooqAuditEventSource(dsl, OM));
+    verifier =
+        new AuditCompletenessVerifier(
+            new JooqAuditEventSource(dsl, OM), new LedgerRederiver(), openPositions);
   }
+
+  /**
+   * Stands in for Temporal. Defaults to "nothing is open", which keeps every pre-existing assertion
+   * meaning what it did: a suppressed close on a position that is NOT open is still a divergence.
+   * Tests that want the open-position path add the correlation id here.
+   */
+  private static final Set<String> openCorrelations = new HashSet<>();
+
+  private static final OpenPositionSource openPositions =
+      (tenantId, strategyId) -> Set.copyOf(openCorrelations);
 
   @AfterAll
   static void closeDb() throws Exception {
@@ -116,6 +131,76 @@ class AuditCompletenessVerifierIT {
     assertThat(report.divergences())
         .hasSize(1)
         .allSatisfy(d -> assertThat(d.kind()).isEqualTo(Divergence.Kind.MISSING_TERMINAL_CLOSE));
+    assertThat(report.openLifecycles()).isZero();
+  }
+
+  // #853: the same suppressed close, except the position IS still open. This is the overnight hold
+  // that made the verifier permanently red on every real tenant: it must now carry forward as OPEN,
+  // score 100% over zero settled lifecycles, and raise no divergence.
+  @Test
+  void unclosedLifecycleWhosePositionIsStillOpenIsCarriedForward() throws Exception {
+    truncate();
+    String corr = "signal-open-" + UUID.randomUUID();
+    insert(audit(corr, "EntryFilled", ts(0, 0)));
+    insert(audit(corr, "PositionEntered", ts(0, 1)));
+    // PositionClosed absent because the position is STILL OPEN, not because an event was lost.
+    openCorrelations.add(corr);
+    try {
+      AuditCompletenessVerifier.Report report =
+          verifier.verify(
+              "dev", "copytrade-v1", day(LocalDate.of(2026, 5, 1)), day(LocalDate.of(2026, 5, 2)));
+
+      assertThat(report.divergences()).isEmpty();
+      assertThat(report.openLifecycles()).isEqualTo(1);
+      assertThat(report.totalLifecycles()).as("settled lifecycles only").isZero();
+      assertThat(report.score()).isEqualTo(100.0);
+      assertThat(report.passed()).isTrue();
+    } finally {
+      openCorrelations.remove(corr);
+    }
+  }
+
+  // #853: the real SQL behind pair discovery. The unit tests stub AuditPairSource, so this is the
+  // only place the jOOQ column mapping is exercised at all — a typo in a column name would
+  // otherwise
+  // surface first in the nightly CronJob.
+  @Test
+  void pairsInWindowDiscoversEveryTenantStrategyWithActivity() throws Exception {
+    truncate();
+    insert(audit("corr-a", "EntryFilled", ts(0, 0)));
+    insert(auditFor("other_tenant", "watchlist-trigger-v1", "corr-b", "EntryFilled", ts(0, 1)));
+    insert(auditFor("other_tenant", "watchlist-trigger-v1", "corr-c", "PositionClosed", ts(0, 2)));
+
+    List<AuditPairSource.TenantStrategy> pairs =
+        new JooqAuditEventSource(dsl, OM)
+            .pairsInWindow(day(LocalDate.of(2026, 5, 1)), day(LocalDate.of(2026, 5, 2)));
+
+    assertThat(pairs)
+        .as("one entry per distinct (tenant, strategy), ordered, duplicates collapsed")
+        .containsExactly(
+            new AuditPairSource.TenantStrategy("dev", "copytrade-v1"),
+            new AuditPairSource.TenantStrategy("other_tenant", "watchlist-trigger-v1"));
+  }
+
+  @Test
+  void pairsInWindowExcludesActivityOutsideTheWindow() throws Exception {
+    truncate();
+    insert(audit("corr-in", "EntryFilled", ts(0, 0)));
+    // ts() is an hour-of-DAY offset from 14:00 on 2026-05-01, not a duration — ts(48,0) asked for
+    // hour 62. Use an explicit later day instead, which is what "outside the window" meant.
+    insert(
+        auditFor(
+            "late_tenant",
+            "copytrade-v1",
+            "corr-late",
+            "EntryFilled",
+            day(LocalDate.of(2026, 5, 3))));
+
+    List<AuditPairSource.TenantStrategy> pairs =
+        new JooqAuditEventSource(dsl, OM)
+            .pairsInWindow(day(LocalDate.of(2026, 5, 1)), day(LocalDate.of(2026, 5, 2)));
+
+    assertThat(pairs).containsExactly(new AuditPairSource.TenantStrategy("dev", "copytrade-v1"));
   }
 
   @Test
@@ -144,10 +229,16 @@ class AuditCompletenessVerifierIT {
   }
 
   private static AuditEvent audit(String corr, String kind, OffsetDateTime occurred) {
+    return auditFor("dev", "copytrade-v1", corr, kind, occurred);
+  }
+
+  /** Same fixture for an arbitrary (tenant, strategy) — pair-discovery needs more than one. */
+  private static AuditEvent auditFor(
+      String tenantId, String strategyId, String corr, String kind, OffsetDateTime occurred) {
     AuditEvent e = new AuditEvent();
     e.setSchemaVersion(1L);
-    e.setTenantId("dev");
-    e.setStrategyId("copytrade-v1");
+    e.setTenantId(tenantId);
+    e.setStrategyId(strategyId);
     e.setEventId(UUID.randomUUID().toString());
     e.setOccurredAt(occurred);
     e.setKind(kind);

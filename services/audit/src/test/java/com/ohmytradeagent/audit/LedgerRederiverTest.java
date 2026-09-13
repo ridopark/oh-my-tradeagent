@@ -36,16 +36,20 @@ class LedgerRederiverTest {
       events.add(event(corr, "PositionClosed", t(i, 8)));
     }
 
-    List<Divergence> findings = rederiver.rederive(events);
+    List<Divergence> findings = rederiver.rederive(events).divergences();
 
     assertThat(findings).as("clean BTO->fill->close cycles must yield zero divergence").isEmpty();
   }
 
   @Test
-  void suppressingTerminalCloseProducesMissingTerminalCloseDivergence() {
-    // Acceptance criterion 2 (first half): "Deliberately suppressing one audit event in a test
-    // causes the verifier to exit non-zero with a diff identifying the missing event." The
-    // structured detail names the affected correlation_id.
+  void suppressingTerminalCloseReportsTheLifecycleAsUnclosed() {
+    // #853 re-scoped this. Acceptance criterion 2 ("suppressing one audit event makes the verifier
+    // exit non-zero with a diff naming the missing event") still holds, but it is no longer the
+    // re-deriver's call to make: an open position and a lost close event are indistinguishable
+    // here.
+    // The re-deriver reports the lifecycle as unclosed; AuditCompletenessVerifier asks
+    // OpenPositionSource and only then raises MISSING_TERMINAL_CLOSE. The teeth live in
+    // AuditCompletenessVerifierTest#unclosedLifecycleWithNoOpenPositionIsADivergence.
     String corr = "signal-42";
     List<AuditEvent> events =
         new ArrayList<>(
@@ -56,13 +60,29 @@ class LedgerRederiverTest {
                 // PositionClosed deliberately omitted.
                 ));
 
-    List<Divergence> findings = rederiver.rederive(events);
+    LedgerRederiver.Rederivation result = rederiver.rederive(events);
 
-    assertThat(findings).hasSize(1);
-    Divergence d = findings.get(0);
-    assertThat(d.kind()).isEqualTo(Divergence.Kind.MISSING_TERMINAL_CLOSE);
-    assertThat(d.correlationId()).isEqualTo(corr);
-    assertThat(d.detail()).contains("lifecycle_unclosed");
+    assertThat(result.unclosedLifecycles()).containsExactly(corr);
+    assertThat(result.divergences())
+        .as("unclosed is not a fault on its own — the position may simply still be open")
+        .isEmpty();
+  }
+
+  @Test
+  void aClosedLifecycleIsNotReportedAsUnclosed() {
+    // The complement, so the unclosed set cannot be satisfied by always reporting everything.
+    String corr = "signal-closed";
+    List<AuditEvent> events =
+        new ArrayList<>(
+            List.of(
+                event(corr, "EntryFilled", t(0, 0)),
+                event(corr, "PositionEntered", t(0, 1)),
+                event(corr, "PositionClosed", t(0, 2))));
+
+    LedgerRederiver.Rederivation result = rederiver.rederive(events);
+
+    assertThat(result.unclosedLifecycles()).isEmpty();
+    assertThat(result.divergences()).isEmpty();
   }
 
   @Test
@@ -79,7 +99,7 @@ class LedgerRederiverTest {
                 // PartialExitFilled deliberately omitted.
                 event(corr, "PositionClosed", t(0, 3))));
 
-    List<Divergence> findings = rederiver.rederive(events);
+    List<Divergence> findings = rederiver.rederive(events).divergences();
 
     assertThat(findings).hasSize(1);
     Divergence d = findings.get(0);
@@ -99,7 +119,7 @@ class LedgerRederiverTest {
                 event(corr, "OrderSubmitted", t(0, 1)),
                 event(corr, "EntryExpired", t(0, 2))));
 
-    assertThat(rederiver.rederive(events)).isEmpty();
+    assertThat(rederiver.rederive(events).divergences()).isEmpty();
   }
 
   @Test
@@ -111,7 +131,7 @@ class LedgerRederiverTest {
             List.of(
                 event(corr, "SignalReceived", t(0, 0)), event(corr, "SignalRejected", t(0, 1))));
 
-    assertThat(rederiver.rederive(events)).isEmpty();
+    assertThat(rederiver.rederive(events).divergences()).isEmpty();
   }
 
   @Test
@@ -120,7 +140,7 @@ class LedgerRederiverTest {
     String corr = "signal-orphan";
     List<AuditEvent> events = new ArrayList<>(List.of(event(corr, "PositionClosed", t(0, 0))));
 
-    List<Divergence> findings = rederiver.rederive(events);
+    List<Divergence> findings = rederiver.rederive(events).divergences();
     assertThat(findings).hasSize(1);
     assertThat(findings.get(0).kind()).isEqualTo(Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY);
   }
@@ -139,7 +159,7 @@ class LedgerRederiverTest {
                 event(corr, "SomeNewKindNotInRegistry", t(0, 2)),
                 event(corr, "PositionClosed", t(0, 3))));
 
-    List<Divergence> findings = rederiver.rederive(events);
+    List<Divergence> findings = rederiver.rederive(events).divergences();
 
     assertThat(findings).hasSize(1);
     assertThat(findings.get(0).kind()).isEqualTo(Divergence.Kind.UNKNOWN_KIND);
@@ -166,7 +186,7 @@ class LedgerRederiverTest {
                 event(corr, "EodForceFlattened", t(0, 4)),
                 event(corr, "PositionClosed", t(0, 5))));
 
-    List<Divergence> findings = rederiver.rederive(events);
+    List<Divergence> findings = rederiver.rederive(events).divergences();
 
     assertThat(findings)
         .as("a flatten-origin PartialExitFilled without a PartialExitRequested is tolerated")
@@ -178,7 +198,7 @@ class LedgerRederiverTest {
     // KillSwitchTripped and similar workflow-scoped events have no correlation_id; they must
     // not raise spurious divergences.
     AuditEvent killSwitch = event(null, "KillSwitchTripped", t(0, 0));
-    assertThat(rederiver.rederive(List.of(killSwitch))).isEmpty();
+    assertThat(rederiver.rederive(List.of(killSwitch)).divergences()).isEmpty();
   }
 
   // ---- helpers ----

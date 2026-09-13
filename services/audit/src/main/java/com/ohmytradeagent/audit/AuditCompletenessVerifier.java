@@ -2,6 +2,7 @@ package com.ohmytradeagent.audit;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -14,13 +15,13 @@ import org.springframework.stereotype.Component;
  * Issue #90 verifier core. Pulls a window of audit events via {@link AuditEventSource}, runs {@link
  * LedgerRederiver}, and produces a {@link Report} with the divergences and a completeness score.
  *
- * <p>"Completeness score" (criterion 4) is defined as: of the unique position lifecycles in the
- * window (one per distinct {@code correlation_id} that has at least one ENTRY-kind event), what
- * fraction have zero divergences. 100% = every lifecycle is internally consistent; anything less is
- * a failure of the Phase 7 gate criterion (e). When the window contains zero lifecycles, the score
- * is reported as 100% (no events, no divergence) and the verifier exits with success — this matches
- * the documented "20 consecutive green days" semantics: a market-closed day with zero activity
- * should not break the streak.
+ * <p>"Completeness score" (criterion 4) is defined as: of the position lifecycles that SETTLED in
+ * the window (one per distinct {@code correlation_id} with at least one ENTRY-kind event, minus
+ * those whose position is still open), what fraction have zero divergences. 100% = every lifecycle
+ * is internally consistent; anything less is a failure of the Phase 7 gate criterion (e). When the
+ * window contains zero lifecycles, the score is reported as 100% (no events, no divergence) and the
+ * verifier exits with success — this matches the documented "20 consecutive green days" semantics:
+ * a market-closed day with zero activity should not break the streak.
  */
 @Component
 public final class AuditCompletenessVerifier {
@@ -29,6 +30,7 @@ public final class AuditCompletenessVerifier {
 
   private final AuditEventSource source;
   private final LedgerRederiver rederiver;
+  private final OpenPositionSource openPositions;
 
   /**
    * {@code @Autowired} is required here, not decorative. Two constructors are declared (the one
@@ -40,13 +42,15 @@ public final class AuditCompletenessVerifier {
    * SpringComponentConstructorGuardTest} in this module now catches it.
    */
   @Autowired
-  public AuditCompletenessVerifier(AuditEventSource source) {
-    this(source, new LedgerRederiver());
+  public AuditCompletenessVerifier(AuditEventSource source, OpenPositionSource openPositions) {
+    this(source, new LedgerRederiver(), openPositions);
   }
 
-  AuditCompletenessVerifier(AuditEventSource source, LedgerRederiver rederiver) {
+  AuditCompletenessVerifier(
+      AuditEventSource source, LedgerRederiver rederiver, OpenPositionSource openPositions) {
     this.source = source;
     this.rederiver = rederiver;
+    this.openPositions = openPositions;
   }
 
   public Report verify(
@@ -55,7 +59,27 @@ public final class AuditCompletenessVerifier {
       OffsetDateTime fromInclusive,
       OffsetDateTime toExclusive) {
     List<AuditEvent> events = source.readWindow(tenantId, strategyId, fromInclusive, toExclusive);
-    List<Divergence> divergences = rederiver.rederive(events);
+    LedgerRederiver.Rederivation rederivation = rederiver.rederive(events);
+    List<Divergence> divergences = new ArrayList<>(rederivation.divergences());
+
+    // An unclosed lifecycle is only a fault if the position is NOT still open. The two are
+    // indistinguishable in the log — measured: a prod_real position entered 2026-09-09 and still
+    // open three days later has five events, all on the entry day, and nothing since. So ask
+    // Temporal, which is where positions actually live, instead of assuming the window contains a
+    // whole lifecycle (#853).
+    Set<String> openNow = openPositions.openCorrelationIds(tenantId, strategyId);
+    Set<String> openLifecycles = new HashSet<>();
+    for (String correlationId : rederivation.unclosedLifecycles()) {
+      if (openNow.contains(correlationId)) {
+        openLifecycles.add(correlationId);
+      } else {
+        divergences.add(
+            new Divergence(
+                Divergence.Kind.MISSING_TERMINAL_CLOSE,
+                correlationId,
+                "entry_present=true lifecycle_unclosed position_not_open"));
+      }
+    }
 
     Set<String> entryCorrelations = new HashSet<>();
     for (AuditEvent ev : events) {
@@ -67,15 +91,21 @@ public final class AuditCompletenessVerifier {
     for (Divergence d : divergences) {
       divergentCorrelations.add(d.correlationId());
     }
-    // Intersect: only lifecycles that actually opened count toward the denominator. Unknown-kind
-    // findings on neutral events are still reported in the divergence list but do not push the
-    // score below 100% if no lifecycle is affected — they're a registry-drift signal, not a
-    // ledger-completeness signal.
-    Set<String> divergentLifecycles = new HashSet<>(entryCorrelations);
-    divergentLifecycles.retainAll(divergentCorrelations);
+    // Only lifecycles that actually opened count toward the denominator, and the intersection is
+    // taken against `settled` below. Unknown-kind findings on neutral events are still reported in
+    // the divergence list but do not push the score below 100% when no lifecycle is affected —
+    // they're a registry-drift signal, not a ledger-completeness one.
+    // Open lifecycles leave BOTH sides of the ratio: they are unfinished, not inconsistent, so they
+    // can neither pass nor fail. The denominator is the lifecycles that actually SETTLED in the
+    // window. A window where everything is still open therefore scores 100% over zero settled
+    // lifecycles, which is the same documented rule as an empty window.
+    Set<String> settled = new HashSet<>(entryCorrelations);
+    settled.removeAll(openLifecycles);
+    Set<String> divergentSettled = new HashSet<>(settled);
+    divergentSettled.retainAll(divergentCorrelations);
 
-    int totalLifecycles = entryCorrelations.size();
-    int completeLifecycles = totalLifecycles - divergentLifecycles.size();
+    int totalLifecycles = settled.size();
+    int completeLifecycles = totalLifecycles - divergentSettled.size();
     double score = totalLifecycles == 0 ? 100.0 : 100.0 * completeLifecycles / totalLifecycles;
 
     Report report =
@@ -87,10 +117,12 @@ public final class AuditCompletenessVerifier {
             events.size(),
             totalLifecycles,
             completeLifecycles,
+            openLifecycles.size(),
             score,
-            divergences);
+            List.copyOf(divergences));
     log.info(
-        "audit-completeness tenant={} strategy={} window=[{},{}) events={} lifecycles={} complete={} score={}",
+        "audit-completeness tenant={} strategy={} window=[{},{}) events={} settled_lifecycles={}"
+            + " complete={} open_carried_forward={} score={}",
         tenantId,
         strategyId,
         fromInclusive,
@@ -98,6 +130,7 @@ public final class AuditCompletenessVerifier {
         events.size(),
         totalLifecycles,
         completeLifecycles,
+        openLifecycles.size(),
         String.format("%.2f%%", score));
     return report;
   }
@@ -115,6 +148,7 @@ public final class AuditCompletenessVerifier {
       int totalEvents,
       int totalLifecycles,
       int completeLifecycles,
+      int openLifecycles,
       double score,
       List<Divergence> divergences) {
 

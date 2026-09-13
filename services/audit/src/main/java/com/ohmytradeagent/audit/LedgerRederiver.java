@@ -4,8 +4,10 @@ import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Pure, in-memory re-derivation of the position ledger from a sequence of {@link AuditEvent} rows.
@@ -23,9 +25,12 @@ import java.util.Map;
  *   <li>For each correlation group, scan ordered by {@code occurred_at} ascending and classify each
  *       event into one of: ENTRY, PARTIAL_EXIT_REQUEST, PARTIAL_EXIT_FILL, TERMINAL_CLOSE, or
  *       "neutral" (ignored for ledger purposes).
- *   <li>A lifecycle is well-formed if (a) it contains at least one ENTRY, (b) every
- *       PARTIAL_EXIT_REQUEST is followed by at least one PARTIAL_EXIT_FILL, and (c) the lifecycle
- *       ends with a TERMINAL_CLOSE event.
+ *   <li>A lifecycle is well-formed if (a) it contains at least one ENTRY and (b) every
+ *       PARTIAL_EXIT_REQUEST is followed by at least one PARTIAL_EXIT_FILL. A lifecycle with no
+ *       TERMINAL_CLOSE is NOT judged here: it is reported in {@link
+ *       Rederivation#unclosedLifecycles} and the caller decides. "Ends with a TERMINAL_CLOSE" was
+ *       once asserted per-window, which is unsound for a strategy that holds positions across days
+ *       — every overnight hold straddles the window boundary and scored as a fault (#853).
  *   <li>Any event whose {@code kind} is not in {@link AuditEventKinds#ALL_KINDS} is reported as
  *       {@code UNKNOWN_KIND} — this catches the drift case where the orchestrator emits a kind this
  *       build's registry doesn't know about.
@@ -49,8 +54,9 @@ public final class LedgerRederiver {
    * @param events the slice of {@code audit_log} rows for one (tenant, strategy, date range)
    * @return zero-or-more divergence findings, empty list when the ledger is complete
    */
-  public List<Divergence> rederive(List<AuditEvent> events) {
+  public Rederivation rederive(List<AuditEvent> events) {
     List<Divergence> divergences = new ArrayList<>();
+    Set<String> unclosed = new LinkedHashSet<>();
     Map<String, List<AuditEvent>> byCorrelation = new HashMap<>();
     for (AuditEvent ev : events) {
       if (ev.getKind() == null) {
@@ -73,13 +79,27 @@ public final class LedgerRederiver {
       byCorrelation.computeIfAbsent(corr, k -> new ArrayList<>()).add(ev);
     }
     for (Map.Entry<String, List<AuditEvent>> entry : byCorrelation.entrySet()) {
-      checkLifecycle(entry.getKey(), entry.getValue(), divergences);
+      checkLifecycle(entry.getKey(), entry.getValue(), divergences, unclosed);
     }
-    return divergences;
+    return new Rederivation(List.copyOf(divergences), Set.copyOf(unclosed));
   }
 
+  /**
+   * Result of one re-derivation.
+   *
+   * @param divergences findings that are genuinely inconsistent, whatever the position's current
+   *     state
+   * @param unclosedLifecycles correlation ids that opened in the window with no terminal close in
+   *     it. NOT faults on their own — an open position and a lost close event look identical in the
+   *     log, so the caller must consult {@link OpenPositionSource} to tell them apart
+   */
+  public record Rederivation(List<Divergence> divergences, Set<String> unclosedLifecycles) {}
+
   private static void checkLifecycle(
-      String correlationId, List<AuditEvent> events, List<Divergence> findings) {
+      String correlationId,
+      List<AuditEvent> events,
+      List<Divergence> findings,
+      Set<String> unclosed) {
     events.sort(
         Comparator.comparing(
             AuditEvent::getOccurredAt,
@@ -119,11 +139,9 @@ public final class LedgerRederiver {
               "close_event_id=" + firstHardCloseEventId));
     }
     if (opened && !anyClosed) {
-      findings.add(
-          new Divergence(
-              Divergence.Kind.MISSING_TERMINAL_CLOSE,
-              correlationId,
-              "entry_present=true lifecycle_unclosed"));
+      // Reported, not judged. The caller asks OpenPositionSource whether this position is still
+      // open; only a lifecycle that is NOT open has genuinely lost its close event.
+      unclosed.add(correlationId);
     }
     if (pendingExitRequests > exitFills) {
       findings.add(
