@@ -425,15 +425,23 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(futureInput(4));
     confirmEntry(stub, 4L);
 
-    // Signal both before any fill arrives
     stub.partialExit(partialExitRequest("sig-A", "pos-queue", 0.5));
-    stub.partialExit(partialExitRequest("sig-B", "pos-queue", 1.0));
 
+    // sig-B must ARRIVE while sig-A is genuinely in flight, because ExitQueued is emitted by the
+    // signal handler itself and only when it observes a busy exit:
+    //     boolean wasBusy = exitInFlight || !pendingExits.isEmpty();
+    // Sending both back-to-back left that to chance: sig-B's handler could land in the window
+    // between the main loop polling sig-A off pendingExits and setting exitInFlight, see NEITHER
+    // condition, and queue silently. ExitQueued then never fires, sig-B waits for a fill the test
+    // has not sent yet, and the wait below burns its full 50s deadline — the CI failure on
+    // 2026-09-29 (observed=[PositionEntered, PartialExitRequested]).
+    //
+    // waitForPlaceOrderCount(1) closes the window: processOne sets exitInFlight = true BEFORE it
+    // calls placeOrder, so the mock's first invocation proves the flag is already set, and sig-B's
+    // handler is then guaranteed to see wasBusy. Nothing is sent in between, so "both signalled
+    // before any fill arrives" — what this test is about — still holds.
     waitForPlaceOrderCount(1);
-    // Deterministic sync: guarantee sig-B is QUEUED (and ExitQueued emitted) while sig-A is still
-    // in-flight, before we drain sig-A with a fill. Without this the fill can drain sig-A first and
-    // sig-B is then processed directly (never queued), so ExitQueued is never emitted -> flaky
-    // captureKind("ExitQueued") below.
+    stub.partialExit(partialExitRequest("sig-B", "pos-queue", 1.0));
     waitForAuditKind("ExitQueued");
     // First fill closes 2 of 4
     stub.onFill(fill("brk-A", 2L, new BigDecimal("2.85")));
