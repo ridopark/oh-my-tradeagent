@@ -30,6 +30,7 @@ import {
   type QuoteActionResult,
   type SubmitActionResult,
   type StatusView,
+  type RecentContract,
 } from "@/components/ManualEntryPanel";
 import Link from "next/link";
 import {
@@ -38,6 +39,7 @@ import {
   getTrades,
   getSignals,
   signalOcc,
+  signalNumber,
   getTenantConfig,
   getAccountKillSwitch,
   getStrategyConfig,
@@ -305,7 +307,7 @@ export default async function LivePage() {
   // the dashboard and the BFF roll independently. If the dashboard lands first, this 404s — and
   // inside that Promise.all a 404 would reject the whole thing and render LiveUnavailable, taking
   // the operator page down for a convenience feature. Degrade to a plain text box instead.
-  const recentSignalOccs: string[] = await getSignals(50)
+  const recentSignalOccs: RecentContract[] = await getSignals(50)
     .then((r) => signalContractOptions(r.items))
     .catch(() => []);
 
@@ -672,10 +674,10 @@ function HoldingCard({
 // The contract list behind the manual-entry box: newest accepted signals first, one entry per
 // contract, and nothing already expired (offering an expired OCC guarantees a failed quote). Capped
 // because this is a type-ahead, not a history — the full feed lives on /trades.
-function signalContractOptions(signals: Signal[]): string[] {
+function signalContractOptions(signals: Signal[]): RecentContract[] {
   const today = new Date().toISOString().slice(0, 10);
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: RecentContract[] = [];
   for (const s of signals) {
     const occ = signalOcc(s);
     if (occ === null) {
@@ -690,7 +692,13 @@ function signalContractOptions(signals: Signal[]): string[] {
       continue;
     }
     seen.add(key);
-    out.push(occ.replace(/\s+/g, " ").trim());
+    out.push({
+      occ: occ.replace(/\s+/g, " ").trim(),
+      refPremium: signalNumber(s, "ref_premium"),
+      contracts: signalNumber(s, "contracts"),
+      // MM-DD: the year is noise at this width, and these are all recent by construction.
+      on: s.occurred_at.slice(5, 10),
+    });
     if (out.length === 20) {
       break;
     }
