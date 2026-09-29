@@ -780,6 +780,7 @@ class PositionWorkflowImplTest {
     assertThat(state.remainingQty()).isEqualTo(5L);
     assertThat(captureAll("PositionExpired")).isEmpty();
     assertThat(captureAll("PositionClosed")).isEmpty();
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -939,6 +940,7 @@ class PositionWorkflowImplTest {
     assertThat(state.remainingQty()).isEqualTo(5L);
     assertThat(captureAll("PositionClosed")).isEmpty();
     // A loud failure audit was emitted for the unfilled bounded flatten.
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -976,6 +978,7 @@ class PositionWorkflowImplTest {
     // EOD fires -> bounded flatten placed (#1) -> TTL elapses unfilled -> cancel + loud failure.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -984,6 +987,7 @@ class PositionWorkflowImplTest {
     // placeOrder.
     env.sleep(Duration.ofMinutes(6));
     waitForPlaceOrderCount(2);
+    waitForAuditKind("FlattenRetryScheduled");
     AuditEvent scheduled = captureKind("FlattenRetryScheduled");
     assertThat(scheduled.getSubject()).containsEntry("attempt", 1).containsEntry("reason", "eod");
 
@@ -1022,6 +1026,7 @@ class PositionWorkflowImplTest {
     // Three FlattenRetryScheduled (attempts 1..3) then the terminal FlattenRetryExhausted page.
     waitForPlaceOrderCount(4);
     assertThat(captureAll("FlattenRetryScheduled")).hasSize(3);
+    waitForAuditKind("FlattenRetryExhausted");
     AuditEvent exhausted = captureKind("FlattenRetryExhausted");
     assertThat(exhausted.getSubject()).containsEntry("attempts", 3).containsEntry("reason", "eod");
 
@@ -1074,6 +1079,7 @@ class PositionWorkflowImplTest {
     // timer.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     captureKind("EodForceFlattenFailed");
 
     // A LATE fill of the resting flatten drains the lot before the next-session timer fires.
@@ -1225,6 +1231,7 @@ class PositionWorkflowImplTest {
     assertThat(stub.positionState().remainingQty())
         .as("the entry residual must be booked into the managed lot")
         .isEqualTo(50L);
+    waitForAuditKind("PositionEntryIncreased");
     AuditEvent grown = captureKind("PositionEntryIncreased");
     assertThat(asLong(grown.getSubject().get("qty_added"))).isEqualTo(40L);
     assertThat(asLong(grown.getSubject().get("entry_qty_total"))).isEqualTo(50L);
@@ -1790,6 +1797,7 @@ class PositionWorkflowImplTest {
     // Still RUNNING, remainingQty unchanged, exactly one loud failure audit, no PositionClosed and
     // no fill booked.
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -1837,6 +1845,7 @@ class PositionWorkflowImplTest {
     // timeout -> loud failure + arm the next-session retry timer.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     captureKind("EodForceFlattenFailed");
 
     // Advance past the next-session open. The retry-loop reconcile now finds the resting order
@@ -2334,6 +2343,7 @@ class PositionWorkflowImplTest {
     // A query settles the workflow so the post-catch audit command is committed before we capture.
     // remainingQty NOT decremented (the failed partial sold nothing).
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("PartialExitPlaceFailed");
     AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
     assertThat(placeFailed.getSubject()).containsEntry("signal_id", "sig-qqq");
 
@@ -2343,6 +2353,7 @@ class PositionWorkflowImplTest {
     waitForPlaceOrderCount(2);
     // Query barrier: settle the workflow so the re-drive's audit command is committed.
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("PartialExitRetryRequested");
     AuditEvent retried = captureKind("PartialExitRetryRequested");
     assertThat(retried.getSubject())
         .containsEntry("signal_id", "sig-qqq")
@@ -2554,6 +2565,7 @@ class PositionWorkflowImplTest {
     // Position stays managed at the unchanged qty (the failure path does not zero remainingQty).
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
 
+    waitForAuditKind("PartialExitPlaceFailed");
     captureKind("PartialExitPlaceFailed");
     assertThat(captureAll("PartialExitAlreadyFlat")).isEmpty();
   }
@@ -3321,7 +3333,7 @@ class PositionWorkflowImplTest {
     confirmEntry(stub, 4L);
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
-    Thread.sleep(1500);
+    waitForAuditKind("RiskBreachFlattenSkippedLongDated");
 
     assertThat(stub.positionState().remainingQty())
         .as("a daily breaker must not liquidate a position whose horizon outlives it")
