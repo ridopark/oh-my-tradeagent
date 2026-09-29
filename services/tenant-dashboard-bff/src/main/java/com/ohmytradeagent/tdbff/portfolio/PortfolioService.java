@@ -4,11 +4,14 @@ import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
+import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -62,6 +65,8 @@ public class PortfolioService {
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
   private final PositionsReader positionsReader;
+  private final TradeContextSpotReader entrySpotReader;
+  private final MarketDataQuoteClient equityQuotes;
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
   private final BrokerPositionsClient brokerPositions;
@@ -92,9 +97,13 @@ public class PortfolioService {
       BrokerPositionsClient brokerPositions,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
+      TradeContextSpotReader entrySpotReader,
+      MarketDataQuoteClient equityQuotes,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
       @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.positionsReader = positionsReader;
+    this.entrySpotReader = entrySpotReader;
+    this.equityQuotes = equityQuotes;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
     this.brokerPositions = brokerPositions;
@@ -209,13 +218,34 @@ public class PortfolioService {
     // same way). No matching mark -> the row stays clean (mark fields omitted).
     List<OpenPosition> positions =
         await(positionsFuture, List.of(), "positions tenant=" + tenantId);
+    // The underlying's price at entry (recorded once per position by the #783 recorder) and its
+    // price now. Both are fail-soft: an empty map / a null price blanks the cell, because a
+    // market-data hop or a missing trade_context row must never cost the operator their holdings.
+    // One batched DB read, and one equity quote per DISTINCT underlying rather than per row —
+    // sibling positions on the same ticker are common (a manual entry beside a copied one).
+    Map<String, BigDecimal> entrySpotByWorkflow =
+        entrySpotReader.entrySpotByWorkflowId(
+            tenantId, positions.stream().map(OpenPosition::workflowId).toList());
+    Map<String, BigDecimal> spotNowByTicker = new HashMap<>();
+    for (OpenPosition p : positions) {
+      String ticker = underlyingOf(p.contractSymbol());
+      if (ticker != null) {
+        spotNowByTicker.computeIfAbsent(ticker, equityQuotes::equityPrice);
+      }
+    }
+
     BigDecimal sumOpenNotional = BigDecimal.ZERO;
     List<Map<String, Object>> positionItems = new ArrayList<>();
     for (OpenPosition p : positions) {
       sumOpenNotional = sumOpenNotional.add(p.openNotional());
       BrokerPositionsClient.PositionMarks marks =
           marksByOcc.get(BrokerPositionsClient.compactOcc(p.contractSymbol()));
-      positionItems.add(positionItem(p, marks));
+      positionItems.add(
+          positionItem(
+              p,
+              marks,
+              entrySpotByWorkflow.get(p.workflowId()),
+              spotNowByTicker.get(underlyingOf(p.contractSymbol()))));
     }
 
     // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
@@ -299,8 +329,24 @@ public class PortfolioService {
     }
   }
 
+  /**
+   * The equity ticker from a padded OCC ("SMCI 261120C00050000" -> "SMCI"), or null when the symbol
+   * is not one. Only the root is needed here; {@code OccSymbol} lives in the orchestrator and the
+   * BFF stays dependency-light.
+   */
+  private static String underlyingOf(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    String root = occ.replaceAll("^([A-Za-z]{1,6}).*$", "$1").trim();
+    return root.isEmpty() || root.length() == occ.trim().length() ? null : root.toUpperCase();
+  }
+
   private static Map<String, Object> positionItem(
-      OpenPosition p, BrokerPositionsClient.PositionMarks marks) {
+      OpenPosition p,
+      BrokerPositionsClient.PositionMarks marks,
+      BigDecimal underlyingSpotEntry,
+      BigDecimal underlyingPrice) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
@@ -308,6 +354,10 @@ public class PortfolioService {
     m.put("remaining_qty", p.remainingQty());
     m.put("entry_premium", p.entryPremium());
     m.put("open_notional", p.openNotional());
+    // Nullable on purpose and emitted either way: the dashboard renders "—" per half, so a row with
+    // an entry spot but no live quote (or the reverse) still shows what it has.
+    m.put("underlying_spot_entry", underlyingSpotEntry);
+    m.put("underlying_price", underlyingPrice);
     // Live broker marks, joined by OCC. current_price is the shared per-unit mark. The two P&L
     // figures are PER-ROW (#832): the broker's numbers are ACCOUNT-POSITION-level, and attaching
     // them verbatim duplicated the whole contract's P&L onto every sibling workflow row sharing

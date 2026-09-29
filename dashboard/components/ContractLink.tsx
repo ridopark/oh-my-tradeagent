@@ -20,6 +20,9 @@ export function ContractLink({
       href={`https://finance.yahoo.com/quote/${encodeURIComponent(compact)}`}
       target="_blank"
       rel="noopener noreferrer"
+      // The compact label drops the padded OCC's digits, so keep the full symbol reachable on
+      // hover — it is what an operator pastes into a ticket or a query.
+      title={compactLabel ? occ.replace(/\s+/g, " ").trim() : undefined}
       className="text-sky-400 hover:text-sky-300 hover:underline"
     >
       {display}

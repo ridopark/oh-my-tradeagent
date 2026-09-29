@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +13,8 @@ import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
+import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
@@ -26,6 +29,8 @@ class PortfolioServiceTest {
   private final BrokerPositionsClient brokerPositions = mock(BrokerPositionsClient.class);
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
   private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
+  private final TradeContextSpotReader entrySpotReader = mock(TradeContextSpotReader.class);
+  private final MarketDataQuoteClient equityQuotes = mock(MarketDataQuoteClient.class);
 
   private final PortfolioService service = newService(false, 9);
 
@@ -35,6 +40,9 @@ class PortfolioServiceTest {
     // Default realized P&L (today + all-time) to zero from the SINGLE consolidated call; the
     // aggregation test overrides per strategy.
     when(realizedPnl.computeRealized(any(), any(), any())).thenReturn(rp("0", "0"));
+    // Default: no recorded entry spot and no live equity quote — the underlying columns must be
+    // absent-tolerant, since that is the state for any position entered before the #783 recorder.
+    when(entrySpotReader.entrySpotByWorkflowId(any(), any())).thenReturn(Map.of());
   }
 
   // Builds the consolidated {today, all-time} record PortfolioService now reads per strategy.
@@ -50,6 +58,8 @@ class PortfolioServiceTest {
         brokerPositions,
         strategyResolver,
         strategyRegistry,
+        entrySpotReader,
+        equityQuotes,
         exposeAccountNumber,
         subreadTimeoutSeconds);
   }
@@ -591,5 +601,74 @@ class PortfolioServiceTest {
     assertThat(pos).containsEntry("trailing_armed", false);
     assertThat(pos).doesNotContainKey("trail_giveback_pct");
     assertThat(pos).doesNotContainKey("trail_stop_price");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void attachesEntrySpotPerWorkflowAndQuotesEachUnderlyingOnce() {
+    // The live shape this has to get right: TWO positions on the SAME contract (a manual entry
+    // beside a copied one, both open on prod_real today) with DIFFERENT entry spots. Keying the
+    // entry spot by contract would put one row's number on both; the key is the workflow id.
+    String wfManual = "t-acme/s-s1/pos/SMCI  261120C00050000/manual:abc";
+    String wfCopied = "t-acme/s-s1/pos/SMCI  261120C00050000/chat-messages-1:0";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                openPos(wfManual, "SMCI  261120C00050000", 5),
+                openPos(wfCopied, "SMCI  261120C00050000", 21)));
+    when(entrySpotReader.entrySpotByWorkflowId(eq("acme"), any()))
+        .thenReturn(Map.of(wfManual, new BigDecimal("38.30"), wfCopied, new BigDecimal("38.305")));
+    when(equityQuotes.equityPrice("SMCI")).thenReturn(new BigDecimal("41.12"));
+
+    Map<String, Object> body = service.portfolio("acme");
+    List<Map<String, Object>> rows = (List<Map<String, Object>>) body.get("open_positions");
+
+    assertThat(rows).hasSize(2);
+    assertThat(rows.get(0).get("underlying_spot_entry")).isEqualTo(new BigDecimal("38.30"));
+    assertThat(rows.get(1).get("underlying_spot_entry")).isEqualTo(new BigDecimal("38.305"));
+    assertThat(rows)
+        .allSatisfy(r -> assertThat(r.get("underlying_price")).isEqualTo(new BigDecimal("41.12")));
+    // ONE quote for the shared ticker, not one per row: Holdings renders on every /live load and
+    // sibling positions on one underlying are the common case, not the exception.
+    verify(equityQuotes, times(1)).equityPrice("SMCI");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void missingEntrySpotOrQuoteLeavesTheCellsNullWithoutLosingTheRow() {
+    // Positions entered before the recorder existed have no trade_context row, and the equity hop
+    // can fail. Either way the holding itself must still render.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                openPos("t-acme/s-s1/pos/AMD  261120C00160000/sig1", "AMD   261120C00160000", 3)));
+    when(entrySpotReader.entrySpotByWorkflowId(any(), any())).thenReturn(Map.of());
+    when(equityQuotes.equityPrice(any())).thenReturn(null);
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    assertThat(rows).hasSize(1);
+    assertThat(rows.get(0)).containsKey("underlying_spot_entry");
+    assertThat(rows.get(0).get("underlying_spot_entry")).isNull();
+    assertThat(rows.get(0).get("underlying_price")).isNull();
+    assertThat(rows.get(0).get("contract_symbol")).isEqualTo("AMD   261120C00160000");
+  }
+
+  private static OpenPosition openPos(String workflowId, String occ, long qty) {
+    return new OpenPosition(
+        workflowId,
+        "s1",
+        occ,
+        qty,
+        new BigDecimal("2.78"),
+        new BigDecimal("1390.00"),
+        false,
+        null,
+        null,
+        0L,
+        null);
   }
 }
