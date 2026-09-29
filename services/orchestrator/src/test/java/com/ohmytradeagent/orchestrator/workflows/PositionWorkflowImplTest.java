@@ -40,6 +40,10 @@ import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.enums.v1.WorkflowIdConflictPolicy;
+import io.temporal.client.UpdateOptions;
+import io.temporal.client.WithStartWorkflowOperation;
+import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -3136,6 +3140,50 @@ class PositionWorkflowImplTest {
   }
 
   // ---------- Operator "Trim" (partial_close Update) ----------
+
+  /**
+   * Update-before-run() race: the partial_close handler guards `input == null` (auditLog
+   * dereferences input) by buffering the directive and returning ACCEPTED — which silently drops
+   * the operator-attribution audit. executeUpdateWithStart puts the Update in the SAME first
+   * workflow task as the start, so this reproduces that window deterministically instead of relying
+   * on CI load. The trim still executes; its OperatorTrimRequested row must not vanish.
+   */
+  @Test
+  void partialCloseBeforeRunInit_stillEmitsTrimAudit() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // Update-With-Start requires an explicit conflict policy, so this cannot reuse newStub().
+    PositionWorkflow stub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("pos-trim-before-init")
+                    .setWorkflowIdConflictPolicy(
+                        WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_FAIL)
+                    .build());
+
+    WithStartWorkflowOperation<String> startOp =
+        new WithStartWorkflowOperation<>(stub::run, futureInput(8));
+    PartialCloseResult r =
+        WorkflowClient.executeUpdateWithStart(
+            stub::partialClose,
+            partialCloseRequest("ops-1", "trim before init", 0.25),
+            UpdateOptions.<PartialCloseResult>newBuilder().build(),
+            startOp);
+    assertThat(r.getStatus()).isEqualTo(PartialCloseResult.Status.ACCEPTED);
+
+    // The entry fill lands after init; the buffered trim then drains through the main loop.
+    confirmEntry(stub, 8L);
+    waitForAuditKind("PartialExitRequested");
+
+    waitForAuditKind("OperatorTrimRequested");
+    AuditEvent trim = captureKind("OperatorTrimRequested");
+    assertThat(trim.getSubject())
+        .containsEntry("operator_id", "ops-1")
+        .containsEntry("reason", "trim before init")
+        .containsEntry("deferred_until_init", true);
+  }
 
   @Test
   void partialClose_healthyPosition_sellsFractionAtMarketAndKeepsRunner() throws Exception {

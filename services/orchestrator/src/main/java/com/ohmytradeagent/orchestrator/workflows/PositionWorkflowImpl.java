@@ -849,6 +849,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_CHANDELIER_TRAIL_ON_BID = "chandelier-trail-on-bid-v1";
 
   /**
+   * The OperatorTrimRequested audit for a partial_close Update that landed BEFORE run() assigned
+   * {@code input}. That handler buffers a directive and returns ACCEPTED without auditing (auditLog
+   * dereferences input), so the trim executed with NO attribution row — the operator_id and reason
+   * for a real-money action were lost. The main loop now emits it when it drains an un-audited
+   * directive.
+   *
+   * <p>Gated because the emission is a new ScheduleActivityTask command: a legacy history that took
+   * the un-audited buffer path has no such command recorded, and replaying it at v>=1 would
+   * diverge. At DEFAULT_VERSION the drain stays silent, exactly as those histories recorded. The
+   * gate is read in the MAIN LOOP, not in the Update handler — handler execution order relative to
+   * run() is the very thing in question here, and getVersion inside a handler is order-sensitive.
+   */
+  private static final String VERSION_BUFFERED_OPERATOR_AUDIT = "buffered-operator-audit-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -1299,7 +1314,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
 
   /** Internal directive emitted by the partial_close Update handler into the main loop. */
   private record PartialCloseDirective(
-      String operatorId, String reason, double fraction, String exitSignalId) {}
+      String operatorId,
+      String reason,
+      double fraction,
+      String exitSignalId,
+      boolean auditedInHandler) {}
 
   /**
    * Edited-signal supersede (F1) directive: the corrected (replacement) leg's identifiers carried
@@ -2085,7 +2104,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       // normal partial, so it drains through the FIFO pendingExits pipeline below — unlike
       // force_close/risk_breach, which pre-empt it because they flatten the whole lot.
       while (!pendingPartialCloses.isEmpty()) {
-        PartialExitRequest trim = operatorTrimRequest(pendingPartialCloses.poll());
+        PartialCloseDirective d = pendingPartialCloses.poll();
+        emitDeferredOperatorAudit(d);
+        PartialExitRequest trim = operatorTrimRequest(d);
         // Register the synthetic id with the SAME dedupe set the partialExit signal handler uses.
         // Enqueuing here bypasses that handler, so without this the trim would have no duplicate
         // backstop at all behind the id-uniqueness assumption. add() returning false means an
@@ -2583,7 +2604,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
               request.getOperatorId(),
               request.getReason(),
               request.getFraction().doubleValue(),
-              exitSignalId));
+              exitSignalId,
+              false));
       result.setStatus(PartialCloseResult.Status.ACCEPTED);
       return result;
     }
@@ -2620,7 +2642,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
             request.getOperatorId(),
             request.getReason(),
             request.getFraction().doubleValue(),
-            exitSignalId));
+            exitSignalId,
+            true));
     result.setStatus(PartialCloseResult.Status.ACCEPTED);
     return result;
   }
@@ -2715,6 +2738,44 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private void processForceClose(ForceCloseDirective d) {
     closeReason = "force_close";
     flattenRemaining("force_close");
+  }
+
+  /**
+   * Emit the operator-attribution audit for a trim whose Update handler could not (it ran before
+   * run() assigned {@code input} — see {@link #VERSION_BUFFERED_OPERATOR_AUDIT}). A directive the
+   * handler already audited emits nothing here, so the row is written exactly once either way.
+   *
+   * <p>{@code remaining_qty} is the drain-time lot, which is the honest number: at handler time the
+   * position was not yet confirmed and it was 0. {@code deferred_until_init} marks the row so
+   * forensics can see why occurred_at trails the operator's click.
+   *
+   * <p>force_close has the SAME pre-init buffer branch but is deliberately NOT given this
+   * treatment: its handler opens with {@code Workflow.getVersion(VERSION_FORCE_CLOSE, ...)}, which
+   * yields long enough for run() to assign {@code input}, so the branch is not reachable — measured
+   * 3/3 via executeUpdateWithStart, where partialClose hits its branch 5/5. Fixing what cannot be
+   * exercised would ship unexercised code on the flatten path. If a leading getVersion is ever
+   * removed from forceClose, this applies there too.
+   */
+  private void emitDeferredOperatorAudit(PartialCloseDirective d) {
+    if (d.auditedInHandler()
+        || Workflow.getVersion(VERSION_BUFFERED_OPERATOR_AUDIT, Workflow.DEFAULT_VERSION, 1) < 1) {
+      return;
+    }
+    auditLog(
+        KIND_OPERATOR_TRIM_REQUESTED,
+        subject(
+            "operator_id",
+            d.operatorId(),
+            "reason",
+            d.reason(),
+            "exit_signal_id",
+            d.exitSignalId(),
+            "fraction",
+            BigDecimal.valueOf(d.fraction()),
+            "remaining_qty",
+            remainingQty,
+            "deferred_until_init",
+            true));
   }
 
   /**
