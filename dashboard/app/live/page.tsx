@@ -504,19 +504,6 @@ export default async function LivePage() {
           todayPlPct={todayPlPct}
         />
 
-        {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (
-          <ManualEntryPanel
-            strategies={strategies}
-            // Compact OCCs so the "you already hold this" check matches regardless of padding.
-            heldOccs={portfolio.open_positions.map((p) =>
-              String(p.contract_symbol).replace(/\s+/g, ""),
-            )}
-            quoteAction={quoteAction}
-            submitAction={submitManualEntryAction}
-            statusAction={entryStatusAction}
-          />
-        )}
-
         <section>
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="text-sm font-semibold text-slate-200">
@@ -545,6 +532,19 @@ export default async function LivePage() {
             rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
           />
         </section>
+
+        {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (
+          <ManualEntryPanel
+            strategies={strategies}
+            // Compact OCCs so the "you already hold this" check matches regardless of padding.
+            heldOccs={portfolio.open_positions.map((p) =>
+              String(p.contract_symbol).replace(/\s+/g, ""),
+            )}
+            quoteAction={quoteAction}
+            submitAction={submitManualEntryAction}
+            statusAction={entryStatusAction}
+          />
+        )}
 
         <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <ActivityStrip
