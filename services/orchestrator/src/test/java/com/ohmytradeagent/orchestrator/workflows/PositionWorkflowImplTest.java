@@ -40,6 +40,10 @@ import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.enums.v1.WorkflowIdConflictPolicy;
+import io.temporal.client.UpdateOptions;
+import io.temporal.client.WithStartWorkflowOperation;
+import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -421,15 +425,23 @@ class PositionWorkflowImplTest {
     WorkflowStub.fromTyped(stub).start(futureInput(4));
     confirmEntry(stub, 4L);
 
-    // Signal both before any fill arrives
     stub.partialExit(partialExitRequest("sig-A", "pos-queue", 0.5));
-    stub.partialExit(partialExitRequest("sig-B", "pos-queue", 1.0));
 
+    // sig-B must ARRIVE while sig-A is genuinely in flight, because ExitQueued is emitted by the
+    // signal handler itself and only when it observes a busy exit:
+    //     boolean wasBusy = exitInFlight || !pendingExits.isEmpty();
+    // Sending both back-to-back left that to chance: sig-B's handler could land in the window
+    // between the main loop polling sig-A off pendingExits and setting exitInFlight, see NEITHER
+    // condition, and queue silently. ExitQueued then never fires, sig-B waits for a fill the test
+    // has not sent yet, and the wait below burns its full 50s deadline — the CI failure on
+    // 2026-09-29 (observed=[PositionEntered, PartialExitRequested]).
+    //
+    // waitForPlaceOrderCount(1) closes the window: processOne sets exitInFlight = true BEFORE it
+    // calls placeOrder, so the mock's first invocation proves the flag is already set, and sig-B's
+    // handler is then guaranteed to see wasBusy. Nothing is sent in between, so "both signalled
+    // before any fill arrives" — what this test is about — still holds.
     waitForPlaceOrderCount(1);
-    // Deterministic sync: guarantee sig-B is QUEUED (and ExitQueued emitted) while sig-A is still
-    // in-flight, before we drain sig-A with a fill. Without this the fill can drain sig-A first and
-    // sig-B is then processed directly (never queued), so ExitQueued is never emitted -> flaky
-    // captureKind("ExitQueued") below.
+    stub.partialExit(partialExitRequest("sig-B", "pos-queue", 1.0));
     waitForAuditKind("ExitQueued");
     // First fill closes 2 of 4
     stub.onFill(fill("brk-A", 2L, new BigDecimal("2.85")));
@@ -780,6 +792,7 @@ class PositionWorkflowImplTest {
     assertThat(state.remainingQty()).isEqualTo(5L);
     assertThat(captureAll("PositionExpired")).isEmpty();
     assertThat(captureAll("PositionClosed")).isEmpty();
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -939,6 +952,7 @@ class PositionWorkflowImplTest {
     assertThat(state.remainingQty()).isEqualTo(5L);
     assertThat(captureAll("PositionClosed")).isEmpty();
     // A loud failure audit was emitted for the unfilled bounded flatten.
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -976,6 +990,7 @@ class PositionWorkflowImplTest {
     // EOD fires -> bounded flatten placed (#1) -> TTL elapses unfilled -> cancel + loud failure.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -984,6 +999,7 @@ class PositionWorkflowImplTest {
     // placeOrder.
     env.sleep(Duration.ofMinutes(6));
     waitForPlaceOrderCount(2);
+    waitForAuditKind("FlattenRetryScheduled");
     AuditEvent scheduled = captureKind("FlattenRetryScheduled");
     assertThat(scheduled.getSubject()).containsEntry("attempt", 1).containsEntry("reason", "eod");
 
@@ -1022,6 +1038,7 @@ class PositionWorkflowImplTest {
     // Three FlattenRetryScheduled (attempts 1..3) then the terminal FlattenRetryExhausted page.
     waitForPlaceOrderCount(4);
     assertThat(captureAll("FlattenRetryScheduled")).hasSize(3);
+    waitForAuditKind("FlattenRetryExhausted");
     AuditEvent exhausted = captureKind("FlattenRetryExhausted");
     assertThat(exhausted.getSubject()).containsEntry("attempts", 3).containsEntry("reason", "eod");
 
@@ -1074,6 +1091,7 @@ class PositionWorkflowImplTest {
     // timer.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     captureKind("EodForceFlattenFailed");
 
     // A LATE fill of the resting flatten drains the lot before the next-session timer fires.
@@ -1225,6 +1243,7 @@ class PositionWorkflowImplTest {
     assertThat(stub.positionState().remainingQty())
         .as("the entry residual must be booked into the managed lot")
         .isEqualTo(50L);
+    waitForAuditKind("PositionEntryIncreased");
     AuditEvent grown = captureKind("PositionEntryIncreased");
     assertThat(asLong(grown.getSubject().get("qty_added"))).isEqualTo(40L);
     assertThat(asLong(grown.getSubject().get("entry_qty_total"))).isEqualTo(50L);
@@ -1790,6 +1809,7 @@ class PositionWorkflowImplTest {
     // Still RUNNING, remainingQty unchanged, exactly one loud failure audit, no PositionClosed and
     // no fill booked.
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("EodForceFlattenFailed");
     AuditEvent failed = captureKind("EodForceFlattenFailed");
     assertThat(failed.getSubject())
         .containsEntry("note", "bounded_flatten_unfilled_workflow_stays_alive");
@@ -1837,6 +1857,7 @@ class PositionWorkflowImplTest {
     // timeout -> loud failure + arm the next-session retry timer.
     env.sleep(Duration.ofMinutes(1));
     waitForPlaceOrderCount(1);
+    waitForAuditKind("EodForceFlattenFailed");
     captureKind("EodForceFlattenFailed");
 
     // Advance past the next-session open. The retry-loop reconcile now finds the resting order
@@ -2334,6 +2355,7 @@ class PositionWorkflowImplTest {
     // A query settles the workflow so the post-catch audit command is committed before we capture.
     // remainingQty NOT decremented (the failed partial sold nothing).
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("PartialExitPlaceFailed");
     AuditEvent placeFailed = captureKind("PartialExitPlaceFailed");
     assertThat(placeFailed.getSubject()).containsEntry("signal_id", "sig-qqq");
 
@@ -2343,6 +2365,7 @@ class PositionWorkflowImplTest {
     waitForPlaceOrderCount(2);
     // Query barrier: settle the workflow so the re-drive's audit command is committed.
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
+    waitForAuditKind("PartialExitRetryRequested");
     AuditEvent retried = captureKind("PartialExitRetryRequested");
     assertThat(retried.getSubject())
         .containsEntry("signal_id", "sig-qqq")
@@ -2554,6 +2577,7 @@ class PositionWorkflowImplTest {
     // Position stays managed at the unchanged qty (the failure path does not zero remainingQty).
     assertThat(stub.positionState().remainingQty()).isEqualTo(5L);
 
+    waitForAuditKind("PartialExitPlaceFailed");
     captureKind("PartialExitPlaceFailed");
     assertThat(captureAll("PartialExitAlreadyFlat")).isEmpty();
   }
@@ -3125,6 +3149,50 @@ class PositionWorkflowImplTest {
 
   // ---------- Operator "Trim" (partial_close Update) ----------
 
+  /**
+   * Update-before-run() race: the partial_close handler guards `input == null` (auditLog
+   * dereferences input) by buffering the directive and returning ACCEPTED — which silently drops
+   * the operator-attribution audit. executeUpdateWithStart puts the Update in the SAME first
+   * workflow task as the start, so this reproduces that window deterministically instead of relying
+   * on CI load. The trim still executes; its OperatorTrimRequested row must not vanish.
+   */
+  @Test
+  void partialCloseBeforeRunInit_stillEmitsTrimAudit() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    // Update-With-Start requires an explicit conflict policy, so this cannot reuse newStub().
+    PositionWorkflow stub =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                PositionWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("pos-trim-before-init")
+                    .setWorkflowIdConflictPolicy(
+                        WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_FAIL)
+                    .build());
+
+    WithStartWorkflowOperation<String> startOp =
+        new WithStartWorkflowOperation<>(stub::run, futureInput(8));
+    PartialCloseResult r =
+        WorkflowClient.executeUpdateWithStart(
+            stub::partialClose,
+            partialCloseRequest("ops-1", "trim before init", 0.25),
+            UpdateOptions.<PartialCloseResult>newBuilder().build(),
+            startOp);
+    assertThat(r.getStatus()).isEqualTo(PartialCloseResult.Status.ACCEPTED);
+
+    // The entry fill lands after init; the buffered trim then drains through the main loop.
+    confirmEntry(stub, 8L);
+    waitForAuditKind("PartialExitRequested");
+
+    waitForAuditKind("OperatorTrimRequested");
+    AuditEvent trim = captureKind("OperatorTrimRequested");
+    assertThat(trim.getSubject())
+        .containsEntry("operator_id", "ops-1")
+        .containsEntry("reason", "trim before init")
+        .containsEntry("deferred_until_init", true);
+  }
+
   @Test
   void partialClose_healthyPosition_sellsFractionAtMarketAndKeepsRunner() throws Exception {
     when(exec.placeOrder(any())).thenReturn(submittedResult());
@@ -3321,7 +3389,7 @@ class PositionWorkflowImplTest {
     confirmEntry(stub, 4L);
 
     stub.riskBreach(riskBreachPayload("auto:daily_loss", "auto:daily_loss"));
-    Thread.sleep(1500);
+    waitForAuditKind("RiskBreachFlattenSkippedLongDated");
 
     assertThat(stub.positionState().remainingQty())
         .as("a daily breaker must not liquidate a position whose horizon outlives it")
