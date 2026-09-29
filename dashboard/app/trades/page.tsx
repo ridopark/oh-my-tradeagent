@@ -1,13 +1,26 @@
 import { auth } from "@/auth";
 import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
-import { getTrades } from "@/lib/bff";
+import { contractCell } from "@/components/ContractLink";
+import { priceCell } from "@/components/Pnl";
+import { getTrades, tradeFill } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
 
 export default async function TradesPage() {
   const session = await auth();
   const data = await getTrades();
+  // Flatten each event's audit `subject` into its own columns (contract / qty / fill price) so the
+  // table answers "what did we trade, how many, at what price" without the operator reading JSON.
+  // `subject` is kept as the last column: it still carries the broker_order_id and, on an exit, the
+  // remaining qty after the fill.
+  const rows = data.items.map((t) => ({
+    occurred_at: t.occurred_at,
+    kind: t.kind,
+    strategy_id: t.strategy_id,
+    ...tradeFill(t),
+    subject: t.subject,
+  }));
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -22,9 +35,12 @@ export default async function TradesPage() {
             { key: "occurred_at", label: "Time" },
             { key: "kind", label: "Kind" },
             { key: "strategy_id", label: "Strategy" },
+            { key: "option_symbol", label: "Contract", render: contractCell },
+            { key: "qty", label: "Qty" },
+            { key: "avg_fill_price", label: "Fill price", render: priceCell },
             { key: "subject", label: "Detail" },
           ]}
-          rows={data.items}
+          rows={rows}
         />
       </main>
     </>
