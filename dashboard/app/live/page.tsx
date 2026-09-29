@@ -5,8 +5,8 @@ import { Nav } from "@/components/Nav";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
-import { contractCell } from "@/components/ContractLink";
-import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
+import { ContractLink, contractCell } from "@/components/ContractLink";
+import { Pnl, pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import {
   ForceExitButton,
   type ForceExitActionResult,
@@ -416,16 +416,16 @@ export default async function LivePage() {
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
   ];
-  if (FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED || STOP_LOSS_WRITE_ENABLED) {
-    holdingsColumns.push({
-      key: "actions",
-      label: "",
-      // Trim sits to the LEFT of Force exit: the reduce-only action reads first, and the
-      // destructive full exit stays the rightmost (unchanged) control. Each button is gated by its
-      // OWN flag, so enabling one never surfaces the other. TrimButton renders nothing for a 1-lot
-      // (no fraction can trim it), in which case only Force exit shows.
-      render: (_v, row) => (
-        <div className="flex items-center justify-end gap-2">
+  const actionsEnabled =
+    FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED || STOP_LOSS_WRITE_ENABLED;
+  // One renderer, two layouts: the desktop table's actions column and the mobile card's button row
+  // both call this, so the three independently-flagged buttons are wired exactly once.
+  const renderHoldingActions = (row: Record<string, unknown>): ReactNode => (
+    // Trim sits to the LEFT of Force exit: the reduce-only action reads first, and the
+    // destructive full exit stays the rightmost (unchanged) control. Each button is gated by its
+    // OWN flag, so enabling one never surfaces the other. TrimButton renders nothing for a 1-lot
+    // (no fraction can trim it), in which case only Force exit shows.
+    <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Stop-loss reads FIRST: it is the only non-selling action here, so it sits left of the
               two that do sell, and the destructive full exit stays rightmost and unmoved. */}
           {STOP_LOSS_WRITE_ENABLED && (
@@ -469,7 +469,12 @@ export default async function LivePage() {
             />
           )}
         </div>
-      ),
+  );
+  if (actionsEnabled) {
+    holdingsColumns.push({
+      key: "actions",
+      label: "",
+      render: (_v, row) => renderHoldingActions(row),
     });
   }
 
@@ -522,15 +527,35 @@ export default async function LivePage() {
               </span>
             )}
           </div>
-          <DataTable
-            empty="No open positions."
-            columns={holdingsColumns}
-            rows={portfolio.open_positions}
-            // Key rows by the stable workflow_id: the Holdings cells hold the stateful
-            // ForceExitButton island, so an index key would bleed a closed row's terminal state
-            // onto the position that shifts into its index after a revalidate. See DataTable.rowKey.
-            rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
-          />
+          {/* Two layouts, one data set. The 9-column table needs ~900px, so below lg it would force
+              the sideways scroll this page is read on a phone to avoid; cards carry the same numbers
+              in four lines. The cutover is lg (not md) because a 768px tablet still cannot fit the
+              table. Both branches are server-rendered — no JS decides which one you get. */}
+          <div className="flex flex-col gap-3 lg:hidden">
+            {count === 0 ? (
+              <p className="text-sm text-slate-400">No open positions.</p>
+            ) : (
+              portfolio.open_positions.map((p, i) => (
+                <HoldingCard
+                  key={p.workflow_id ? String(p.workflow_id) : i}
+                  row={p as unknown as Record<string, unknown>}
+                  actions={actionsEnabled ? renderHoldingActions : null}
+                />
+              ))
+            )}
+          </div>
+          <div className="hidden lg:block">
+            <DataTable
+              empty="No open positions."
+              columns={holdingsColumns}
+              rows={portfolio.open_positions}
+              // Key rows by the stable workflow_id: the Holdings cells hold the stateful
+              // ForceExitButton island, so an index key would bleed a closed row's terminal state
+              // onto the position that shifts into its index after a revalidate. See
+              // DataTable.rowKey.
+              rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
+            />
+          </div>
         </section>
 
         {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (
@@ -571,6 +596,60 @@ export default async function LivePage() {
       </main>
       </FloorBreachProvider>
     </TrailLivenessProvider>
+  );
+}
+
+// One open position as a card, for widths where the Holdings table cannot fit. Carries every number
+// the table does: the pairs that cost the table its width (entry premium / current mark, and cost /
+// value) read naturally as "x -> y" on their own line, so nothing is dropped to gain the fit.
+function HoldingCard({
+  row,
+  actions,
+}: {
+  row: Record<string, unknown>;
+  actions: ((row: Record<string, unknown>) => ReactNode) | null;
+}) {
+  const symbol = String(row.contract_symbol ?? "");
+  const mark = row.current_price;
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="flex min-w-0 flex-wrap items-center gap-2">
+          <ContractLink occ={symbol} compact />
+          <FloorBreachBadge workflowId={String(row.workflow_id)} />
+        </span>
+        <span className="shrink-0 font-medium text-slate-200">
+          &times;{String(row.remaining_qty ?? "—")}
+        </span>
+      </div>
+      <dl className="mt-1 space-y-0.5 text-xs text-slate-400">
+        <div className="flex justify-between gap-2">
+          <dt>entry &rarr; mark</dt>
+          <dd className="text-slate-200">
+            {row.entry_premium == null ? "—" : String(row.entry_premium)}
+            {" \u2192 "}
+            {mark == null ? <span className="text-slate-500">—</span> : String(mark)}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt>cost &rarr; value</dt>
+          <dd className="text-slate-200">
+            {fmtCurrency(row.open_notional as string | number | null)}
+            {" \u2192 "}
+            {fmtCurrency(positionMarketValue(row.remaining_qty, mark))}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt>P&amp;L total &middot; today</dt>
+          <dd className="flex items-center gap-2">
+            <Pnl value={row.unrealized_pl as string | number | null} />
+            <span className="text-slate-600">&middot;</span>
+            <Pnl value={row.unrealized_intraday_pl as string | number | null} />
+          </dd>
+        </div>
+      </dl>
+      {actions && <div className="mt-2">{actions(row)}</div>}
+    </div>
   );
 }
 
