@@ -1,0 +1,29 @@
+-- Let the BFF READ trade_context.
+--
+-- V13 wrote: "The other dashboard roles (readonly/writer) get NOTHING here — analysis reads happen
+-- as the operator, not through the browser-facing pool." That line is superseded, deliberately, for
+-- two reasons:
+--
+--   1. It was already contradicted in code. TradeContextPeakReader (#778) reads trade_context
+--      through `dashboardWriterDsl` to offer the TRUE peak-since-entry as an arm anchor on /live.
+--      The BFF connects as dashboard_writer, which held no grant on this table, so every one of
+--      those reads failed with 42501. The reader swallows failures at debug and returns null, so
+--      the feature has been silently inert since it shipped — verified on the live cluster:
+--        SET ROLE dashboard_writer; SELECT count(*) FROM trade_context;
+--        ERROR:  permission denied for table trade_context
+--   2. /live now shows the underlying's price at entry next to its price now, and entry spot is
+--      recorded ONLY here (equity bars are historical, but underlying_spot at the entry instant is
+--      what the recorder captured, and re-deriving it per render would be a market-data call per
+--      position per page load).
+--
+-- SELECT ONLY. The point V13 was protecting — a compromised browser-facing pool must not be able to
+-- destroy or forge the corpus — is preserved: no INSERT, no UPDATE, no DELETE, no TRUNCATE. Only
+-- trade_context_writer (the recorder) can write, exactly as before. Tenant scoping stays where it
+-- already is, in the reader's `WHERE tenant_id = ?`.
+--
+-- ACCEPTED TRADE-OFF, stated plainly: this table has no row-level security, so a browser-facing
+-- pool role can now read EVERY tenant's trade_context if a future query drops the tenant predicate.
+-- Before this grant that class of bug was impossible here by construction; after it, the predicate
+-- is the only thing separating tenants. Any new query against this table must carry
+-- `tenant_id = ?`, and TradeContextSpotReaderTest pins that for the reader added alongside it.
+GRANT SELECT ON trade_context TO dashboard_writer;

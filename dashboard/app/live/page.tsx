@@ -418,15 +418,26 @@ export default async function LivePage() {
       label: "Contract",
       // Issue #779: the floor-breach badge (breach → solid red "FLOOR BREACH -NN%", unknown →
       // grey "FLOOR ?", ok → nothing) renders beside the symbol. A badge only — never a button.
+      // Compact here ONLY: Holdings is the widest table and gaining the Underlying column pushed it
+      // past its container at 1024px (measured 1124px in a 990px wrapper). The short form is what
+      // the mobile cards already show, and the full padded OCC stays in the link target and its
+      // hover title. /trades and /orders keep the full symbol — they have room.
       render: (v, row) => (
         <span className="flex items-center gap-2">
-          {contractCell(v)}
+          {typeof v === "string" && v.trim() ? (
+            <ContractLink occ={v} compact />
+          ) : (
+            <span className="text-slate-500">—</span>
+          )}
           <FloorBreachBadge workflowId={String(row.workflow_id)} />
         </span>
       ),
     },
     { key: "remaining_qty", label: "Qty" },
     { key: "entry_premium", label: "Entry premium" },
+    // One paired column rather than two: the table is already wide, and the MOVE is the part the
+    // rest of the row cannot tell you — the stock can be up while the option is down (theta/IV).
+    { key: "underlying_spot_entry", label: "Underlying", render: underlyingCell },
     { key: "open_notional", label: "Cost", render: priceCell },
     { key: "current_price", label: "Current mark", render: priceCell },
     { key: "position_value", label: "Value", render: valueCell },
@@ -658,6 +669,10 @@ function HoldingCard({
           </dd>
         </div>
         <div className="flex justify-between gap-2">
+          <dt>underlying</dt>
+          <dd className="text-slate-200">{underlyingCell(null, row)}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
           <dt>P&amp;L total &middot; today</dt>
           <dd className="flex items-center gap-2">
             <Pnl value={row.unrealized_pl as string | number | null} />
@@ -669,6 +684,52 @@ function HoldingCard({
       {actions && <div className="mt-2">{actions(row)}</div>}
     </div>
   );
+}
+
+// "$38.30 → $41.12 (+7.4%)" for the Holdings Underlying column. Each half renders independently:
+// a position entered before the #783 recorder has no entry spot, and the live equity quote is a
+// best-effort hop, so one missing number must not blank the other. The percentage is omitted unless
+// BOTH are present and the entry spot is non-zero.
+function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const entry = num(row.underlying_spot_entry);
+  const now = num(row.underlying_price);
+  if (entry === null && now === null) {
+    return <span className="text-slate-500">—</span>;
+  }
+  const movePct =
+    entry !== null && now !== null && entry !== 0
+      ? ((now - entry) / entry) * 100
+      : null;
+  // Stacked, and without a "$" on either number: the column is headed "Underlying" and these are
+  // equity prices, so the symbol is decoration this table cannot afford — the two together are what
+  // let the 10-column table fit its container at 1024px.
+  return (
+    <span className="inline-block">
+      <span className="block whitespace-nowrap text-slate-200">
+        {entry === null ? "—" : entry.toFixed(2)}
+        <span className="text-slate-600"> → </span>
+        {now === null ? "—" : now.toFixed(2)}
+      </span>
+      {movePct !== null && (
+        <span
+          className={`block text-xs ${movePct >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+        >
+          ({movePct >= 0 ? "+" : ""}
+          {movePct.toFixed(1)}%)
+        </span>
+      )}
+    </span>
+  );
+}
+
+// A nullable numeric cell value as a number, or null when absent/unparseable. The empty string is
+// rejected explicitly: Number("") is 0, which would render as a real $0.00 price.
+function num(v: unknown): number | null {
+  if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) {
+    return null;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 // The contract list behind the manual-entry box: newest accepted signals first, one entry per

@@ -4,14 +4,18 @@ import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
+import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -20,6 +24,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -61,7 +67,12 @@ public class PortfolioService {
   private static final Logger log = LoggerFactory.getLogger(PortfolioService.class);
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
+  /** OCC root (1-6 alphanumeric) followed by the YYMMDD + right + strike block. */
+  private static final Pattern OCC_ROOT = Pattern.compile("^([A-Z0-9]{1,6})\\d{6}[CP]\\d{8}$");
+
   private final PositionsReader positionsReader;
+  private final TradeContextSpotReader entrySpotReader;
+  private final MarketDataQuoteClient equityQuotes;
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
   private final BrokerPositionsClient brokerPositions;
@@ -92,9 +103,13 @@ public class PortfolioService {
       BrokerPositionsClient brokerPositions,
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
+      TradeContextSpotReader entrySpotReader,
+      MarketDataQuoteClient equityQuotes,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
       @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.positionsReader = positionsReader;
+    this.entrySpotReader = entrySpotReader;
+    this.equityQuotes = equityQuotes;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
     this.brokerPositions = brokerPositions;
@@ -105,6 +120,8 @@ public class PortfolioService {
   }
 
   public Map<String, Object> portfolio(String tenantId) {
+    // Whole-request budget for the sub-reads; the position-derived ones below share what is left.
+    long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(subreadTimeoutSeconds);
     List<String> strategyIds = strategyResolver.strategyIdsForTenant(tenantId);
     LocalDate tradingDay = LocalDate.now(MARKET_TZ);
 
@@ -209,13 +226,35 @@ public class PortfolioService {
     // same way). No matching mark -> the row stays clean (mark fields omitted).
     List<OpenPosition> positions =
         await(positionsFuture, List.of(), "positions tenant=" + tenantId);
+    // The underlying's price at entry (recorded once per position by the #783 recorder) and its
+    // price now. BOTH RUN AS BOUNDED SUB-READS, in parallel with each other: a stalled market-data
+    // hop or a stalled DB read must degrade the cell to "—", never slow the whole page. They are
+    // submitted only now because both are derived from the positions list, so they share the
+    // remaining budget rather than a fresh one.
+    List<String> workflowIds = positions.stream().map(OpenPosition::workflowId).toList();
+    Future<Map<String, BigDecimal>> entrySpotFuture =
+        subreadPool.submit(() -> entrySpotReader.entrySpotByWorkflowId(tenantId, workflowIds));
+    Future<Map<String, BigDecimal>> spotNowFuture =
+        subreadPool.submit(() -> quoteDistinctUnderlyings(positions));
+    long remainingSeconds =
+        Math.max(1L, TimeUnit.NANOSECONDS.toSeconds(deadlineNanos - System.nanoTime()));
+    Map<String, BigDecimal> entrySpotByWorkflow =
+        await(entrySpotFuture, Map.of(), "entry spot tenant=" + tenantId, remainingSeconds);
+    Map<String, BigDecimal> spotNowByTicker =
+        await(spotNowFuture, Map.of(), "underlying quotes tenant=" + tenantId, remainingSeconds);
+
     BigDecimal sumOpenNotional = BigDecimal.ZERO;
     List<Map<String, Object>> positionItems = new ArrayList<>();
     for (OpenPosition p : positions) {
       sumOpenNotional = sumOpenNotional.add(p.openNotional());
       BrokerPositionsClient.PositionMarks marks =
           marksByOcc.get(BrokerPositionsClient.compactOcc(p.contractSymbol()));
-      positionItems.add(positionItem(p, marks));
+      positionItems.add(
+          positionItem(
+              p,
+              marks,
+              entrySpotByWorkflow.get(p.workflowId()),
+              spotNowByTicker.get(underlyingOf(p.contractSymbol()))));
     }
 
     // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
@@ -280,12 +319,22 @@ public class PortfolioService {
    * BFF call timeout and 500 the page.
    */
   private <T> T await(Future<T> future, T fallback, String label) {
+    return await(future, fallback, label, subreadTimeoutSeconds);
+  }
+
+  /**
+   * Deadline-parameterised form. The position-derived sub-reads (entry spot, underlying quotes)
+   * cannot be submitted until positions resolve, so awaiting them at the full budget would make the
+   * WORST case 2 × subreadTimeoutSeconds — past the dashboard's own 12s abort, which turns a slow
+   * hop into LiveUnavailable rather than a degraded cell. They get whatever of the budget is left
+   * instead, so the total stays inside the documented ordering invariant.
+   */
+  private <T> T await(Future<T> future, T fallback, String label, long timeoutSeconds) {
     try {
-      return future.get(subreadTimeoutSeconds, TimeUnit.SECONDS);
+      return future.get(timeoutSeconds, TimeUnit.SECONDS);
     } catch (TimeoutException e) {
       future.cancel(true);
-      log.warn(
-          "portfolio sub-read timed out after {}s; degrading {}", subreadTimeoutSeconds, label);
+      log.warn("portfolio sub-read timed out after {}s; degrading {}", timeoutSeconds, label);
       return fallback;
     } catch (ExecutionException e) {
       Throwable cause = e.getCause() != null ? e.getCause() : e;
@@ -299,8 +348,43 @@ public class PortfolioService {
     }
   }
 
+  /**
+   * One equity quote per DISTINCT underlying across the holdings — sibling positions on one ticker
+   * are the common case (a manual entry beside a copied one).
+   *
+   * <p>A FAILED quote is cached as null too. {@code computeIfAbsent} does not store a null result,
+   * so it would re-hit market-data for every sibling row precisely when the hop is already failing,
+   * and log a warn each time.
+   */
+  private Map<String, BigDecimal> quoteDistinctUnderlyings(List<OpenPosition> positions) {
+    Map<String, BigDecimal> byTicker = new HashMap<>();
+    for (OpenPosition p : positions) {
+      String ticker = underlyingOf(p.contractSymbol());
+      if (ticker != null && !byTicker.containsKey(ticker)) {
+        byTicker.put(ticker, equityQuotes.equityPrice(ticker));
+      }
+    }
+    return byTicker;
+  }
+
+  /**
+   * The equity ticker from a padded OCC ("SMCI 261120C00050000" -> "SMCI"), or null when the symbol
+   * is not one. Only the root is needed here; {@code OccSymbol} lives in the orchestrator and the
+   * BFF stays dependency-light.
+   */
+  private static String underlyingOf(String occ) {
+    if (occ == null) {
+      return null;
+    }
+    Matcher m = OCC_ROOT.matcher(occ.replace(" ", "").toUpperCase(Locale.ROOT));
+    return m.lookingAt() ? m.group(1) : null;
+  }
+
   private static Map<String, Object> positionItem(
-      OpenPosition p, BrokerPositionsClient.PositionMarks marks) {
+      OpenPosition p,
+      BrokerPositionsClient.PositionMarks marks,
+      BigDecimal underlyingSpotEntry,
+      BigDecimal underlyingPrice) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
@@ -308,6 +392,10 @@ public class PortfolioService {
     m.put("remaining_qty", p.remainingQty());
     m.put("entry_premium", p.entryPremium());
     m.put("open_notional", p.openNotional());
+    // Nullable on purpose and emitted either way: the dashboard renders "—" per half, so a row with
+    // an entry spot but no live quote (or the reverse) still shows what it has.
+    m.put("underlying_spot_entry", underlyingSpotEntry);
+    m.put("underlying_price", underlyingPrice);
     // Live broker marks, joined by OCC. current_price is the shared per-unit mark. The two P&L
     // figures are PER-ROW (#832): the broker's numbers are ACCOUNT-POSITION-level, and attaching
     // them verbatim duplicated the whole contract's P&L onto every sibling workflow row sharing
