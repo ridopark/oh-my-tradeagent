@@ -8,6 +8,7 @@ import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import {
   ContractLink,
   contractCell,
+  occCompact,
   occExpiryYmd,
 } from "@/components/ContractLink";
 import { Pnl, pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
@@ -821,10 +822,15 @@ function accountCapText(cfg: TenantConfig | null): string | null {
   return parts.length > 0 ? parts.join(" or ") : null;
 }
 
-// A padded OCC ("MU    260925C01100000") as a single-spaced label, matching how ContractLink
-// displays one.
-function occ(symbol: string): string {
-  return symbol.replace(/\s+/g, " ").trim();
+// "2026-09-22T14:31:10.907+00:00" -> "09-22 14:31Z". The raw ISO string is 29 characters and was
+// taking up to 214px of a 368px phone row — 58% of the width — which truncated the contract, qty and
+// price down to ~15 visible characters. UTC is kept (and marked) rather than converted: the rest of
+// the dashboard shows UTC, and a bare "14:31" would read as local. The full value stays in a title.
+function shortWhen(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : `${d.toISOString().slice(5, 16).replace("T", " ")}Z`;
 }
 
 // "INTC 261009C00125000 ×15 @ $2.29" — what a fill actually traded, for the Recent-trades strip.
@@ -835,7 +841,7 @@ function fillLabel(t: Trade): string {
   const f = tradeFill(t);
   const parts: string[] = [];
   if (f.option_symbol) {
-    parts.push(occ(f.option_symbol));
+    parts.push(occCompact(f.option_symbol));
   }
   if (f.qty !== null) {
     parts.push(`×${f.qty}`);
@@ -852,7 +858,7 @@ function fillLabel(t: Trade): string {
 // unfilled order is exactly the row worth reading. Qty renders as filled/requested ("×1/2") only on
 // a cancel-with-partial-fill, the one state where the two differ.
 function orderLabel(o: Order): string {
-  const parts: string[] = [o.side, occ(o.option_symbol)];
+  const parts: string[] = [o.side, occCompact(o.option_symbol)];
   parts.push(
     o.filled_qty != null && o.filled_qty !== o.qty
       ? `×${o.filled_qty}/${o.qty}`
@@ -896,9 +902,20 @@ function ActivityStrip({
             >
               <div className="min-w-0">
                 <div className="truncate text-slate-200">{r.primary}</div>
-                <div className="truncate text-xs text-slate-500">{r.secondary}</div>
+                {/* Below sm the timestamp joins this line instead of competing with the contract
+                    for the row's width — the whole reason the qty and price were being truncated
+                    away on a phone. From sm up it returns to its own right-aligned column. */}
+                <div className="truncate text-xs text-slate-500">
+                  {r.secondary}
+                  <span className="sm:hidden"> &middot; {shortWhen(r.when)}</span>
+                </div>
               </div>
-              <div className="shrink-0 pl-3 text-xs text-slate-500">{r.when}</div>
+              <div
+                className="hidden shrink-0 pl-3 text-xs text-slate-500 sm:block"
+                title={r.when}
+              >
+                {shortWhen(r.when)}
+              </div>
             </li>
           ))}
         </ul>
