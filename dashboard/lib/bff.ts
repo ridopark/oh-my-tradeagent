@@ -595,6 +595,11 @@ export interface Signal {
   subject: string | null;
 }
 
+/** A numeric field off an accepted signal's subject (ref_premium, contracts), or null. */
+export function signalNumber(s: Signal, field: string): number | null {
+  return finite(parseSubject(s.subject)[field]);
+}
+
 /** The resolved contract on an accepted signal, or null when the subject carries none. */
 export function signalOcc(s: Signal): string | null {
   const occ = parseSubject(s.subject).option_symbol;

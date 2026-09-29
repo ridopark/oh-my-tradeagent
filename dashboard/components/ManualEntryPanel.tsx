@@ -110,9 +110,50 @@ function rejectionText(status: StatusView): string {
   return detail ? `${head} (${detail})` : head;
 }
 
+/**
+ * A contract the system recently signalled, with the context an operator needs to tell two similar
+ * strikes apart: what the signal was priced at and how big it was sized. Built server-side on /live
+ * from the accepted-signal feed; `refPremium`/`contracts` are nullable because the subject is audit
+ * JSON, not a typed row.
+ */
+export interface RecentContract {
+  occ: string;
+  refPremium: number | null;
+  contracts: number | null;
+  /** MM-DD of the signal, the only part of the date worth the width here. */
+  on: string;
+}
+
+/** "$2.09 · 27x · 09-28" — the datalist option's secondary text. */
+function contractLabel(c: RecentContract): string {
+  const parts: string[] = [];
+  if (c.refPremium !== null) {
+    parts.push(`$${c.refPremium.toFixed(2)}`);
+  }
+  if (c.contracts !== null) {
+    parts.push(`${c.contracts}x`);
+  }
+  parts.push(c.on);
+  return parts.join(" · ");
+}
+
 // Stable id tying the input's `list` to its <datalist>. Module-level: the panel renders once per
 // page, and a generated id would differ between the server and client renders.
 const RECENT_CONTRACTS_LIST_ID = "manual-entry-recent-contracts";
+
+/**
+ * The recent signal matching whatever OCC is currently typed, compared on the COMPACT form so a
+ * pasted padded symbol and a hand-typed unpadded one both resolve. Null when the operator is
+ * entering a contract the system never signalled — which is legitimate, so the absence of a hint is
+ * not a warning.
+ */
+function matchingSignal(occ: string, recent: RecentContract[]): RecentContract | null {
+  const key = occ.replace(/\s+/g, "").toUpperCase();
+  if (!key) {
+    return null;
+  }
+  return recent.find((c) => c.occ.replace(/\s+/g, "").toUpperCase() === key) ?? null;
+}
 
 export function ManualEntryPanel({
   strategies,
@@ -132,7 +173,7 @@ export function ManualEntryPanel({
    * Suggestions only — the input still accepts anything typed by hand, which is the whole point of
    * a manual entry box. Empty when the signals read failed or the BFF predates /api/signals.
    */
-  recentContracts: string[];
+  recentContracts: RecentContract[];
   quoteAction: (occ: string) => Promise<QuoteActionResult>;
   submitAction: (
     occ: string,
@@ -312,6 +353,9 @@ export function ManualEntryPanel({
   const alreadyHeld =
     step.kind === "confirm" && heldOccs.includes(step.quote.occ.replace(/\s+/g, ""));
 
+  // Recomputed on every keystroke: the hint has to follow hand-typing, not just a dropdown pick.
+  const matchedSignal = matchingSignal(occ, recentContracts);
+
   return (
     <section>
       <div className="mb-2 flex items-baseline justify-between">
@@ -339,7 +383,11 @@ export function ManualEntryPanel({
             {recentContracts.length > 0 && (
               <datalist id={RECENT_CONTRACTS_LIST_ID}>
                 {recentContracts.map((c) => (
-                  <option key={c} value={c} />
+                  // `label` is the browser's secondary text. Chrome and Firefox render it beside
+                  // the value; Safari has historically shown the value only — hence the hint line
+                  // below, which does not depend on browser chrome. Either way the text INSERTED
+                  // into the box is `value`, a clean OCC.
+                  <option key={c.occ} value={c.occ} label={contractLabel(c)} />
                 ))}
               </datalist>
             )}
@@ -365,6 +413,21 @@ export function ManualEntryPanel({
             >
               {step.kind === "quoting" ? "Quoting…" : "Buy"}
             </button>
+            {/* basis-full puts this on its own line under the input row. Shown wherever the
+                browser does (or does not) render the datalist label, so the signal price is
+                visible in every browser once a contract is picked or typed. */}
+            {matchedSignal !== null && (
+              <span className="basis-full text-xs text-slate-500">
+                signalled {matchedSignal.on} at{" "}
+                <span className="text-slate-300">
+                  {matchedSignal.refPremium === null
+                    ? "an unrecorded price"
+                    : `$${matchedSignal.refPremium.toFixed(2)}`}
+                </span>
+                {matchedSignal.contracts !== null &&
+                  ` · sized ${matchedSignal.contracts}`}
+              </span>
+            )}
             {step.kind === "failed" && (
               <span className="text-xs font-medium text-rose-300" role="alert">
                 {step.message}
