@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -44,7 +45,15 @@ import org.slf4j.LoggerFactory;
  */
 class AlpacaTradeUpdatesStreamTest {
 
-  private static final long AWAIT_MS = 3_000L;
+  /**
+   * Budget for "a frame that WILL arrive has arrived". Raised from 3s after CI flaked on
+   * awaitHandshake with no bug present (2026-09-29): a real localhost WS handshake under surefire
+   * forkCount=4 can exceed 3s purely from scheduling, and the listener's own reconnect backoff
+   * (base 100ms, cap 1s) can burn most of that window on a single retry. A generous budget on a
+   * wait-for-arrival trades nothing but the latency of a genuine failure — the orchestrator's
+   * equivalent helpers sit at 50s for the same reason.
+   */
+  private static final long AWAIT_MS = 15_000L;
 
   private RecordingWsServer server;
   private int port;
@@ -477,19 +486,33 @@ class AlpacaTradeUpdatesStreamTest {
     stream.start();
     awaitHandshake();
 
-    long start = System.currentTimeMillis();
+    // Assert on the LAST cycle's gap, not the 5-cycle total. The total was measured against a
+    // 1500ms wall-clock budget, which is unsound under surefire fork contention: per-cycle overhead
+    // X adds 5X to the measurement, while the signal it has to separate is only 3x (5 x base =
+    // 500ms with reset, vs 100+200+400+800+cap = 2500ms without). X ~ 200ms therefore fails a
+    // CORRECT implementation — which is how this flaked CI on 2026-09-29 with no bug present. The
+    // final gap isolates the decision instead: ~base (100ms) with reset vs the cap (1000ms)
+    // without. Measured: healthy [105,103,109,104,104]; reset deleted [209,406,805,1004,1009].
+    List<Long> gaps = new ArrayList<>();
     for (int i = 0; i < 5; i++) {
+      long cycleStart = System.currentTimeMillis();
       server.closeAllClients();
       String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
       String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
-      assertThat(auth).as("auth frame for reconnect %d", i + 1).isNotNull();
-      assertThat(listen).as("listen frame for reconnect %d", i + 1).isNotNull();
+      assertThat(auth).as("auth frame for reconnect %d%s", i + 1, server.diagnosis()).isNotNull();
+      assertThat(listen)
+          .as("listen frame for reconnect %d%s", i + 1, server.diagnosis())
+          .isNotNull();
+      gaps.add(System.currentTimeMillis() - cycleStart);
     }
-    long elapsed = System.currentTimeMillis() - start;
 
-    assertThat(elapsed)
-        .as("5 reconnect cycles at base=100ms should complete in well under 1500ms with reset")
-        .isLessThan(1500L);
+    assertThat(gaps.get(gaps.size() - 1))
+        .as(
+            "backoff must RESET on a successful connection: the 5th reconnect should still wait"
+                + " ~reconnectBaseMs (100ms), not the 1000ms cap it climbs to without a reset."
+                + " per-cycle gaps=%s",
+            gaps)
+        .isLessThan(500L);
     assertThat(registry.counter("fill_listener.reconnects").count()).isGreaterThanOrEqualTo(5.0);
   }
 
@@ -1548,8 +1571,13 @@ class AlpacaTradeUpdatesStreamTest {
   private void awaitHandshake() throws InterruptedException {
     String auth = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
     String listen = server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS);
-    Assertions.assertThat(auth).isNotNull();
-    Assertions.assertThat(listen).isNotNull();
+    // Name what DID (not) arrive and any server-side error. A bare isNotNull() here is how the
+    // 2026-09-29 CI failure arrived with no diagnosis at all: "expecting actual not to be null"
+    // cannot distinguish a slow handshake from a connection the fixture rejected.
+    Assertions.assertThat(auth).as("auth frame%s", server.diagnosis()).isNotNull();
+    Assertions.assertThat(listen)
+        .as("listen frame (auth=%s)%s", auth, server.diagnosis())
+        .isNotNull();
   }
 
   private static int findFreePort() throws Exception {
@@ -1578,6 +1606,13 @@ class AlpacaTradeUpdatesStreamTest {
     }
 
     final BlockingQueue<String> frames = new LinkedBlockingQueue<>();
+
+    /**
+     * Server-side errors, for assertion diagnosis. CopyOnWriteArrayList because onError fires on
+     * the server thread while diagnosis() reads from the test thread.
+     */
+    final List<String> errors = new CopyOnWriteArrayList<>();
+
     final List<WebSocket> clients = new ArrayList<>();
     volatile AuthReplyMode authReplyMode = AuthReplyMode.AUTHORIZED;
     private final CountDownLatch started = new CountDownLatch(1);
@@ -1626,7 +1661,18 @@ class AlpacaTradeUpdatesStreamTest {
 
     @Override
     public void onError(WebSocket conn, Exception ex) {
-      // noisy under test teardown; ignore unless debugging
+      // Still not fatal (teardown legitimately produces resets), but RECORDED rather than
+      // discarded: a swallowed bind/connection failure is indistinguishable from a slow handshake
+      // at the assertion site, which is what made the 2026-09-29 CI flake undiagnosable.
+      errors.add(ex.getClass().getSimpleName() + ": " + ex.getMessage());
+    }
+
+    /** Appendable "; server errors=[...]" clause for an assertion message; empty when clean. */
+    String diagnosis() {
+      List<String> snapshot = new ArrayList<>(errors);
+      return snapshot.isEmpty()
+          ? " (no server-side errors recorded)"
+          : " (server errors=" + snapshot + ")";
     }
 
     @Override
