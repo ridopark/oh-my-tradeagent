@@ -44,6 +44,7 @@ import {
   forcePositionExit,
   trimPosition,
   NotAuthenticatedError,
+  tradeFill,
   type Order,
   type Portfolio,
   type Trade,
@@ -551,8 +552,8 @@ export default async function LivePage() {
             href="/trades"
             empty="No fills yet."
             rows={trades.map((t) => ({
-              primary: t.kind,
-              secondary: t.strategy_id,
+              primary: fillLabel(t),
+              secondary: `${t.kind} · ${t.strategy_id}`,
               when: t.occurred_at,
             }))}
           />
@@ -561,7 +562,7 @@ export default async function LivePage() {
             href="/orders"
             empty="No orders yet."
             rows={orders.map((o) => ({
-              primary: `${o.side} ${o.option_symbol}`,
+              primary: orderLabel(o),
               secondary: o.state,
               when: o.recorded_at,
             }))}
@@ -625,6 +626,51 @@ function accountCapText(cfg: TenantConfig | null): string | null {
     parts.push(`${fmtCurrency(usd)} (realized + open P&L)`);
   }
   return parts.length > 0 ? parts.join(" or ") : null;
+}
+
+// A padded OCC ("MU    260925C01100000") as a single-spaced label, matching how ContractLink
+// displays one.
+function occ(symbol: string): string {
+  return symbol.replace(/\s+/g, " ").trim();
+}
+
+// "INTC 261009C00125000 ×15 @ $2.29" — what a fill actually traded, for the Recent-trades strip.
+// The contract and qty come from the audit subject, which is absent on a pre-#276 event and can be
+// unparseable, so each part is appended only when present; a subject that yields nothing at all
+// degrades to "—" (the event kind still shows on the strip's sub-line).
+function fillLabel(t: Trade): string {
+  const f = tradeFill(t);
+  const parts: string[] = [];
+  if (f.option_symbol) {
+    parts.push(occ(f.option_symbol));
+  }
+  if (f.qty !== null) {
+    parts.push(`×${f.qty}`);
+  }
+  if (f.avg_fill_price !== null) {
+    parts.push(`@ ${fmtCurrency(f.avg_fill_price)}`);
+  }
+  return parts.length > 0 ? parts.join(" ") : "—";
+}
+
+// "SELL MU 260925C01100000 ×2 @ $17.10" — what an order asked for and what became of it, for the
+// Recent-orders strip. An order that never filled has NO fill price, so it shows the price it was
+// ASKING ("lmt $17.50") instead: a bare "—" would hide the only price such a row carries, and an
+// unfilled order is exactly the row worth reading. Qty renders as filled/requested ("×1/2") only on
+// a cancel-with-partial-fill, the one state where the two differ.
+function orderLabel(o: Order): string {
+  const parts: string[] = [o.side, occ(o.option_symbol)];
+  parts.push(
+    o.filled_qty != null && o.filled_qty !== o.qty
+      ? `×${o.filled_qty}/${o.qty}`
+      : `×${o.qty}`,
+  );
+  if (o.avg_fill_price != null) {
+    parts.push(`@ ${fmtCurrency(o.avg_fill_price)}`);
+  } else if (o.limit_price != null) {
+    parts.push(`lmt ${fmtCurrency(o.limit_price)}`);
+  }
+  return parts.join(" ");
 }
 
 function ActivityStrip({

@@ -534,6 +534,50 @@ export interface Trade {
   subject: string | null;
 }
 
+// What a fill actually traded, lifted out of the audit event's `subject`.
+export interface TradeFill {
+  option_symbol: string | null;
+  qty: number | null;
+  avg_fill_price: number | null;
+}
+
+// Read the contract / qty / price out of a Trade's `subject`. Two things make this more than a
+// property access:
+//   * `subject` crosses the wire as a JSON STRING (TradesReader casts the JSONB column to text), so
+//     it has to be parsed — and a malformed one must degrade to "—" cells, not break the table;
+//   * the two fill kinds spell the quantity DIFFERENTLY (verified against live audit rows):
+//     EntryFilled writes `filled_qty`, PartialExitFilled writes `qty_filled`.
+// `option_symbol` is absent on pre-#276 events (it shipped behind a replay version gate), hence
+// nullable rather than assumed.
+export function tradeFill(t: Trade): TradeFill {
+  let s: Record<string, unknown> = {};
+  if (t.subject) {
+    try {
+      const parsed: unknown = JSON.parse(t.subject);
+      if (parsed !== null && typeof parsed === "object") {
+        s = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Unparseable subject: leave every field null.
+    }
+  }
+  return {
+    option_symbol: typeof s.option_symbol === "string" ? s.option_symbol : null,
+    qty: finite(s.filled_qty ?? s.qty_filled),
+    avg_fill_price: finite(s.avg_fill_price),
+  };
+}
+
+// A numeric subject field, or null when it is absent or not a finite number. The null/undefined
+// guard is load-bearing: Number(null) is 0, so an absent field would otherwise read as a real zero.
+function finite(v: unknown): number | null {
+  if (v === null || v === undefined) {
+    return null;
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export interface Order {
   intent_key: string;
   strategy_id: string;
@@ -544,6 +588,9 @@ export interface Order {
   state: string;
   limit_price: string | number | null;
   avg_fill_price: string | number | null;
+  // Qty the broker actually filled (OrdersReader selects it). Null until a fill terminalizes the
+  // row, and BELOW `qty` on a cancel-with-partial-fill — the one place the two differ.
+  filled_qty: number | null;
   recorded_at: string;
   filled_at: string | null;
   last_error: string | null;
