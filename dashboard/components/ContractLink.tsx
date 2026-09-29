@@ -51,3 +51,11 @@ export function occCompact(occ: string): string {
   const strike = Number(strike8) / 1000;
   return `${root} $${strike}${cp} ${mm}/${dd}`;
 }
+
+// The OCC's expiry as YYYY-MM-DD, or null when the symbol is not a padded OCC. Used to keep expired
+// contracts out of the manual-entry picker: offering one guarantees a failed quote, and the operator
+// would have to work out why.
+export function occExpiryYmd(occ: string): string | null {
+  const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(occ.replace(/\s+/g, ""));
+  return m ? `20${m[2]}-${m[3]}-${m[4]}` : null;
+}

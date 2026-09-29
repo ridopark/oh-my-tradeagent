@@ -550,22 +550,29 @@ export interface TradeFill {
 // `option_symbol` is absent on pre-#276 events (it shipped behind a replay version gate), hence
 // nullable rather than assumed.
 export function tradeFill(t: Trade): TradeFill {
-  let s: Record<string, unknown> = {};
-  if (t.subject) {
-    try {
-      const parsed: unknown = JSON.parse(t.subject);
-      if (parsed !== null && typeof parsed === "object") {
-        s = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Unparseable subject: leave every field null.
-    }
-  }
+  const s = parseSubject(t.subject);
   return {
     option_symbol: typeof s.option_symbol === "string" ? s.option_symbol : null,
     qty: finite(s.filled_qty ?? s.qty_filled),
     avg_fill_price: finite(s.avg_fill_price),
   };
+}
+
+// An audit event's `subject`, parsed. It crosses the wire as a JSON STRING (the readers cast the
+// JSONB column to text), and a malformed one must degrade to empty fields rather than throw through
+// a page render.
+function parseSubject(raw: string | null): Record<string, unknown> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 // A numeric subject field, or null when it is absent or not a finite number. The null/undefined
@@ -576,6 +583,22 @@ function finite(v: unknown): number | null {
   }
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * An ACCEPTED entry signal — the system resolved a contract and decided to buy it, whether or not
+ * the entry ever filled. Backs the /live manual-entry contract picker.
+ */
+export interface Signal {
+  occurred_at: string;
+  strategy_id: string;
+  subject: string | null;
+}
+
+/** The resolved contract on an accepted signal, or null when the subject carries none. */
+export function signalOcc(s: Signal): string | null {
+  const occ = parseSubject(s.subject).option_symbol;
+  return typeof occ === "string" && occ.trim() ? occ : null;
 }
 
 export interface Order {
@@ -795,6 +818,8 @@ export const getPortfolioHistory = (range: string) =>
 
 export const getTrades = (limit = 100) =>
   bffGet<Envelope<Trade>>(`/api/trades?limit=${limit}`);
+export const getSignals = (limit = 50) =>
+  bffGet<Envelope<Signal>>(`/api/signals?limit=${limit}`);
 export const getOrders = (limit = 100) =>
   bffGet<Envelope<Order>>(`/api/orders?limit=${limit}`);
 export const getPortfolio = () => bffGet<Portfolio>("/api/portfolio");

@@ -110,9 +110,14 @@ function rejectionText(status: StatusView): string {
   return detail ? `${head} (${detail})` : head;
 }
 
+// Stable id tying the input's `list` to its <datalist>. Module-level: the panel renders once per
+// page, and a generated id would differ between the server and client renders.
+const RECENT_CONTRACTS_LIST_ID = "manual-entry-recent-contracts";
+
 export function ManualEntryPanel({
   strategies,
   heldOccs,
+  recentContracts,
   quoteAction,
   submitAction,
   statusAction,
@@ -122,6 +127,12 @@ export function ManualEntryPanel({
   // rather than silently opening a second one (WorkflowIds.position keys on the entry signal id, so
   // a repeat entry is a SECOND PositionWorkflow — same as a repeated Discord BTO).
   heldOccs: string[];
+  /**
+   * Contracts from recently ACCEPTED entry signals, newest first, offered as datalist suggestions.
+   * Suggestions only — the input still accepts anything typed by hand, which is the whole point of
+   * a manual entry box. Empty when the signals read failed or the BFF predates /api/signals.
+   */
+  recentContracts: string[];
   quoteAction: (occ: string) => Promise<QuoteActionResult>;
   submitAction: (
     occ: string,
@@ -312,14 +323,26 @@ export function ManualEntryPanel({
       <div className="rounded border border-slate-800 bg-slate-900 px-3 py-3">
         {(step.kind === "idle" || step.kind === "quoting" || step.kind === "failed") && (
           <div className="flex flex-wrap items-center gap-2">
+            {/* A real combo box: `list` adds a dropdown of recently signalled contracts WITHOUT
+                constraining the field, so hand-typing an OCC the system has never signalled works
+                exactly as before. The dropdown is browser-rendered, so it does not inherit the dark
+                theme — the trade for keeping the typing path untouched. */}
             <input
               type="text"
               value={occ}
               onChange={(e) => setOcc(e.target.value)}
+              list={recentContracts.length > 0 ? RECENT_CONTRACTS_LIST_ID : undefined}
               placeholder="NVDA 260821C00225000"
               spellCheck={false}
               className="w-64 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-600"
             />
+            {recentContracts.length > 0 && (
+              <datalist id={RECENT_CONTRACTS_LIST_ID}>
+                {recentContracts.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+            )}
             {strategies.length > 1 && (
               <select
                 value={strategyId}

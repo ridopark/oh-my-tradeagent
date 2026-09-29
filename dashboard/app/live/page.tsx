@@ -5,7 +5,11 @@ import { Nav } from "@/components/Nav";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
-import { ContractLink, contractCell } from "@/components/ContractLink";
+import {
+  ContractLink,
+  contractCell,
+  occExpiryYmd,
+} from "@/components/ContractLink";
 import { Pnl, pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import {
   ForceExitButton,
@@ -32,6 +36,8 @@ import {
   getOrders,
   getPortfolio,
   getTrades,
+  getSignals,
+  signalOcc,
   getTenantConfig,
   getAccountKillSwitch,
   getStrategyConfig,
@@ -48,6 +54,7 @@ import {
   type Order,
   type Portfolio,
   type Trade,
+  type Signal,
   type TenantConfig,
   type AccountKillSwitch,
 } from "@/lib/bff";
@@ -293,6 +300,14 @@ export default async function LivePage() {
     }
     return <LiveUnavailable tenantId={session?.tenantId} />;
   }
+
+  // Deliberately fail-soft and OUTSIDE the Promise.all above: /api/signals is a NEW endpoint, and
+  // the dashboard and the BFF roll independently. If the dashboard lands first, this 404s — and
+  // inside that Promise.all a 404 would reject the whole thing and render LiveUnavailable, taking
+  // the operator page down for a convenience feature. Degrade to a plain text box instead.
+  const recentSignalOccs: string[] = await getSignals(50)
+    .then((r) => signalContractOptions(r.items))
+    .catch(() => []);
 
   // Daily-loss protection card — per-strategy limits + the account-wide cap. Fetched together
   // (independent reads); each degrades to null on failure so the card stays neutral rather than
@@ -565,6 +580,7 @@ export default async function LivePage() {
             heldOccs={portfolio.open_positions.map((p) =>
               String(p.contract_symbol).replace(/\s+/g, ""),
             )}
+            recentContracts={recentSignalOccs}
             quoteAction={quoteAction}
             submitAction={submitManualEntryAction}
             statusAction={entryStatusAction}
@@ -651,6 +667,35 @@ function HoldingCard({
       {actions && <div className="mt-2">{actions(row)}</div>}
     </div>
   );
+}
+
+// The contract list behind the manual-entry box: newest accepted signals first, one entry per
+// contract, and nothing already expired (offering an expired OCC guarantees a failed quote). Capped
+// because this is a type-ahead, not a history — the full feed lives on /trades.
+function signalContractOptions(signals: Signal[]): string[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of signals) {
+    const occ = signalOcc(s);
+    if (occ === null) {
+      continue;
+    }
+    const expiry = occExpiryYmd(occ);
+    if (expiry !== null && expiry < today) {
+      continue;
+    }
+    const key = occ.replace(/\s+/g, "");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(occ.replace(/\s+/g, " ").trim());
+    if (out.length === 20) {
+      break;
+    }
+  }
+  return out;
 }
 
 // Coerce a strategy-config numeric field to a positive integer, or null when it is absent/garbage.
