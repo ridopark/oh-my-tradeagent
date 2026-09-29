@@ -657,6 +657,29 @@ class PortfolioServiceTest {
     assertThat(rows.get(0).get("contract_symbol")).isEqualTo("AMD   261120C00160000");
   }
 
+  @Test
+  @SuppressWarnings("unchecked")
+  void aFailedQuoteIsNotRetriedForEverySiblingRow() {
+    // computeIfAbsent does NOT store a null, so the first shape of this code re-hit market-data for
+    // every sibling row precisely when the hop was already failing — and warned each time. The
+    // per-ticker guarantee has to hold on the FAILURE path, which is the one that costs latency.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                openPos("t-acme/s-s1/pos/SMCI  261120C00050000/a", "SMCI  261120C00050000", 5),
+                openPos("t-acme/s-s1/pos/SMCI  261120C00050000/b", "SMCI  261120C00050000", 21),
+                openPos("t-acme/s-s1/pos/SMCI  261120C00050000/c", "SMCI  261120C00050000", 2)));
+    when(equityQuotes.equityPrice("SMCI")).thenReturn(null);
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    assertThat(rows).hasSize(3);
+    assertThat(rows).allSatisfy(r -> assertThat(r.get("underlying_price")).isNull());
+    verify(equityQuotes, times(1)).equityPrice("SMCI");
+  }
+
   private static OpenPosition openPos(String workflowId, String occ, long qty) {
     return new OpenPosition(
         workflowId,

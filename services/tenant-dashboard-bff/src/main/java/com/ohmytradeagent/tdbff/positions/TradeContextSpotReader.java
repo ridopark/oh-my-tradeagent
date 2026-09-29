@@ -2,9 +2,11 @@ package com.ohmytradeagent.tdbff.positions;
 
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.jooq.DSLContext;
@@ -58,15 +60,19 @@ public class TradeContextSpotReader {
     if (dashboardDsl == null || positionWorkflowIds.isEmpty()) {
       return Map.of();
     }
-    // signal_id -> workflow_id, so the result can be re-keyed without a second parse.
-    Map<String, String> workflowBySignal = new LinkedHashMap<>();
+    // signal_id -> the workflow ids that parse to it, so the result can be re-keyed without a
+    // second parse. A LIST, not a single value: two open positions CAN share a signal id (the same
+    // manual/copy id across strategies), and overwriting would silently drop the entry spot from
+    // whichever row lost the race. The table holds one row per (tenant, signal), so both rows
+    // legitimately take the same spot.
+    Map<String, List<String>> workflowsBySignal = new LinkedHashMap<>();
     for (String wf : positionWorkflowIds) {
       String signalId = WorkflowIds.entrySignalIdFromPosition(wf);
       if (signalId != null) {
-        workflowBySignal.put(signalId, wf);
+        workflowsBySignal.computeIfAbsent(signalId, k -> new ArrayList<>()).add(wf);
       }
     }
-    if (workflowBySignal.isEmpty()) {
+    if (workflowsBySignal.isEmpty()) {
       return Map.of();
     }
     try {
@@ -75,13 +81,15 @@ public class TradeContextSpotReader {
               "SELECT signal_id, underlying_spot FROM trade_context"
                   + " WHERE tenant_id = ? AND signal_id = ANY(?)",
               tenantId,
-              workflowBySignal.keySet().toArray(new String[0]));
+              workflowsBySignal.keySet().toArray(new String[0]));
       Map<String, BigDecimal> out = new HashMap<>();
       for (Record r : rows) {
         String signalId = r.get(0, String.class);
         BigDecimal spot = r.get(1, BigDecimal.class);
-        String wf = workflowBySignal.get(signalId);
-        if (wf != null && spot != null) {
+        if (spot == null) {
+          continue;
+        }
+        for (String wf : workflowsBySignal.getOrDefault(signalId, List.of())) {
           out.put(wf, spot);
         }
       }

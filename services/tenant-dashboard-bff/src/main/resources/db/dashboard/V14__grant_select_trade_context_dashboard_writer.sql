@@ -20,4 +20,10 @@
 -- destroy or forge the corpus — is preserved: no INSERT, no UPDATE, no DELETE, no TRUNCATE. Only
 -- trade_context_writer (the recorder) can write, exactly as before. Tenant scoping stays where it
 -- already is, in the reader's `WHERE tenant_id = ?`.
+--
+-- ACCEPTED TRADE-OFF, stated plainly: this table has no row-level security, so a browser-facing
+-- pool role can now read EVERY tenant's trade_context if a future query drops the tenant predicate.
+-- Before this grant that class of bug was impossible here by construction; after it, the predicate
+-- is the only thing separating tenants. Any new query against this table must carry
+-- `tenant_id = ?`, and TradeContextSpotReaderTest pins that for the reader added alongside it.
 GRANT SELECT ON trade_context TO dashboard_writer;

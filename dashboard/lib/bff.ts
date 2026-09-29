@@ -516,9 +516,6 @@ export interface Position {
   // Armed trailing-stop state for this position, read off its workflow. `trailing_armed` is present
   // on every row from a current BFF; the two numerics only when a trail IS armed. Optional because
   // an older BFF omits all three — the row then renders as un-armed rather than breaking.
-  // trail_stop_price is PEAK-anchored (the price the stop fires at NOW). Render it as given; do not
-  // recompute it from current_price, which understates the stop whenever the position is off its
-  // high.
   /**
    * The UNDERLYING equity's price at entry (recorded once per position by the #783 trade-context
    * recorder) and its price now. Either may be null — a position entered before the recorder
@@ -527,6 +524,9 @@ export interface Position {
    */
   underlying_spot_entry?: string | number | null;
   underlying_price?: string | number | null;
+  // trail_stop_price is PEAK-anchored (the price the stop fires at NOW). Render it as given; do not
+  // recompute it from current_price, which understates the stop whenever the position is off its
+  // high.
   trailing_armed?: boolean;
   trail_giveback_pct?: string | number | null;
   trail_stop_price?: string | number | null;

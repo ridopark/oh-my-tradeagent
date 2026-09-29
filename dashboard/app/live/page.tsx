@@ -722,9 +722,10 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   );
 }
 
-// A nullable numeric cell value as a number, or null when absent/unparseable.
+// A nullable numeric cell value as a number, or null when absent/unparseable. The empty string is
+// rejected explicitly: Number("") is 0, which would render as a real $0.00 price.
 function num(v: unknown): number | null {
-  if (v === null || v === undefined) {
+  if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) {
     return null;
   }
   const n = Number(v);
