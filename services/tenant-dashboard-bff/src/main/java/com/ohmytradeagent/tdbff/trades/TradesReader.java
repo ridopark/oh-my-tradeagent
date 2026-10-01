@@ -3,20 +3,29 @@ package com.ohmytradeagent.tdbff.trades;
 // audit_log select COPIED FROM services/api-gateway/.../web/AuditController.java — keep in sync.
 // Narrowed to the two FILL kinds a tenant cares about (EntryFilled + PartialExitFilled) and scoped
 // to the tenant's whole strategy set (strategy_id IN (...)).
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 /** Read-only view of a tenant's fills from the orchestrator's {@code audit_log}. */
 @Component
 public class TradesReader {
+
+  private static final Logger log = LoggerFactory.getLogger(TradesReader.class);
 
   static final int DEFAULT_LIMIT = 100;
   static final int MAX_LIMIT = 500;
@@ -57,24 +66,108 @@ public class TradesReader {
       cond = cond.and(DSL.field("occurred_at").greaterOrEqual(DSL.val(since)));
     }
 
-    return orchestratorDsl
-        .select(
-            DSL.field("event_id"),
-            DSL.field("occurred_at"),
-            DSL.field("kind"),
-            DSL.field("actor"),
-            DSL.field("strategy_id"),
-            DSL.field("workflow_id"),
-            DSL.field("correlation_id"),
-            DSL.field("subject").cast(String.class).as("subject_json"))
-        .from(DSL.table("audit_log"))
-        .where(cond)
-        .orderBy(DSL.field("occurred_at").desc(), DSL.field("id").desc())
-        .limit(cappedLimit)
-        .fetch()
-        .stream()
-        .map(TradesReader::row)
-        .toList();
+    return withEntryBasis(
+        tenantId,
+        orchestratorDsl
+            .select(
+                DSL.field("event_id"),
+                DSL.field("occurred_at"),
+                DSL.field("kind"),
+                DSL.field("actor"),
+                DSL.field("strategy_id"),
+                DSL.field("workflow_id"),
+                DSL.field("correlation_id"),
+                DSL.field("subject").cast(String.class).as("subject_json"))
+            .from(DSL.table("audit_log"))
+            .where(cond)
+            .orderBy(DSL.field("occurred_at").desc(), DSL.field("id").desc())
+            .limit(cappedLimit)
+            .fetch()
+            .stream()
+            .map(TradesReader::row)
+            .toList());
+  }
+
+  /**
+   * Weighted entry cost basis per entry signal, so an exit row can say what it MADE rather than
+   * only what it sold at.
+   *
+   * <p>Weighted, not "the entry price": an entry can grow after its first fill (#738 books the rest
+   * as {@code PositionEntryIncreased}, which carries its own {@code avg_fill_price}), and those
+   * fills can be at different prices — a live prod_real SPY position is 32 contracts at a blended
+   * 1.7425, not at any single fill's price. Taking the first fill alone would mis-state every exit
+   * on a grown position.
+   *
+   * <p>Only fills that carried a price contribute to both the quantity and the cost, so the average
+   * stays consistent rather than diluted by quantity it cannot value.
+   *
+   * <p>QTY-KEY CONTRACT, because the two sides of this feature read different keys and a silent
+   * mismatch would mis-value every row: ENTRY events carry the quantity as {@code filled_qty}
+   * (EntryFilled) or {@code qty_added} (PositionEntryIncreased) — the COALESCE below — while EXIT
+   * events carry {@code qty_filled}, which is what {@code tradeFill} reads on the dashboard. The
+   * keys are disjoint by kind, so neither fallback can pick up the other's events. If an entry kind
+   * ever starts emitting {@code qty_filled}, this average silently drops it.
+   *
+   * <p>Raw SQL rather than the jOOQ DSL: this is a JSONB extraction with a FILTER-less conditional
+   * COALESCE and a NULLIF guard, which the DSL expresses far less legibly than the SQL does. Every
+   * value is still bound, never concatenated.
+   */
+  private Map<String, BigDecimal> entryBasisBySignal(String tenantId, Set<String> correlationIds) {
+    if (correlationIds.isEmpty()) {
+      return Map.of();
+    }
+    try {
+      return orchestratorDsl
+          .fetch(
+              "SELECT correlation_id,"
+                  + " SUM(COALESCE((subject->>'filled_qty')::bigint,"
+                  + "              (subject->>'qty_added')::bigint)"
+                  + "     * (subject->>'avg_fill_price')::numeric)"
+                  + " / NULLIF(SUM(COALESCE((subject->>'filled_qty')::bigint,"
+                  + "                       (subject->>'qty_added')::bigint)), 0) AS basis"
+                  + " FROM audit_log"
+                  + " WHERE tenant_id = ? AND correlation_id = ANY(?)"
+                  + "   AND kind IN ('EntryFilled', 'PositionEntryIncreased')"
+                  + "   AND subject->>'avg_fill_price' IS NOT NULL"
+                  + " GROUP BY correlation_id",
+              tenantId,
+              correlationIds.toArray(new String[0]))
+          .stream()
+          .filter(r -> r.get(1, BigDecimal.class) != null)
+          .collect(Collectors.toMap(r -> r.get(0, String.class), r -> r.get(1, BigDecimal.class)));
+    } catch (RuntimeException e) {
+      // Fail-soft — no basis means the strip shows the fill without a P&L, never a failed read.
+      //
+      // WARN, not debug: this is all-or-nothing. A single bad cast (a non-numeric avg_fill_price, a
+      // non-integer qty, a typo in the SQL above) takes out the basis for EVERY correlation id in
+      // the batch, so P&L silently vanishes from the whole strip. At debug that is invisible in
+      // production — which is exactly how TradeContextPeakReader stayed dead for months.
+      log.warn(
+          "entry-basis read failed; strip P&L suppressed tenant={}: {}", tenantId, e.toString());
+      return Map.of();
+    }
+  }
+
+  /** Attaches {@code entry_basis} to each row so an exit can be valued against what it cost. */
+  private List<Map<String, Object>> withEntryBasis(
+      String tenantId, List<Map<String, Object>> items) {
+    Set<String> ids = new LinkedHashSet<>();
+    for (Map<String, Object> m : items) {
+      Object cid = m.get("correlation_id");
+      if (cid instanceof String s && !s.isBlank()) {
+        ids.add(s);
+      }
+    }
+    Map<String, BigDecimal> basis = entryBasisBySignal(tenantId, ids);
+    // The key is attached even when the lookup came back empty, so every row has the same shape and
+    // "no basis" is one case (null) rather than two (absent vs null).
+    List<Map<String, Object>> out = new ArrayList<>(items.size());
+    for (Map<String, Object> m : items) {
+      Map<String, Object> copy = new LinkedHashMap<>(m);
+      copy.put("entry_basis", basis.get(String.valueOf(m.get("correlation_id"))));
+      out.add(Collections.unmodifiableMap(copy));
+    }
+    return out;
   }
 
   private static Map<String, Object> row(Record r) {

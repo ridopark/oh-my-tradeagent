@@ -41,6 +41,7 @@ import {
   getTrades,
   getSignals,
   signalOcc,
+  tradePnl,
   signalNumber,
   getTenantConfig,
   getAccountKillSwitch,
@@ -618,6 +619,8 @@ export default async function LivePage() {
               primary: fillLabel(t),
               secondary: `${t.kind} · ${t.strategy_id}`,
               when: t.occurred_at,
+              // Exits only: an entry fill has no result to report, it IS the basis.
+              pnl: tradePnl(t),
             }))}
           />
           <ActivityStrip
@@ -1008,7 +1011,13 @@ function ActivityStrip({
   title: string;
   href: string;
   empty: string;
-  rows: { primary: string; secondary: string; when: string }[];
+  rows: {
+    primary: string;
+    secondary: string;
+    when: string;
+    /** Optional signed result for this row, rendered coloured after the primary text. */
+    pnl?: number | null;
+  }[];
 }) {
   return (
     <section>
@@ -1028,7 +1037,18 @@ function ActivityStrip({
               className="flex items-center justify-between px-3 py-2 text-sm"
             >
               <div className="min-w-0">
-                <div className="truncate text-slate-200">{r.primary}</div>
+                <div className="truncate text-slate-200">
+                  {r.primary}
+                  {r.pnl !== null && r.pnl !== undefined && (
+                    <span
+                      className={r.pnl >= 0 ? " text-emerald-400" : " text-rose-400"}
+                    >
+                      {" "}
+                      {r.pnl >= 0 ? "+" : ""}
+                      {fmtCurrency(r.pnl)}
+                    </span>
+                  )}
+                </div>
                 {/* Below sm the timestamp joins this line instead of competing with the contract
                     for the row's width — the whole reason the qty and price were being truncated
                     away on a phone. From sm up it returns to its own right-aligned column. */}
