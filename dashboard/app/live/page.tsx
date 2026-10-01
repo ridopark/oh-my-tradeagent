@@ -5,6 +5,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
+import { LiveActivationBanner } from "@/components/LiveActivationBanner";
 import {
   ContractLink,
   contractCell,
@@ -45,6 +46,7 @@ import {
   signalNumber,
   getTenantConfig,
   getAccountKillSwitch,
+  getLivePromotion,
   getStrategyConfig,
   getOptionQuote,
   submitManualEntry,
@@ -62,6 +64,7 @@ import {
   type Signal,
   type TenantConfig,
   type AccountKillSwitch,
+  type LivePromotion,
 } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -338,6 +341,18 @@ export default async function LivePage() {
     ? "tripped"
     : "healthy";
 
+  // Live-promotion state — its OWN degrade, like the kill switch above: a failed read renders no
+  // banner rather than blanking /live. Null here means "we could not ask"; the BFF's own "unknown"
+  // status (it answered, but could not read the approvals) is a different, louder case the banner
+  // does surface.
+  const livePromotion: LivePromotion | null = await getLivePromotion().catch((err) => {
+    console.error(
+      "getLivePromotion failed; rendering /live without the activation banner",
+      err,
+    );
+    return null;
+  });
+
   // Manual-entry panel inputs. Read ONLY when the flag is on — with it off /live issues exactly the
   // same BFF calls it always has. Degrades to an empty list on failure, which renders no panel
   // rather than a panel whose strategy picker cannot be satisfied.
@@ -528,6 +543,9 @@ export default async function LivePage() {
         openMtm={killSwitch?.openMtm ?? null}
         capText={accountCapText(tenantConfig)}
       />
+      {/* Also full-bleed and OUTSIDE <main>, for the same reason as the guard bar above: a tenant
+          that cannot place orders at all should not be told so in an inset card. */}
+      <LiveActivationBanner promotion={livePromotion} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
         <div>
           <h1 className="mb-1 text-xl font-semibold text-slate-100">Live</h1>

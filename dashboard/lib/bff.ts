@@ -139,6 +139,36 @@ export interface AccountKillSwitch {
 export const getAccountKillSwitch = () =>
   bffGet<AccountKillSwitch>("/api/account-killswitch");
 
+// Whether this tenant's LIVE strategies are actually cleared to place real-money orders.
+//
+// The orchestrator refuses a live BTO unless a non-stale LivePromotionApproved exists, and that
+// approval EXPIRES (30 days). In 2026-09 it lapsed on all three live tenants and every entry was
+// refused for seven days while /live looked completely normal — this is the state that makes that
+// visible. `expiring` is as important as `stale`: the outage was an expiry, not an absence.
+//
+// `overall` is the most severe status across the tenant's live strategies, ranked server-side:
+//   stale | absent  — orders are being refused RIGHT NOW
+//   unknown          — the approval read failed; never treat as cleared
+//   expiring         — still trading, but the approval lapses within 7 days
+//   active           — cleared
+//   none             — the tenant has no live strategies (paper-only); render nothing
+export interface LivePromotionStrategy {
+  strategy_id: string;
+  broker_target: string;
+  status: "active" | "expiring" | "stale" | "absent" | "unknown";
+  approved_at: string | null;
+  expires_at: string | null;
+  days_remaining: number | null;
+  approved_by: string | null;
+}
+export interface LivePromotion {
+  tenant_id: string;
+  overall: "active" | "expiring" | "stale" | "absent" | "unknown" | "none";
+  strategies: LivePromotionStrategy[];
+}
+export const getLivePromotion = () =>
+  bffGet<LivePromotion>("/api/live-promotion");
+
 // Typed result of a reset attempt. Never throws on the expected 409s — the UI needs to SHOW the wait
 // (circuit_breaker_active, with the resettableAt to resync its countdown) or the no-op (not_tripped)
 // rather than crash. `ok` is the 200 RESET path.
