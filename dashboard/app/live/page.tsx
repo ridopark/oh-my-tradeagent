@@ -434,7 +434,7 @@ export default async function LivePage() {
         </span>
       ),
     },
-    { key: "remaining_qty", label: "Qty" },
+    { key: "remaining_qty", label: "Qty", render: qtyCell },
     // Entry premium and the live mark are a pair, so they read as one "x -> y" cell exactly like
     // Underlying below — two columns of the same quantity at two points in time was the table's
     // most expensive habit.
@@ -656,7 +656,7 @@ function HoldingCard({
           <FloorBreachBadge workflowId={String(row.workflow_id)} />
         </span>
         <span className="shrink-0 font-medium text-slate-200">
-          &times;{String(row.remaining_qty ?? "—")}
+          &times;{qtyCell(null, row)}
         </span>
       </div>
       <dl className="mt-1 space-y-0.5 text-xs text-slate-400">
@@ -705,6 +705,29 @@ function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
       ) : (
         <span className="text-slate-200">{fmtCurrency(value)}</span>
       )}
+    </span>
+  );
+}
+
+// "21" normally, "26 → 21" once some of it has been sold.
+//
+// Deliberately NOT always a pair: on an untouched position entered and remaining are the same
+// number, and "21 → 21" is noise in the narrowest column on the row. The arrow appears only when it
+// carries information — that a partial exit or a trim has happened.
+function qtyCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const remaining = num(row.remaining_qty);
+  const entered = num(row.entry_qty);
+  if (remaining === null) {
+    return <span className="text-slate-500">—</span>;
+  }
+  if (entered === null || entered === remaining) {
+    return <span className="text-slate-200">{remaining}</span>;
+  }
+  return (
+    <span className="whitespace-nowrap text-slate-200">
+      {entered}
+      <span className="text-slate-600"> → </span>
+      {remaining}
     </span>
   );
 }

@@ -2,6 +2,7 @@ package com.ohmytradeagent.tdbff.portfolio;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
+import com.ohmytradeagent.tdbff.positions.EntryQtyReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
@@ -72,6 +73,7 @@ public class PortfolioService {
 
   private final PositionsReader positionsReader;
   private final TradeContextSpotReader entrySpotReader;
+  private final EntryQtyReader entryQtyReader;
   private final MarketDataQuoteClient equityQuotes;
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
@@ -104,11 +106,13 @@ public class PortfolioService {
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
       TradeContextSpotReader entrySpotReader,
+      EntryQtyReader entryQtyReader,
       MarketDataQuoteClient equityQuotes,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
       @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.positionsReader = positionsReader;
     this.entrySpotReader = entrySpotReader;
+    this.entryQtyReader = entryQtyReader;
     this.equityQuotes = equityQuotes;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
@@ -236,12 +240,16 @@ public class PortfolioService {
         subreadPool.submit(() -> entrySpotReader.entrySpotByWorkflowId(tenantId, workflowIds));
     Future<Map<String, BigDecimal>> spotNowFuture =
         subreadPool.submit(() -> quoteDistinctUnderlyings(positions));
+    Future<Map<String, Long>> enteredQtyFuture =
+        subreadPool.submit(() -> entryQtyReader.enteredQtyByWorkflowId(tenantId, workflowIds));
     long remainingSeconds =
         Math.max(1L, TimeUnit.NANOSECONDS.toSeconds(deadlineNanos - System.nanoTime()));
     Map<String, BigDecimal> entrySpotByWorkflow =
         await(entrySpotFuture, Map.of(), "entry spot tenant=" + tenantId, remainingSeconds);
     Map<String, BigDecimal> spotNowByTicker =
         await(spotNowFuture, Map.of(), "underlying quotes tenant=" + tenantId, remainingSeconds);
+    Map<String, Long> enteredQtyByWorkflow =
+        await(enteredQtyFuture, Map.of(), "entry qty tenant=" + tenantId, remainingSeconds);
 
     BigDecimal sumOpenNotional = BigDecimal.ZERO;
     List<Map<String, Object>> positionItems = new ArrayList<>();
@@ -254,7 +262,8 @@ public class PortfolioService {
               p,
               marks,
               entrySpotByWorkflow.get(p.workflowId()),
-              spotNowByTicker.get(underlyingOf(p.contractSymbol()))));
+              spotNowByTicker.get(underlyingOf(p.contractSymbol())),
+              enteredQtyByWorkflow.get(p.workflowId())));
     }
 
     // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
@@ -384,7 +393,8 @@ public class PortfolioService {
       OpenPosition p,
       BrokerPositionsClient.PositionMarks marks,
       BigDecimal underlyingSpotEntry,
-      BigDecimal underlyingPrice) {
+      BigDecimal underlyingPrice,
+      Long enteredQty) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
@@ -396,6 +406,9 @@ public class PortfolioService {
     // an entry spot but no live quote (or the reverse) still shows what it has.
     m.put("underlying_spot_entry", underlyingSpotEntry);
     m.put("underlying_price", underlyingPrice);
+    // Originally-entered contracts. Null when the audit trail could not supply it (a lost or
+    // pre-retention entry), in which case the row shows the remaining qty alone.
+    m.put("entry_qty", enteredQty);
     // Live broker marks, joined by OCC. current_price is the shared per-unit mark. The two P&L
     // figures are PER-ROW (#832): the broker's numbers are ACCOUNT-POSITION-level, and attaching
     // them verbatim duplicated the whole contract's P&L onto every sibling workflow row sharing

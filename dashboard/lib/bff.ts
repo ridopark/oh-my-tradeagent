@@ -522,6 +522,11 @@ export interface Position {
    * existed has no recorded spot, and the live equity quote is a best-effort hop — so each half
    * renders independently.
    */
+  /**
+   * Contracts ORIGINALLY entered, derived from the audit trail (entry fill + any later entry
+   * growth). Null when that trail could not supply it, in which case only the remaining qty shows.
+   */
+  entry_qty?: number | null;
   underlying_spot_entry?: string | number | null;
   underlying_price?: string | number | null;
   // trail_stop_price is PEAK-anchored (the price the stop fires at NOW). Render it as given; do not
