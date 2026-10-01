@@ -12,6 +12,7 @@ export function ContractLink({
   compact?: boolean;
 }) {
   const compact = occ.replace(/\s+/g, "");
+  const parts = compactLabel ? occCompactParts(occ) : null;
   const display = compactLabel
     ? occCompact(occ)
     : occ.replace(/\s+/g, " ").trim();
@@ -25,7 +26,20 @@ export function ContractLink({
       title={compactLabel ? occ.replace(/\s+/g, " ").trim() : undefined}
       className="text-sky-400 hover:text-sky-300 hover:underline"
     >
-      {display}
+      {/* Compact mode stacks the underlying over the rest ("GOOGL" / "$360C 10/16"): in the narrow
+          Holdings contract column the one-line form crowds everything to its right. Only the
+          two-line case splits — the activity strips use occCompact() as a STRING mid-sentence
+          ("SELL GOOGL $360C 10/16 ×1 @ ..."), where a break would read as a new row. */}
+      {parts === null ? (
+        display
+      ) : (
+        <>
+          <span className="block">{parts.root}</span>
+          {/* nowrap: without it the column shrinks to the root's width and the strike/date wrap
+              again, giving THREE lines ("GOOGL" / "$360C" / "10/16") instead of two. */}
+          <span className="block whitespace-nowrap">{parts.rest}</span>
+        </>
+      )}
     </a>
   );
 }
@@ -44,15 +58,30 @@ export function contractCell(value: unknown): ReactNode {
 // single-spaced symbol whenever the string is not a padded OCC (a legacy row, or anything
 // hand-entered), so an unparseable symbol degrades to today's rendering rather than to "".
 export function occCompact(occ: string): string {
-  const bare = occ.replace(/\s+/g, "");
-  const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(bare);
+  const parts = occCompactParts(occ);
+  return parts === null
+    ? occ.replace(/\s+/g, " ").trim()
+    : `${parts.root} ${parts.rest}`;
+}
+
+/**
+ * The compact label split at the underlying, so a narrow column can stack it:
+ * "GOOGL  261016C00360000" -> { root: "GOOGL", rest: "$360C 10/16" }. Null when the symbol is not a
+ * padded OCC, which is the caller's cue to fall back to the raw text.
+ */
+export function occCompactParts(
+  occ: string,
+): { root: string; rest: string } | null {
+  const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(
+    occ.replace(/\s+/g, ""),
+  );
   if (!m) {
-    return occ.replace(/\s+/g, " ").trim();
+    return null;
   }
   const [, root, , mm, dd, cp, strike8] = m;
   // OCC strikes carry three implied decimals: 00050000 -> 50, 00152500 -> 152.5.
   const strike = Number(strike8) / 1000;
-  return `${root} $${strike}${cp} ${mm}/${dd}`;
+  return { root, rest: `$${strike}${cp} ${mm}/${dd}` };
 }
 
 // The OCC's expiry as YYYY-MM-DD, or null when the symbol is not a padded OCC. Used to keep expired

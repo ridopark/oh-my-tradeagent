@@ -435,12 +435,14 @@ export default async function LivePage() {
       ),
     },
     { key: "remaining_qty", label: "Qty" },
-    { key: "entry_premium", label: "Entry premium" },
-    // One paired column rather than two: the table is already wide, and the MOVE is the part the
-    // rest of the row cannot tell you — the stock can be up while the option is down (theta/IV).
+    // Entry premium and the live mark are a pair, so they read as one "x -> y" cell exactly like
+    // Underlying below — two columns of the same quantity at two points in time was the table's
+    // most expensive habit.
+    { key: "entry_premium", label: "Premium", render: premiumCell },
+    // The MOVE is the part the rest of the row cannot tell you — the stock can be up while the
+    // option is down (theta/IV).
     { key: "underlying_spot_entry", label: "Underlying", render: underlyingCell },
     { key: "open_notional", label: "Cost", render: priceCell },
-    { key: "current_price", label: "Current mark", render: priceCell },
     { key: "position_value", label: "Value", render: valueCell },
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
@@ -654,12 +656,8 @@ function HoldingCard({
       </div>
       <dl className="mt-1 space-y-0.5 text-xs text-slate-400">
         <div className="flex justify-between gap-2">
-          <dt>entry &rarr; mark</dt>
-          <dd className="text-slate-200">
-            {row.entry_premium == null ? "—" : String(row.entry_premium)}
-            {" \u2192 "}
-            {mark == null ? <span className="text-slate-500">—</span> : String(mark)}
-          </dd>
+          <dt>premium</dt>
+          <dd className="text-slate-200">{premiumCell(null, row)}</dd>
         </div>
         <div className="flex justify-between gap-2">
           <dt>cost &rarr; value</dt>
@@ -687,6 +685,26 @@ function HoldingCard({
   );
 }
 
+// "$2.78 → $2.55" — the option's entry premium and its live mark, paired like Underlying.
+//
+// The entry premium is NOT run through fmtCurrency: it is a cost basis and carries more than two
+// decimals (2.805 on a live position right now), which rounding to $2.81 would quietly change. The
+// broker's mark is a quote and renders as given.
+function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const entry = num(row.entry_premium);
+  const mark = num(row.current_price);
+  if (entry === null && mark === null) {
+    return <span className="text-slate-500">—</span>;
+  }
+  return (
+    <span className="whitespace-nowrap">
+      <span className="text-slate-200">{entry === null ? "—" : `$${entry}`}</span>
+      <span className="text-slate-600"> → </span>
+      <span className="text-slate-200">{mark === null ? "—" : `$${mark}`}</span>
+    </span>
+  );
+}
+
 // "$38.30 → $41.12 (+7.4%)" for the Holdings Underlying column. Each half renders independently:
 // a position entered before the #783 recorder has no entry spot, and the live equity quote is a
 // best-effort hop, so one missing number must not blank the other. The percentage is omitted unless
@@ -701,15 +719,14 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
     entry !== null && now !== null && entry !== 0
       ? ((now - entry) / entry) * 100
       : null;
-  // Stacked, and without a "$" on either number: the column is headed "Underlying" and these are
-  // equity prices, so the symbol is decoration this table cannot afford — the two together are what
-  // let the 10-column table fit its container at 1024px.
+  // Stacked, and the "$" is affordable again now that entry premium and the mark share one column
+  // instead of two — that merge freed far more width than the four currency symbols cost.
   return (
     <span className="inline-block">
       <span className="block whitespace-nowrap text-slate-200">
-        {entry === null ? "—" : entry.toFixed(2)}
+        {entry === null ? "—" : `$${entry.toFixed(2)}`}
         <span className="text-slate-600"> → </span>
-        {now === null ? "—" : now.toFixed(2)}
+        {now === null ? "—" : `$${now.toFixed(2)}`}
       </span>
       {movePct !== null && (
         <span
