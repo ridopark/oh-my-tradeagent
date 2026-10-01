@@ -36,8 +36,10 @@ public class LivePromotionStateReader {
   static final Duration LIVE_PROMOTION_TTL = Duration.ofDays(30);
 
   // An approval whose expiry is within this window is flagged at-risk so the dashboard can warn the
-  // operator to re-approve before the live promotion silently goes stale.
-  static final Duration AT_RISK_WINDOW = Duration.ofDays(3);
+  // operator to re-approve before the live promotion silently goes stale. The ONE warn window for
+  // both the admin tenant list and the /live banner. 7 days covers a long weekend plus slack: the
+  // 2026-09-21 lapse went unnoticed for seven days.
+  static final Duration AT_RISK_WINDOW = Duration.ofDays(7);
 
   private static final String KIND_APPROVED = "LivePromotionApproved";
   private static final String KIND_DEACTIVATED = "LivePromotionDeactivated";

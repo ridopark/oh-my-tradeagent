@@ -31,7 +31,7 @@ export interface AdminTenantItem {
   // approved_at + 30d TTL, present only when activation_state === "VALID" (the "valid until" the UI
   // renders); null otherwise.
   expires_at: string | null;
-  // True iff VALID and within 3 days of expiry — the UI warns the operator to re-approve.
+  // True iff VALID and within 7 days of expiry — the UI warns the operator to re-approve.
   at_risk: boolean;
   // Forward-stable placeholders (I-1 follow-up): not yet wired.
   kill_switch_state: string | null;

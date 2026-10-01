@@ -165,7 +165,7 @@ class LivePromotionStateReaderIT {
 
   @Test
   void approvalWithinAtRiskWindow_flagsAtRisk() {
-    // Approved 28 days ago → expires in ~2 days → inside the 3-day at-risk window, still VALID.
+    // Approved 28 days ago → expires in ~2 days → inside the 7-day at-risk window, still VALID.
     seed("LivePromotionApproved", TENANT, STRATEGY, BROKER, "-28 days");
 
     LivePromotionState st = read();

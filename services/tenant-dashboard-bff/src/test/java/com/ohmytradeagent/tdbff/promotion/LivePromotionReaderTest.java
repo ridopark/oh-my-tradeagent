@@ -1,36 +1,32 @@
 package com.ohmytradeagent.tdbff.promotion;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader.TenantStrategyBrokerTarget;
+import com.ohmytradeagent.tdbff.platform.LivePromotionStateReader;
+import com.ohmytradeagent.tdbff.platform.LivePromotionStateReader.LivePromotionState;
+import com.ohmytradeagent.tdbff.platform.LivePromotionStateReader.State;
 import com.ohmytradeagent.tdbff.promotion.LivePromotionReader.PromotionStatus;
-import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
-import org.jooq.DSLContext;
-import org.jooq.Field;
-import org.jooq.Record4;
-import org.jooq.Result;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
-import org.jooq.tools.jdbc.MockConnection;
-import org.jooq.tools.jdbc.MockDataProvider;
-import org.jooq.tools.jdbc.MockExecuteContext;
-import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit coverage for {@link LivePromotionReader} using jOOQ's mock JDBC, so it runs in CI rather
- * than behind the Docker-gated ITs.
+ * Unit coverage for {@link LivePromotionReader}'s mapping of the gate's classification ({@link
+ * LivePromotionStateReader}, covered against a real Postgres by {@code LivePromotionStateReaderIT})
+ * onto the /live banner statuses.
  *
- * <p>The case that matters most is {@link #readFailure_yieldsUnknown_neverActive()}: this reader
- * exists because a silent seven-day trading halt was invisible, so a reader that reports a
- * healthy-looking "active" when it cannot actually read the approvals would reproduce the original
- * failure with extra confidence.
+ * <p>The cases that matter most are the ones where the banner could claim a tenant is cleared to
+ * trade when it is not: a read failure, a deactivation and a risk-relevant config change must never
+ * map to {@code active}.
  */
 class LivePromotionReaderTest {
 
@@ -38,154 +34,101 @@ class LivePromotionReaderTest {
   private static final OffsetDateTime NOW =
       OffsetDateTime.of(2026, 10, 1, 12, 0, 0, 0, ZoneOffset.UTC);
 
-  /** Replays canned approval rows, or fails the read when constructed with an exception. */
-  private static final class Approvals implements MockDataProvider {
-    private final List<Object[]> rows;
-    private final SQLException failWith;
-
-    Approvals(List<Object[]> rows, SQLException failWith) {
-      this.rows = rows;
-      this.failWith = failWith;
-    }
-
-    @Override
-    public MockResult[] execute(MockExecuteContext ctx) throws SQLException {
-      if (failWith != null) {
-        throw failWith;
-      }
-      DSLContext create = DSL.using(SQLDialect.POSTGRES);
-      Field<String> strategy = DSL.field("strategy_id", String.class);
-      Field<String> target = DSL.field("broker_target", String.class);
-      Field<OffsetDateTime> at = DSL.field("occurred_at", OffsetDateTime.class);
-      Field<String> op = DSL.field("operator_id", String.class);
-      Result<Record4<String, String, OffsetDateTime, String>> r =
-          create.newResult(strategy, target, at, op);
-      for (Object[] row : rows) {
-        r.add(
-            create
-                .newRecord(strategy, target, at, op)
-                .values(
-                    (String) row[0], (String) row[1], (OffsetDateTime) row[2], (String) row[3]));
-      }
-      return new MockResult[] {new MockResult(r.size(), r)};
-    }
-  }
-
-  private static LivePromotionReader reader(
-      List<TenantStrategyBrokerTarget> strategies,
-      List<Object[]> approvals,
-      SQLException failWith) {
-    DbStrategyConfigReader configReader = mock(DbStrategyConfigReader.class);
-    when(configReader.listAll()).thenReturn(strategies);
-    DSLContext dsl =
-        DSL.using(new MockConnection(new Approvals(approvals, failWith)), SQLDialect.POSTGRES);
-    return new LivePromotionReader(dsl, configReader);
-  }
+  private final DbStrategyConfigReader configReader = mock(DbStrategyConfigReader.class);
+  private final LivePromotionStateReader stateReader = mock(LivePromotionStateReader.class);
+  private final LivePromotionReader reader = new LivePromotionReader(stateReader, configReader);
 
   private static TenantStrategyBrokerTarget live(String strategyId) {
     return new TenantStrategyBrokerTarget(TENANT, strategyId, "alpaca-live", true);
   }
 
-  private static Object[] approvedDaysAgo(String strategyId, long days) {
-    return new Object[] {strategyId, "alpaca-live", NOW.minusDays(days), "ridopark@gmail.com"};
+  private PromotionStatus single(LivePromotionState st) {
+    when(configReader.listAll()).thenReturn(List.of(live("copytrade-v1")));
+    when(stateReader.stateOf(TENANT, "copytrade-v1", "alpaca-live", NOW)).thenReturn(st);
+    List<PromotionStatus> out = reader.statuses(TENANT, NOW);
+    assertThat(out).hasSize(1);
+    return out.get(0);
   }
 
   @Test
-  void noApprovalRow_isAbsent() {
-    List<PromotionStatus> out =
-        reader(List.of(live("copytrade-v1")), List.of(), null).statuses(TENANT, NOW);
+  void absent_isAbsent() {
+    PromotionStatus s = single(new LivePromotionState(State.ABSENT, null, false));
 
-    assertThat(out)
+    assertThat(s.status()).isEqualTo("absent");
+    assertThat(s.expiresAt()).isNull();
+    assertThat(s.daysRemaining()).isNull();
+  }
+
+  @Test
+  void validNotAtRisk_isActive() {
+    PromotionStatus s = single(new LivePromotionState(State.VALID, NOW.plusDays(25), false));
+
+    assertThat(s.status()).isEqualTo("active");
+    assertThat(s.daysRemaining()).isEqualTo(25L);
+  }
+
+  @Test
+  void validAtRisk_isExpiring() {
+    // The state that would have caught the 2026-09-21 expiry BEFORE it silently blocked three live
+    // tenants for a week.
+    PromotionStatus s = single(new LivePromotionState(State.VALID, NOW.plusDays(5), true));
+
+    assertThat(s.status()).isEqualTo("expiring");
+    assertThat(s.daysRemaining()).isEqualTo(5L);
+  }
+
+  @Test
+  void stale_isStale() {
+    assertThat(single(new LivePromotionState(State.STALE, NOW.minusDays(1), false)).status())
+        .isEqualTo("stale");
+  }
+
+  @Test
+  void deactivatedWithinTtl_isDeactivated_neverActive() {
+    // The approval is well inside its TTL, but the gate voids it — so must the banner.
+    PromotionStatus s = single(new LivePromotionState(State.DEACTIVATED, NOW.plusDays(20), false));
+
+    assertThat(s.status()).isEqualTo("deactivated");
+  }
+
+  @Test
+  void riskConfigChangedWithinTtl_isConfigChanged_neverActive() {
+    // The 2026-08-15 repeg_ceiling_pct shape: fresh approval, then a risk-key edit voids it.
+    PromotionStatus s =
+        single(new LivePromotionState(State.CONFIG_CHANGED, NOW.plusDays(20), false));
+
+    assertThat(s.status()).isEqualTo("config_changed");
+  }
+
+  @Test
+  void stateReadFailure_yieldsUnknown_neverActiveOrAbsent() {
+    when(configReader.listAll()).thenReturn(List.of(live("copytrade-v1")));
+    when(stateReader.stateOf(anyString(), anyString(), anyString(), any()))
+        .thenThrow(new RuntimeException("permission denied for table audit_log"));
+
+    assertThat(reader.statuses(TENANT, NOW))
         .singleElement()
-        .satisfies(
-            s -> {
-              assertThat(s.status()).isEqualTo("absent");
-              assertThat(s.approvedAt()).isNull();
-              assertThat(s.expiresAt()).isNull();
-            });
+        .satisfies(s -> assertThat(s.status()).isEqualTo("unknown"));
   }
 
   @Test
-  void freshApproval_isActive() {
-    List<PromotionStatus> out =
-        reader(
-                List.of(live("copytrade-v1")),
-                List.<Object[]>of(approvedDaysAgo("copytrade-v1", 5)),
-                null)
-            .statuses(TENANT, NOW);
+  void enumerationFailure_propagates_neverAnEmptyAllClear() {
+    when(configReader.listAll()).thenThrow(new RuntimeException("connection refused"));
 
-    assertThat(out)
-        .singleElement()
-        .satisfies(
-            s -> {
-              assertThat(s.status()).isEqualTo("active");
-              assertThat(s.daysRemaining()).isEqualTo(25L);
-              assertThat(s.operatorId()).isEqualTo("ridopark@gmail.com");
-            });
-  }
-
-  @Test
-  void approvalInsideTheWarnWindow_isExpiring() {
-    // 25 days old => 5 days left, inside the 7-day warn window. This is the state that would have
-    // caught the 2026-09-21 expiry BEFORE it silently blocked three live tenants for a week.
-    List<PromotionStatus> out =
-        reader(
-                List.of(live("copytrade-v1")),
-                List.<Object[]>of(approvedDaysAgo("copytrade-v1", 25)),
-                null)
-            .statuses(TENANT, NOW);
-
-    assertThat(out)
-        .singleElement()
-        .satisfies(
-            s -> {
-              assertThat(s.status()).isEqualTo("expiring");
-              assertThat(s.daysRemaining()).isEqualTo(5L);
-            });
-  }
-
-  @Test
-  void approvalPastTheTtl_isStale() {
-    List<PromotionStatus> out =
-        reader(
-                List.of(live("copytrade-v1")),
-                List.<Object[]>of(approvedDaysAgo("copytrade-v1", 31)),
-                null)
-            .statuses(TENANT, NOW);
-
-    assertThat(out).singleElement().satisfies(s -> assertThat(s.status()).isEqualTo("stale"));
-  }
-
-  @Test
-  void readFailure_yieldsUnknown_neverActive() {
-    List<PromotionStatus> out =
-        reader(
-                List.of(live("copytrade-v1")),
-                List.of(),
-                new SQLException("permission denied for table audit_log"))
-            .statuses(TENANT, NOW);
-
-    assertThat(out)
-        .singleElement()
-        .satisfies(
-            s -> {
-              assertThat(s.status()).isEqualTo("unknown");
-              // The whole point: an unreadable approvals table must not render as cleared to trade,
-              // and
-              // must not be confused with "nothing was ever approved" either.
-              assertThat(s.status()).isNotEqualTo("active");
-              assertThat(s.status()).isNotEqualTo("absent");
-            });
+    assertThatThrownBy(() -> reader.statuses(TENANT, NOW)).isInstanceOf(RuntimeException.class);
   }
 
   @Test
   void paperAndDisabledStrategiesAreOmitted() {
-    List<TenantStrategyBrokerTarget> strategies =
-        List.of(
-            new TenantStrategyBrokerTarget(TENANT, "paper-v1", "alpaca-paper", true),
-            new TenantStrategyBrokerTarget(TENANT, "disabled-v1", "alpaca-live", false),
-            new TenantStrategyBrokerTarget("other-tenant", "copytrade-v1", "alpaca-live", true));
+    when(configReader.listAll())
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget(TENANT, "paper-v1", "alpaca-paper", true),
+                new TenantStrategyBrokerTarget(TENANT, "disabled-v1", "alpaca-live", false),
+                new TenantStrategyBrokerTarget(
+                    "other-tenant", "copytrade-v1", "alpaca-live", true)));
 
-    assertThat(reader(strategies, List.of(), null).statuses(TENANT, NOW)).isEmpty();
+    assertThat(reader.statuses(TENANT, NOW)).isEmpty();
+    verifyNoInteractions(stateReader);
   }
 }

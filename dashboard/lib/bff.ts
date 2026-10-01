@@ -147,23 +147,30 @@ export const getAccountKillSwitch = () =>
 // visible. `expiring` is as important as `stale`: the outage was an expiry, not an absence.
 //
 // `overall` is the most severe status across the tenant's live strategies, ranked server-side:
-//   stale | absent  — orders are being refused RIGHT NOW
-//   unknown          — the approval read failed; never treat as cleared
+//   stale | absent | deactivated | config_changed
+//                    — orders are being refused RIGHT NOW (the gate's own classification)
+//   unknown          — the state could not be read; never treat as cleared
 //   expiring         — still trading, but the approval lapses within 7 days
 //   active           — cleared
 //   none             — the tenant has no live strategies (paper-only); render nothing
+export type LivePromotionStatus =
+  | "active"
+  | "expiring"
+  | "stale"
+  | "absent"
+  | "deactivated"
+  | "config_changed"
+  | "unknown";
 export interface LivePromotionStrategy {
   strategy_id: string;
   broker_target: string;
-  status: "active" | "expiring" | "stale" | "absent" | "unknown";
-  approved_at: string | null;
+  status: LivePromotionStatus;
   expires_at: string | null;
   days_remaining: number | null;
-  approved_by: string | null;
 }
 export interface LivePromotion {
   tenant_id: string;
-  overall: "active" | "expiring" | "stale" | "absent" | "unknown" | "none";
+  overall: LivePromotionStatus | "none";
   strategies: LivePromotionStrategy[];
 }
 export const getLivePromotion = () =>

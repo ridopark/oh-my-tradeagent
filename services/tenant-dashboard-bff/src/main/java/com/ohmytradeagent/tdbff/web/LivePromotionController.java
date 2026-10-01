@@ -7,6 +7,8 @@ import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -27,6 +29,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/live-promotion")
 public class LivePromotionController {
 
+  private static final Logger log = LoggerFactory.getLogger(LivePromotionController.class);
+
+  /** Every status the reader can produce, most severe first. */
+  private static final List<String> BY_SEVERITY =
+      List.of("stale", "absent", "deactivated", "config_changed", "unknown", "expiring", "active");
+
   private final LivePromotionReader reader;
   private final TenantContext ctx;
 
@@ -38,10 +46,19 @@ public class LivePromotionController {
   @GetMapping
   public ResponseEntity<Map<String, Object>> get(HttpServletRequest req) {
     String tenant = ctx.tenantId(req);
-    List<PromotionStatus> statuses = reader.statuses(tenant, OffsetDateTime.now());
-
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("tenant_id", tenant);
+
+    List<PromotionStatus> statuses;
+    try {
+      statuses = reader.statuses(tenant, OffsetDateTime.now());
+    } catch (RuntimeException e) {
+      // Could not even enumerate the live strategies. "none" would render as an all-clear.
+      log.warn("live-promotion strategy enumeration failed tenant={}: {}", tenant, e.toString());
+      body.put("overall", "unknown");
+      body.put("strategies", List.of());
+      return ResponseEntity.ok(body);
+    }
     body.put("overall", overall(statuses));
     body.put("strategies", statuses.stream().map(LivePromotionController::row).toList());
     return ResponseEntity.ok(body);
@@ -51,21 +68,19 @@ public class LivePromotionController {
    * The most severe status across the tenant's live strategies, or {@code "none"} when it has none
    * (a paper-only tenant — nothing to say, and the banner renders nothing).
    *
-   * <p>Severity order, most severe first: {@code stale} and {@code absent} both mean orders are
-   * being REFUSED right now; {@code unknown} means we could not tell, which outranks {@code
-   * expiring} because an all-clear we cannot verify is worse than a deadline we can see coming.
+   * <p>Severity order, most severe first: {@code stale}, {@code absent}, {@code deactivated} and
+   * {@code config_changed} all mean orders are being REFUSED right now; {@code unknown} means we
+   * could not tell, which outranks {@code expiring} because an all-clear we cannot verify is worse
+   * than a deadline we can see coming.
    */
   static String overall(List<PromotionStatus> statuses) {
     if (statuses.isEmpty()) {
       return "none";
     }
-    List<String> bySeverity = List.of("stale", "absent", "unknown", "expiring", "active");
-    for (String candidate : bySeverity) {
-      if (statuses.stream().anyMatch(s -> candidate.equals(s.status()))) {
-        return candidate;
-      }
-    }
-    return "active";
+    return BY_SEVERITY.stream()
+        .filter(candidate -> statuses.stream().anyMatch(s -> candidate.equals(s.status())))
+        .findFirst()
+        .orElseThrow();
   }
 
   private static Map<String, Object> row(PromotionStatus s) {
@@ -73,10 +88,8 @@ public class LivePromotionController {
     m.put("strategy_id", s.strategyId());
     m.put("broker_target", s.brokerTarget());
     m.put("status", s.status());
-    m.put("approved_at", s.approvedAt());
     m.put("expires_at", s.expiresAt());
     m.put("days_remaining", s.daysRemaining());
-    m.put("approved_by", s.operatorId());
     return m;
   }
 }

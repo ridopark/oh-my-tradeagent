@@ -26,7 +26,10 @@ export function LiveActivationBanner({
   }
 
   const blocked =
-    promotion.overall === "stale" || promotion.overall === "absent";
+    promotion.overall === "stale" ||
+    promotion.overall === "absent" ||
+    promotion.overall === "deactivated" ||
+    promotion.overall === "config_changed";
   const tone = blocked
     ? "border-rose-800 bg-rose-950/70 text-rose-100"
     : "border-amber-800 bg-amber-950/70 text-amber-100";
@@ -58,6 +61,10 @@ function headline(p: LivePromotion): string {
       return "This tenant is NOT activated for live trading — no orders will be placed.";
     case "stale":
       return "Live activation has EXPIRED — no orders are being placed.";
+    case "deactivated":
+      return "Live activation was DEACTIVATED — no orders are being placed.";
+    case "config_changed":
+      return "A risk setting changed since activation — no orders are being placed.";
     case "unknown":
       return "Live activation state could not be read.";
     default:
@@ -71,28 +78,36 @@ function detail(p: LivePromotion): string {
       return "Signals are received and sized, then refused at the live-promotion gate. Run Activate live for this strategy to start trading.";
     case "stale":
       return "The 30-day activation has lapsed. Every entry is being refused until it is renewed — re-run Activate live.";
+    case "deactivated":
+      return "An operator deactivated live trading. Every entry is being refused until Activate live is run again.";
+    case "config_changed":
+      return "A risk-relevant config edit voids the activation. Every entry is being refused until Activate live is run again.";
     case "unknown":
       // Explicitly NOT reassuring: an all-clear we cannot verify is worse than a known problem.
-      return "The approvals table could not be read, so we cannot confirm this tenant can trade. Treat as unverified rather than healthy.";
+      return "The activation state could not be read, so we cannot confirm this tenant can trade. Treat as unverified rather than healthy.";
     default:
       return "Renew it with Activate live before it lapses — once it does, entries are refused silently.";
   }
 }
 
-// "expires in 5 days (approved 2026-09-28)" / "never activated".
+// "expires in 5 days (2026-10-06)" / "never activated".
 function perStrategy(s: LivePromotion["strategies"][number]): string {
-  if (s.status === "absent") {
-    return "never activated";
+  switch (s.status) {
+    case "absent":
+      return "never activated";
+    case "unknown":
+      return "state unknown";
+    case "deactivated":
+      return "deactivated";
+    case "config_changed":
+      return "risk config changed since activation";
   }
-  if (s.status === "unknown") {
-    return "state unknown";
-  }
-  const approved = s.approved_at ? ` (approved ${s.approved_at.slice(0, 10)})` : "";
+  const date = s.expires_at ? ` (${s.expires_at.slice(0, 10)})` : "";
   if (s.status === "stale") {
-    return `expired${approved}`;
+    return `expired${date}`;
   }
   const days = s.days_remaining;
   const when =
     days === null ? "soon" : days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
-  return `expires ${when}${approved}`;
+  return `expires ${when}${date}`;
 }
