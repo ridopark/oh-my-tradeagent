@@ -6,13 +6,22 @@ import type { ReactNode } from "react";
 export function ContractLink({
   occ,
   compact: compactLabel = false,
+  stack = true,
 }: {
   occ: string;
   /** Render the short "SMCI $50C 11/20" label instead of the full OCC (narrow layouts). */
   compact?: boolean;
+  /**
+   * Whether a compact label stacks onto two lines. Only meaningful with {@code compact}. The
+   * Holdings TABLE needs the stack — the contract column there is narrow enough that one line
+   * crowds everything to its right. The mobile CARD does not: the contract sits alone on the
+   * header row opposite the quantity, with width to spare, so stacking there just makes the card
+   * taller for nothing.
+   */
+  stack?: boolean;
 }) {
   const compact = occ.replace(/\s+/g, "");
-  const parts = compactLabel ? occCompactParts(occ) : null;
+  const parts = compactLabel && stack ? occCompactParts(occ) : null;
   const display = compactLabel
     ? occCompact(occ)
     : occ.replace(/\s+/g, " ").trim();

@@ -651,42 +651,76 @@ function HoldingCard({
   actions: ((row: Record<string, unknown>) => ReactNode) | null;
 }) {
   const symbol = String(row.contract_symbol ?? "");
-  const mark = row.current_price;
+  const allIn = allInPl(row);
   return (
     <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
       <div className="flex items-baseline justify-between gap-2">
         <span className="flex min-w-0 flex-wrap items-center gap-2">
-          <ContractLink occ={symbol} compact />
+          <ContractLink occ={symbol} compact stack={false} />
           <FloorBreachBadge workflowId={String(row.workflow_id)} />
         </span>
         <span className="shrink-0 font-medium text-slate-200">
           &times;{qtyCell(null, row)}
         </span>
       </div>
-      <dl className="mt-1 space-y-0.5 text-xs text-slate-400">
-        <div className="flex justify-between gap-2">
-          <dt>premium</dt>
-          <dd className="text-slate-200">{premiumCell(null, row)}</dd>
-        </div>
-        <div className="flex justify-between gap-2">
-          <dt>cost &rarr; value</dt>
-          <dd className="text-slate-200">
-            {fmtCurrency(row.open_notional as string | number | null)}
-            {" \u2192 "}
-            {fmtCurrency(positionMarketValue(row.remaining_qty, mark))}
+      {/* A two-column grid, NOT the flex/justify-between rows this replaced. justify-between pins
+          the label to the left edge and the value to the right, so the space between them is
+          whatever happens to be left over — on a phone that is a dead gutter wide enough to read
+          as a missing column, and it grows as the values get shorter. Here the label column hugs
+          its widest entry and the values start immediately after it, so the slack falls in the
+          right margin instead of down the middle. minmax(0,1fr) rather than max-content on the
+          value column: it still starts at the same x, but a long value wraps inside the card
+          rather than widening the grid past it. */}
+      <dl className="mt-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs text-slate-400">
+        <dt>premium</dt>
+        <dd className="text-slate-200">{premiumCell(null, row, true)}</dd>
+
+        <dt>cost &rarr; value</dt>
+        <dd className="text-slate-200">{costValueCell(null, row)}</dd>
+
+        <dt>underlying</dt>
+        <dd className="text-slate-200">{underlyingCell(null, row, true)}</dd>
+
+        {/* The three P&L figures get their own block: a row of labels over a row of values,
+            rather than one value cell holding all three.
+
+            They are NOT a progression. "$168.00" is total unrealized on what is still HELD,
+            "$174.00" is only today's move on that same remainder, and all-in adds back what was
+            banked on the part already sold. Separating them with this card's "→" would claim the
+            first became the second, which never happened — every other arrow here does mean
+            exactly that (entry → now), so reusing it would be the one that lies. A "·" dim
+            enough not to compete with the numbers is close to invisible at this size. Giving each
+            figure its own named column says what they are and leaves nothing between them to
+            misread.
+
+            Spans the parent grid with its own columns, so each label sits directly over its value
+            instead of inheriting the label/value split of the rows above. Two columns when nothing
+            has been sold — all-in is absent then (see allInPl), and an empty third column would
+            leave a gap with nothing to explain it. */}
+        <div
+          className={`col-span-2 mt-1.5 grid gap-x-5 ${
+            allIn !== null
+              ? "grid-cols-[repeat(3,max-content)]"
+              : "grid-cols-[repeat(2,max-content)]"
+          }`}
+        >
+          <dt>P&amp;L</dt>
+          <dt>today</dt>
+          {allIn !== null && <dt>all-in</dt>}
+          <dd>
+            <Pnl value={row.unrealized_pl as string | number | null} />
           </dd>
-        </div>
-        <div className="flex justify-between gap-2">
-          <dt>underlying</dt>
-          <dd className="text-slate-200">{underlyingCell(null, row)}</dd>
-        </div>
-        <div className="flex justify-between gap-2">
-          <dt>P&amp;L total &middot; today</dt>
-          <dd className="flex items-center gap-2">
-            {pnlTotalCell(null, row)}
-            <span className="text-slate-600">&middot;</span>
+          <dd>
             <Pnl value={row.unrealized_intraday_pl as string | number | null} />
           </dd>
+          {allIn !== null && (
+            <dd
+              className={`whitespace-nowrap ${allIn >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+              title="Unrealized on what is still held, plus what was already banked on the part sold"
+            >
+              {fmtCurrency(allIn)}
+            </dd>
+          )}
         </div>
       </dl>
       {actions && <div className="mt-2">{actions(row)}</div>}
@@ -702,19 +736,22 @@ function pctMove(entry: number | null, now: number | null): number | null {
     : null;
 }
 
-// The "(+7.4%)" line under a paired price cell. Red/green is DATA — it stays coloured even inside
+// The "(+7.4%)" move beside a paired price cell. Red/green is DATA — it stays coloured even inside
 // a linked cell, where the prices themselves take the link colour.
-function moveLine(pct: number | null): ReactNode {
+//
+// Stacked under the prices by default, which is what the narrow table columns need. `inline` puts
+// it on the same line instead, for the mobile card: there the row is a label and a value packed
+// side by side with room to spare, so a second line would be spent width rather than saved.
+function moveLine(pct: number | null, inline = false): ReactNode {
   if (pct === null) {
     return null;
   }
-  return (
-    <span
-      className={`block text-xs ${pct >= 0 ? "text-emerald-400" : "text-rose-400"}`}
-    >
-      ({pct >= 0 ? "+" : ""}
-      {pct.toFixed(1)}%)
-    </span>
+  const tone = pct >= 0 ? "text-emerald-400" : "text-rose-400";
+  const text = `(${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`;
+  return inline ? (
+    <span className={`whitespace-nowrap text-xs ${tone}`}> {text}</span>
+  ) : (
+    <span className={`block text-xs ${tone}`}>{text}</span>
   );
 }
 
@@ -727,7 +764,7 @@ function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
       <span className="text-slate-200">
         {fmtCurrency(row.open_notional as string | number | null)}
       </span>
-      <span className="text-slate-600"> → </span>
+      <span className="text-slate-200"> → </span>
       {value === null ? (
         <span className="text-slate-500">—</span>
       ) : (
@@ -748,9 +785,7 @@ function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
 // break-even" rather than "sold nothing".
 function pnlTotalCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   const unrealized = num(row.unrealized_pl);
-  const realized = num(row.realized_pl);
-  const allIn =
-    unrealized !== null && realized !== null ? unrealized + realized : null;
+  const allIn = allInPl(row);
   return (
     <span className="inline-block">
       <span className="block">
@@ -766,6 +801,16 @@ function pnlTotalCell(_v: unknown, row: Record<string, unknown>): ReactNode {
       )}
     </span>
   );
+}
+
+// What the position has made ALL IN: unrealized on what is still held, plus what was already banked
+// on the part sold. Null until something HAS been sold — an untouched position has realized nothing
+// and the BFF leaves realized_pl absent, which is what keeps the figure off those rows. See
+// pnlTotalCell for why repeating the unrealized number there would be worse than omitting it.
+function allInPl(row: Record<string, unknown>): number | null {
+  const unrealized = num(row.unrealized_pl);
+  const realized = num(row.realized_pl);
+  return unrealized !== null && realized !== null ? unrealized + realized : null;
 }
 
 // "21" normally, "26 → 21" once some of it has been sold.
@@ -785,7 +830,7 @@ function qtyCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   return (
     <span className="whitespace-nowrap text-slate-200">
       {entered}
-      <span className="text-slate-600"> → </span>
+      <span className="text-slate-200"> → </span>
       {remaining}
     </span>
   );
@@ -796,7 +841,11 @@ function qtyCell(_v: unknown, row: Record<string, unknown>): ReactNode {
 // The entry premium is NOT run through fmtCurrency: it is a cost basis and carries more than two
 // decimals (2.805 on a live position right now), which rounding to $2.81 would quietly change. The
 // broker's mark is a quote and renders as given.
-function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+function premiumCell(
+  _v: unknown,
+  row: Record<string, unknown>,
+  inline = false,
+): ReactNode {
   const entry = num(row.entry_premium);
   const mark = num(row.current_price);
   if (entry === null && mark === null) {
@@ -805,13 +854,15 @@ function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   // The same move the Underlying column shows, for the option itself — and the one number the row
   // did not already carry: P&L is in dollars, so the position's RETURN was nowhere on the page.
   return (
-    <span className="inline-block">
-      <span className="block whitespace-nowrap text-slate-200">
+    <span className={inline ? undefined : "inline-block"}>
+      <span
+        className={`whitespace-nowrap text-slate-200 ${inline ? "" : "block"}`}
+      >
         {entry === null ? "—" : `$${entry}`}
-        <span className="text-slate-600"> → </span>
+        <span className="text-slate-200"> → </span>
         {mark === null ? "—" : `$${mark}`}
       </span>
-      {moveLine(pctMove(entry, mark))}
+      {moveLine(pctMove(entry, mark), inline)}
     </span>
   );
 }
@@ -820,7 +871,11 @@ function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
 // a position entered before the #783 recorder has no entry spot, and the live equity quote is a
 // best-effort hop, so one missing number must not blank the other. The percentage is omitted unless
 // BOTH are present and the entry spot is non-zero.
-function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+function underlyingCell(
+  _v: unknown,
+  row: Record<string, unknown>,
+  inline = false,
+): ReactNode {
   const entry = num(row.underlying_spot_entry);
   const now = num(row.underlying_price);
   if (entry === null && now === null) {
@@ -833,15 +888,20 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
 
   // Stacked, and the "$" is affordable again now that entry premium and the mark share one column
   // instead of two — that merge freed far more width than the four currency symbols cost.
+  //
+  // The arrow is slate-200 like every other paired-value arrow, which means it stays white inside
+  // this sky-coloured link rather than taking the link colour. Deliberate: at slate-600 it was too
+  // dark to see against the dark card, and these arrows carry meaning (entry → now), so they are
+  // held to the same brightness as the numbers they join everywhere on the page.
   const prices = (
-    <span className="block whitespace-nowrap">
+    <span className={`whitespace-nowrap ${inline ? "" : "block"}`}>
       {entry === null ? "—" : `$${entry.toFixed(2)}`}
-      <span className="text-slate-600"> → </span>
+      <span className="text-slate-200"> → </span>
       {now === null ? "—" : `$${now.toFixed(2)}`}
     </span>
   );
   return (
-    <span className="inline-block">
+    <span className={inline ? undefined : "inline-block"}>
       {ticker === null ? (
         <span className="text-slate-200">{prices}</span>
       ) : (
@@ -858,7 +918,7 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
           {prices}
         </a>
       )}
-      {moveLine(pctMove(entry, now))}
+      {moveLine(pctMove(entry, now), inline)}
     </span>
   );
 }
