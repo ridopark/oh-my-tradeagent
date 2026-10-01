@@ -11,7 +11,7 @@ import {
   occCompact,
   occExpiryYmd,
 } from "@/components/ContractLink";
-import { Pnl, pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
+import { Pnl, pnlCell, fmtCurrency } from "@/components/Pnl";
 import {
   ForceExitButton,
   type ForceExitActionResult,
@@ -435,13 +435,17 @@ export default async function LivePage() {
       ),
     },
     { key: "remaining_qty", label: "Qty" },
-    { key: "entry_premium", label: "Entry premium" },
-    // One paired column rather than two: the table is already wide, and the MOVE is the part the
-    // rest of the row cannot tell you — the stock can be up while the option is down (theta/IV).
+    // Entry premium and the live mark are a pair, so they read as one "x -> y" cell exactly like
+    // Underlying below — two columns of the same quantity at two points in time was the table's
+    // most expensive habit.
+    { key: "entry_premium", label: "Premium", render: premiumCell },
+    // The MOVE is the part the rest of the row cannot tell you — the stock can be up while the
+    // option is down (theta/IV).
     { key: "underlying_spot_entry", label: "Underlying", render: underlyingCell },
-    { key: "open_notional", label: "Cost", render: priceCell },
-    { key: "current_price", label: "Current mark", render: priceCell },
-    { key: "position_value", label: "Value", render: valueCell },
+    // Third and last pair. Unlike Premium and Underlying — the same quantity at two times — these
+    // are two DIFFERENT quantities (cost basis vs what it is worth now), so the header keeps both
+    // nouns rather than collapsing to one.
+    { key: "open_notional", label: "Cost → Value", render: costValueCell },
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
   ];
@@ -556,11 +560,14 @@ export default async function LivePage() {
               </span>
             )}
           </div>
-          {/* Two layouts, one data set. The 9-column table needs ~900px, so below lg it would force
-              the sideways scroll this page is read on a phone to avoid; cards carry the same numbers
-              in four lines. The cutover is lg (not md) because a 768px tablet still cannot fit the
-              table. Both branches are server-rendered — no JS decides which one you get. */}
-          <div className="flex flex-col gap-3 lg:hidden">
+          {/* Two layouts, one data set; cards carry the same numbers in four lines.
+              The cutover is xl, chosen by measurement rather than taste. At a 1024 viewport the
+              container is 990px and the table measures 996-1014px depending on the symbol
+              (SMCI 996, GOOGL 1005, NVDA $1100C 1014), so lg handed narrow laptops a table that
+              scrolled sideways — the exact thing this split exists to prevent. At xl the container
+              is 1118px and the widest case fits with ~100px to spare. Both branches are
+              server-rendered — no JS decides which one you get. */}
+          <div className="flex flex-col gap-3 xl:hidden">
             {count === 0 ? (
               <p className="text-sm text-slate-400">No open positions.</p>
             ) : (
@@ -573,7 +580,7 @@ export default async function LivePage() {
               ))
             )}
           </div>
-          <div className="hidden lg:block">
+          <div className="hidden xl:block">
             <DataTable
               empty="No open positions."
               columns={holdingsColumns}
@@ -654,12 +661,8 @@ function HoldingCard({
       </div>
       <dl className="mt-1 space-y-0.5 text-xs text-slate-400">
         <div className="flex justify-between gap-2">
-          <dt>entry &rarr; mark</dt>
-          <dd className="text-slate-200">
-            {row.entry_premium == null ? "—" : String(row.entry_premium)}
-            {" \u2192 "}
-            {mark == null ? <span className="text-slate-500">—</span> : String(mark)}
-          </dd>
+          <dt>premium</dt>
+          <dd className="text-slate-200">{premiumCell(null, row)}</dd>
         </div>
         <div className="flex justify-between gap-2">
           <dt>cost &rarr; value</dt>
@@ -687,6 +690,45 @@ function HoldingCard({
   );
 }
 
+// "$1,390.00 → $1,275.00" — what the position cost against what it is worth now. Value is derived
+// (remaining_qty × mark × 100), so it blanks on an unpriced position while cost still shows.
+function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const value = positionMarketValue(row.remaining_qty, row.current_price);
+  return (
+    <span className="whitespace-nowrap">
+      <span className="text-slate-200">
+        {fmtCurrency(row.open_notional as string | number | null)}
+      </span>
+      <span className="text-slate-600"> → </span>
+      {value === null ? (
+        <span className="text-slate-500">—</span>
+      ) : (
+        <span className="text-slate-200">{fmtCurrency(value)}</span>
+      )}
+    </span>
+  );
+}
+
+// "$2.78 → $2.55" — the option's entry premium and its live mark, paired like Underlying.
+//
+// The entry premium is NOT run through fmtCurrency: it is a cost basis and carries more than two
+// decimals (2.805 on a live position right now), which rounding to $2.81 would quietly change. The
+// broker's mark is a quote and renders as given.
+function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const entry = num(row.entry_premium);
+  const mark = num(row.current_price);
+  if (entry === null && mark === null) {
+    return <span className="text-slate-500">—</span>;
+  }
+  return (
+    <span className="whitespace-nowrap">
+      <span className="text-slate-200">{entry === null ? "—" : `$${entry}`}</span>
+      <span className="text-slate-600"> → </span>
+      <span className="text-slate-200">{mark === null ? "—" : `$${mark}`}</span>
+    </span>
+  );
+}
+
 // "$38.30 → $41.12 (+7.4%)" for the Holdings Underlying column. Each half renders independently:
 // a position entered before the #783 recorder has no entry spot, and the live equity quote is a
 // best-effort hop, so one missing number must not blank the other. The percentage is omitted unless
@@ -701,15 +743,14 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
     entry !== null && now !== null && entry !== 0
       ? ((now - entry) / entry) * 100
       : null;
-  // Stacked, and without a "$" on either number: the column is headed "Underlying" and these are
-  // equity prices, so the symbol is decoration this table cannot afford — the two together are what
-  // let the 10-column table fit its container at 1024px.
+  // Stacked, and the "$" is affordable again now that entry premium and the mark share one column
+  // instead of two — that merge freed far more width than the four currency symbols cost.
   return (
     <span className="inline-block">
       <span className="block whitespace-nowrap text-slate-200">
-        {entry === null ? "—" : entry.toFixed(2)}
+        {entry === null ? "—" : `$${entry.toFixed(2)}`}
         <span className="text-slate-600"> → </span>
-        {now === null ? "—" : now.toFixed(2)}
+        {now === null ? "—" : `$${now.toFixed(2)}`}
       </span>
       {movePct !== null && (
         <span
@@ -790,16 +831,6 @@ function positionMarketValue(qty: unknown, mark: unknown): number | null {
   return Number.isNaN(p) || Number.isNaN(q) ? null : q * p * OPTIONS_MULTIPLIER;
 }
 
-// DataTable cell renderer for the live mark-to-market Value column. "—" when the broker carries no
-// mark (e.g. a phantom — matching the Current-mark blank).
-function valueCell(_value: unknown, row: Record<string, unknown>): ReactNode {
-  const v = positionMarketValue(row.remaining_qty, row.current_price);
-  return v == null ? (
-    <span className="text-slate-500">—</span>
-  ) : (
-    <span className="text-slate-200">{fmtCurrency(v)}</span>
-  );
-}
 
 // A strategy's per-day realized-loss limit (`daily_loss_threshold`, absolute USD) read from its
 // strategy config. When a strategy's realized losses for the day reach it, that strategy's kill
