@@ -448,7 +448,7 @@ export default async function LivePage() {
     // nouns rather than collapsing to one.
     { key: "open_notional", label: "Cost → Value", render: costValueCell },
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
-    { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
+    { key: "unrealized_pl", label: "P&L (total)", render: pnlTotalCell },
   ];
   const actionsEnabled =
     FORCE_EXIT_WRITE_ENABLED || TRIM_WRITE_ENABLED || STOP_LOSS_WRITE_ENABLED;
@@ -680,7 +680,7 @@ function HoldingCard({
         <div className="flex justify-between gap-2">
           <dt>P&amp;L total &middot; today</dt>
           <dd className="flex items-center gap-2">
-            <Pnl value={row.unrealized_pl as string | number | null} />
+            {pnlTotalCell(null, row)}
             <span className="text-slate-600">&middot;</span>
             <Pnl value={row.unrealized_intraday_pl as string | number | null} />
           </dd>
@@ -729,6 +729,37 @@ function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
         <span className="text-slate-500">—</span>
       ) : (
         <span className="text-slate-200">{fmtCurrency(value)}</span>
+      )}
+    </span>
+  );
+}
+
+// P&L (total), with a second line for what the position has made ALL IN.
+//
+// The first line is unrealized only — (mark − entry) × REMAINING qty — so a trimmed position shows
+// a fraction of its result. A live GOOGL position entered 10 and sold 8: it has banked $1,406 while
+// this column reports about $168. The second line adds the banked part back.
+//
+// It appears only once something has been sold. An untouched position has realized nothing, and
+// repeating the same number twice would be noise — worse, a "$0.00" there would read as "sold at
+// break-even" rather than "sold nothing".
+function pnlTotalCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const unrealized = num(row.unrealized_pl);
+  const realized = num(row.realized_pl);
+  const allIn =
+    unrealized !== null && realized !== null ? unrealized + realized : null;
+  return (
+    <span className="inline-block">
+      <span className="block">
+        <Pnl value={unrealized} />
+      </span>
+      {allIn !== null && (
+        <span
+          className={`block whitespace-nowrap text-xs ${allIn >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+          title="Unrealized on what is still held, plus what was already banked on the part sold"
+        >
+          all-in {fmtCurrency(allIn)}
+        </span>
       )}
     </span>
   );

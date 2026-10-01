@@ -11,7 +11,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.positions.EntryQtyReader;
+import com.ohmytradeagent.tdbff.positions.PositionLifecycleReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
@@ -31,7 +31,7 @@ class PortfolioServiceTest {
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
   private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
   private final TradeContextSpotReader entrySpotReader = mock(TradeContextSpotReader.class);
-  private final EntryQtyReader entryQtyReader = mock(EntryQtyReader.class);
+  private final PositionLifecycleReader lifecycleReader = mock(PositionLifecycleReader.class);
   private final MarketDataQuoteClient equityQuotes = mock(MarketDataQuoteClient.class);
 
   private final PortfolioService service = newService(false, 9);
@@ -45,7 +45,7 @@ class PortfolioServiceTest {
     // Default: no recorded entry spot and no live equity quote — the underlying columns must be
     // absent-tolerant, since that is the state for any position entered before the #783 recorder.
     when(entrySpotReader.entrySpotByWorkflowId(any(), any())).thenReturn(Map.of());
-    when(entryQtyReader.enteredQtyByWorkflowId(any(), any())).thenReturn(Map.of());
+    when(lifecycleReader.lifecycleByWorkflowId(any(), any())).thenReturn(Map.of());
   }
 
   // Builds the consolidated {today, all-time} record PortfolioService now reads per strategy.
@@ -62,7 +62,7 @@ class PortfolioServiceTest {
         strategyResolver,
         strategyRegistry,
         entrySpotReader,
-        entryQtyReader,
+        lifecycleReader,
         equityQuotes,
         exposeAccountNumber,
         subreadTimeoutSeconds);
@@ -698,8 +698,8 @@ class PortfolioServiceTest {
             List.of(
                 openPos(wfGrown, "SMCI  261120C00050000", 21),
                 openPos(wfManual, "SMCI  261120C00050000", 5)));
-    when(entryQtyReader.enteredQtyByWorkflowId(eq("acme"), any()))
-        .thenReturn(Map.of(wfGrown, 21L, wfManual, 5L));
+    when(lifecycleReader.lifecycleByWorkflowId(eq("acme"), any()))
+        .thenReturn(Map.of(wfGrown, lc(21, 0, "0"), wfManual, lc(5, 0, "0")));
 
     List<Map<String, Object>> rows =
         (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
@@ -718,7 +718,7 @@ class PortfolioServiceTest {
         .thenReturn(
             List.of(
                 openPos("t-acme/s-s1/pos/AMD   261120C00160000/sig1", "AMD   261120C00160000", 3)));
-    when(entryQtyReader.enteredQtyByWorkflowId(any(), any())).thenReturn(Map.of());
+    when(lifecycleReader.lifecycleByWorkflowId(any(), any())).thenReturn(Map.of());
 
     List<Map<String, Object>> rows =
         (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
@@ -727,6 +727,66 @@ class PortfolioServiceTest {
     assertThat(rows.get(0)).containsKey("entry_qty");
     assertThat(rows.get(0).get("entry_qty")).isNull();
     assertThat(rows.get(0).get("remaining_qty")).isEqualTo(3L);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void realizedPlCoversWhatWasAlreadySoldOnTheSameEntryBasis() {
+    // The live GOOGL shape: entered 10 at 2.76, sold 8 for 36.14 per-share total. unrealized_pl
+    // covers only the 2 still held, so without this the row reports a fraction of what the
+    // position made — $168 against $1,406 banked.
+    String wf = "t-acme/s-s1/pos/GOOGL 261016C00360000/sig1";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(List.of(openPosWithEntry(wf, "GOOGL 261016C00360000", 2, "2.76")));
+    when(lifecycleReader.lifecycleByWorkflowId(eq("acme"), any()))
+        .thenReturn(Map.of(wf, lc(10, 8, "36.14")));
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    // (36.14 − 2.76 × 8) × 100 = 1406.00 — the figure the live audit trail produces.
+    assertThat((BigDecimal) rows.get(0).get("realized_pl")).isEqualByComparingTo("1406.00");
+    assertThat(rows.get(0).get("entry_qty")).isEqualTo(10L);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void nothingSoldMeansNoRealizedFigureRatherThanZero() {
+    // An untouched position must not claim a realized P&L of $0 — it has realized nothing, and a
+    // zero would read as "sold at break-even".
+    String wf = "t-acme/s-s1/pos/SMCI  261120C00050000/sig1";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(List.of(openPosWithEntry(wf, "SMCI  261120C00050000", 5, "2.78")));
+    when(lifecycleReader.lifecycleByWorkflowId(eq("acme"), any()))
+        .thenReturn(Map.of(wf, lc(5, 0, "0")));
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    assertThat(rows.get(0)).containsKey("realized_pl");
+    assertThat(rows.get(0).get("realized_pl")).isNull();
+  }
+
+  private static PositionLifecycleReader.Lifecycle lc(long entered, long exited, String proceeds) {
+    return new PositionLifecycleReader.Lifecycle(entered, exited, new BigDecimal(proceeds));
+  }
+
+  private static OpenPosition openPosWithEntry(
+      String workflowId, String occ, long qty, String entryPremium) {
+    return new OpenPosition(
+        workflowId,
+        "s1",
+        occ,
+        qty,
+        new BigDecimal(entryPremium),
+        new BigDecimal("100.00"),
+        false,
+        null,
+        null,
+        0L,
+        null);
   }
 
   private static OpenPosition openPos(String workflowId, String occ, long qty) {

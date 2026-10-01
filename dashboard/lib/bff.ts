@@ -527,6 +527,12 @@ export interface Position {
    * growth). Null when that trail could not supply it, in which case only the remaining qty shows.
    */
   entry_qty?: number | null;
+  /**
+   * Money already BANKED on the sold part of this position, on the same entry basis
+   * `unrealized_pl` uses — so the two add up to what the position has made in total. Null when
+   * nothing priced has been sold, which is NOT the same as zero.
+   */
+  realized_pl?: string | number | null;
   underlying_spot_entry?: string | number | null;
   underlying_price?: string | number | null;
   // trail_stop_price is PEAK-anchored (the price the stop fires at NOW). Render it as given; do not

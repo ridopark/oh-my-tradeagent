@@ -2,7 +2,7 @@ package com.ohmytradeagent.tdbff.portfolio;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
-import com.ohmytradeagent.tdbff.positions.EntryQtyReader;
+import com.ohmytradeagent.tdbff.positions.PositionLifecycleReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
@@ -73,7 +73,7 @@ public class PortfolioService {
 
   private final PositionsReader positionsReader;
   private final TradeContextSpotReader entrySpotReader;
-  private final EntryQtyReader entryQtyReader;
+  private final PositionLifecycleReader lifecycleReader;
   private final MarketDataQuoteClient equityQuotes;
   private final RealizedPnlCalculator realizedPnl;
   private final AccountEquityClient accountEquity;
@@ -106,13 +106,13 @@ public class PortfolioService {
       TenantStrategyResolver strategyResolver,
       DbStrategyConfigReader strategyRegistry,
       TradeContextSpotReader entrySpotReader,
-      EntryQtyReader entryQtyReader,
+      PositionLifecycleReader lifecycleReader,
       MarketDataQuoteClient equityQuotes,
       @Value("${bff.expose-broker-account-number:false}") boolean exposeBrokerAccountNumber,
       @Value("${bff.portfolio.subread-timeout-seconds:9}") long subreadTimeoutSeconds) {
     this.positionsReader = positionsReader;
     this.entrySpotReader = entrySpotReader;
-    this.entryQtyReader = entryQtyReader;
+    this.lifecycleReader = lifecycleReader;
     this.equityQuotes = equityQuotes;
     this.realizedPnl = realizedPnl;
     this.accountEquity = accountEquity;
@@ -240,16 +240,16 @@ public class PortfolioService {
         subreadPool.submit(() -> entrySpotReader.entrySpotByWorkflowId(tenantId, workflowIds));
     Future<Map<String, BigDecimal>> spotNowFuture =
         subreadPool.submit(() -> quoteDistinctUnderlyings(positions));
-    Future<Map<String, Long>> enteredQtyFuture =
-        subreadPool.submit(() -> entryQtyReader.enteredQtyByWorkflowId(tenantId, workflowIds));
+    Future<Map<String, PositionLifecycleReader.Lifecycle>> lifecycleFuture =
+        subreadPool.submit(() -> lifecycleReader.lifecycleByWorkflowId(tenantId, workflowIds));
     long remainingSeconds =
         Math.max(1L, TimeUnit.NANOSECONDS.toSeconds(deadlineNanos - System.nanoTime()));
     Map<String, BigDecimal> entrySpotByWorkflow =
         await(entrySpotFuture, Map.of(), "entry spot tenant=" + tenantId, remainingSeconds);
     Map<String, BigDecimal> spotNowByTicker =
         await(spotNowFuture, Map.of(), "underlying quotes tenant=" + tenantId, remainingSeconds);
-    Map<String, Long> enteredQtyByWorkflow =
-        await(enteredQtyFuture, Map.of(), "entry qty tenant=" + tenantId, remainingSeconds);
+    Map<String, PositionLifecycleReader.Lifecycle> lifecycleByWorkflow =
+        await(lifecycleFuture, Map.of(), "position lifecycle tenant=" + tenantId, remainingSeconds);
 
     BigDecimal sumOpenNotional = BigDecimal.ZERO;
     List<Map<String, Object>> positionItems = new ArrayList<>();
@@ -263,7 +263,7 @@ public class PortfolioService {
               marks,
               entrySpotByWorkflow.get(p.workflowId()),
               spotNowByTicker.get(underlyingOf(p.contractSymbol())),
-              enteredQtyByWorkflow.get(p.workflowId())));
+              lifecycleByWorkflow.get(p.workflowId())));
     }
 
     // Join equity per broker under the same budget; a stalled snapshot degrades to null equity.
@@ -394,7 +394,7 @@ public class PortfolioService {
       BrokerPositionsClient.PositionMarks marks,
       BigDecimal underlyingSpotEntry,
       BigDecimal underlyingPrice,
-      Long enteredQty) {
+      PositionLifecycleReader.Lifecycle lifecycle) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("workflow_id", p.workflowId());
     m.put("strategy_id", p.strategyId());
@@ -408,7 +408,20 @@ public class PortfolioService {
     m.put("underlying_price", underlyingPrice);
     // Originally-entered contracts. Null when the audit trail could not supply it (a lost or
     // pre-retention entry), in which case the row shows the remaining qty alone.
-    m.put("entry_qty", enteredQty);
+    m.put("entry_qty", lifecycle == null ? null : lifecycle.enteredQty());
+    // Money already BANKED on the part of this position that has been sold, on the SAME entry basis
+    // unrealized_pl uses, so the two add up to what the position has made in total. Null when
+    // nothing priced has been sold or the basis is unknown — the row then shows unrealized alone.
+    if (lifecycle != null && lifecycle.exitedQty() > 0 && p.entryPremium() != null) {
+      m.put(
+          "realized_pl",
+          lifecycle
+              .proceeds()
+              .subtract(p.entryPremium().multiply(BigDecimal.valueOf(lifecycle.exitedQty())))
+              .multiply(BigDecimal.valueOf(100)));
+    } else {
+      m.put("realized_pl", null);
+    }
     // Live broker marks, joined by OCC. current_price is the shared per-unit mark. The two P&L
     // figures are PER-ROW (#832): the broker's numbers are ACCOUNT-POSITION-level, and attaching
     // them verbatim duplicated the whole contract's P&L onto every sibling workflow row sharing
