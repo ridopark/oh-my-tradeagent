@@ -533,6 +533,12 @@ export interface Position {
 }
 
 export interface Trade {
+  /**
+   * Weighted entry cost basis for this fill's position, attached by the BFF so an EXIT row can show
+   * what it made. Null when the entry fills carried no price, or for a fill whose entry predates
+   * retention.
+   */
+  entry_basis?: string | number | null;
   event_id: string;
   occurred_at: string;
   kind: string;
@@ -606,6 +612,23 @@ export interface Signal {
 /** A numeric field off an accepted signal's subject (ref_premium, contracts), or null. */
 export function signalNumber(s: Signal, field: string): number | null {
   return finite(parseSubject(s.subject)[field]);
+}
+
+/**
+ * What an EXIT fill made: (exit price − entry basis) × qty × 100. Null for an entry fill (an entry
+ * makes nothing — it is the basis everything else is measured against), and null when either side
+ * of the subtraction is missing.
+ */
+export function tradePnl(t: Trade): number | null {
+  if (t.kind !== "PartialExitFilled") {
+    return null;
+  }
+  const f = tradeFill(t);
+  const basis = finite(t.entry_basis);
+  if (f.avg_fill_price === null || f.qty === null || basis === null) {
+    return null;
+  }
+  return (f.avg_fill_price - basis) * f.qty * 100;
 }
 
 /** The resolved contract on an accepted signal, or null when the subject carries none. */
