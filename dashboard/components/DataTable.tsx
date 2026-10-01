@@ -50,8 +50,12 @@ export function DataTable({
             const r = row as Record<string, unknown>;
             return (
               <tr key={rowKey ? rowKey(r, i) : i} className="hover:bg-slate-800/50">
+                {/* align-top: once any cell in a row stacks (Holdings pairs its prices over a %
+                    line, /trades wraps a JSON subject), middle-aligned siblings float to the centre
+                    and the row reads as ragged. For a table whose rows are all single-line — every
+                    other page using this component — it is a no-op. */}
                 {columns.map((c) => (
-                  <td key={c.key} className="px-3 py-2 text-slate-200">
+                  <td key={c.key} className="px-3 py-2 align-top text-slate-200">
                     {c.render ? c.render(r[c.key], r) : format(r[c.key])}
                   </td>
                 ))}

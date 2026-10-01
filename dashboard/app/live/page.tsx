@@ -9,6 +9,7 @@ import {
   ContractLink,
   contractCell,
   occCompact,
+  occCompactParts,
   occExpiryYmd,
 } from "@/components/ContractLink";
 import { Pnl, pnlCell, fmtCurrency } from "@/components/Pnl";
@@ -690,6 +691,30 @@ function HoldingCard({
   );
 }
 
+// The percentage move between two prices, or null when it cannot be computed. A zero entry is
+// excluded rather than yielding Infinity.
+function pctMove(entry: number | null, now: number | null): number | null {
+  return entry !== null && now !== null && entry !== 0
+    ? ((now - entry) / entry) * 100
+    : null;
+}
+
+// The "(+7.4%)" line under a paired price cell. Red/green is DATA — it stays coloured even inside
+// a linked cell, where the prices themselves take the link colour.
+function moveLine(pct: number | null): ReactNode {
+  if (pct === null) {
+    return null;
+  }
+  return (
+    <span
+      className={`block text-xs ${pct >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+    >
+      ({pct >= 0 ? "+" : ""}
+      {pct.toFixed(1)}%)
+    </span>
+  );
+}
+
 // "$1,390.00 → $1,275.00" — what the position cost against what it is worth now. Value is derived
 // (remaining_qty × mark × 100), so it blanks on an unpriced position while cost still shows.
 function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
@@ -720,11 +745,16 @@ function premiumCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   if (entry === null && mark === null) {
     return <span className="text-slate-500">—</span>;
   }
+  // The same move the Underlying column shows, for the option itself — and the one number the row
+  // did not already carry: P&L is in dollars, so the position's RETURN was nowhere on the page.
   return (
-    <span className="whitespace-nowrap">
-      <span className="text-slate-200">{entry === null ? "—" : `$${entry}`}</span>
-      <span className="text-slate-600"> → </span>
-      <span className="text-slate-200">{mark === null ? "—" : `$${mark}`}</span>
+    <span className="inline-block">
+      <span className="block whitespace-nowrap text-slate-200">
+        {entry === null ? "—" : `$${entry}`}
+        <span className="text-slate-600"> → </span>
+        {mark === null ? "—" : `$${mark}`}
+      </span>
+      {moveLine(pctMove(entry, mark))}
     </span>
   );
 }
@@ -739,27 +769,39 @@ function underlyingCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   if (entry === null && now === null) {
     return <span className="text-slate-500">—</span>;
   }
-  const movePct =
-    entry !== null && now !== null && entry !== 0
-      ? ((now - entry) / entry) * 100
-      : null;
+  // The EQUITY ticker, not the contract: this cell is about the stock underneath, so it links to
+  // the stock's quote page while the Contract column links to the option's. Null when the symbol
+  // is not a parseable OCC, in which case the prices render as plain text rather than a dead link.
+  const ticker = occCompactParts(String(row.contract_symbol ?? ""))?.root ?? null;
+
   // Stacked, and the "$" is affordable again now that entry premium and the mark share one column
   // instead of two — that merge freed far more width than the four currency symbols cost.
+  const prices = (
+    <span className="block whitespace-nowrap">
+      {entry === null ? "—" : `$${entry.toFixed(2)}`}
+      <span className="text-slate-600"> → </span>
+      {now === null ? "—" : `$${now.toFixed(2)}`}
+    </span>
+  );
   return (
     <span className="inline-block">
-      <span className="block whitespace-nowrap text-slate-200">
-        {entry === null ? "—" : `$${entry.toFixed(2)}`}
-        <span className="text-slate-600"> → </span>
-        {now === null ? "—" : `$${now.toFixed(2)}`}
-      </span>
-      {movePct !== null && (
-        <span
-          className={`block text-xs ${movePct >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+      {ticker === null ? (
+        <span className="text-slate-200">{prices}</span>
+      ) : (
+        // Sky, like ContractLink: without it the cell is a link with no affordance until hover,
+        // and this is the only numeric column that IS one. The move below keeps its own red/green
+        // — that is data, not a link, and recolouring it would cost the signal.
+        <a
+          href={`https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`${ticker} on Yahoo Finance`}
+          className="text-sky-400 hover:text-sky-300 hover:underline"
         >
-          ({movePct >= 0 ? "+" : ""}
-          {movePct.toFixed(1)}%)
-        </span>
+          {prices}
+        </a>
       )}
+      {moveLine(pctMove(entry, now))}
     </span>
   );
 }
