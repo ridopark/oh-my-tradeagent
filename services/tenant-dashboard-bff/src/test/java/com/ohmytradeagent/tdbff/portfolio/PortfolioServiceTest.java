@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
+import com.ohmytradeagent.tdbff.positions.EntryQtyReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.positions.TradeContextSpotReader;
@@ -30,6 +31,7 @@ class PortfolioServiceTest {
   private final TenantStrategyResolver strategyResolver = mock(TenantStrategyResolver.class);
   private final DbStrategyConfigReader strategyRegistry = mock(DbStrategyConfigReader.class);
   private final TradeContextSpotReader entrySpotReader = mock(TradeContextSpotReader.class);
+  private final EntryQtyReader entryQtyReader = mock(EntryQtyReader.class);
   private final MarketDataQuoteClient equityQuotes = mock(MarketDataQuoteClient.class);
 
   private final PortfolioService service = newService(false, 9);
@@ -43,6 +45,7 @@ class PortfolioServiceTest {
     // Default: no recorded entry spot and no live equity quote — the underlying columns must be
     // absent-tolerant, since that is the state for any position entered before the #783 recorder.
     when(entrySpotReader.entrySpotByWorkflowId(any(), any())).thenReturn(Map.of());
+    when(entryQtyReader.enteredQtyByWorkflowId(any(), any())).thenReturn(Map.of());
   }
 
   // Builds the consolidated {today, all-time} record PortfolioService now reads per strategy.
@@ -59,6 +62,7 @@ class PortfolioServiceTest {
         strategyResolver,
         strategyRegistry,
         entrySpotReader,
+        entryQtyReader,
         equityQuotes,
         exposeAccountNumber,
         subreadTimeoutSeconds);
@@ -678,6 +682,51 @@ class PortfolioServiceTest {
     assertThat(rows).hasSize(3);
     assertThat(rows).allSatisfy(r -> assertThat(r.get("underlying_price")).isNull());
     verify(equityQuotes, times(1)).equityPrice("SMCI");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void attachesOriginallyEnteredQtyPerWorkflow() {
+    // The live shape: a position entered at 2 that GREW to 21 (#738 entry growth) sitting beside a
+    // manual 5-lot on the same contract. Keyed by workflow id, like the entry spot — the contract
+    // cannot disambiguate them.
+    String wfGrown = "t-acme/s-s1/pos/SMCI  261120C00050000/chat-1:0";
+    String wfManual = "t-acme/s-s1/pos/SMCI  261120C00050000/manual:abc";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                openPos(wfGrown, "SMCI  261120C00050000", 21),
+                openPos(wfManual, "SMCI  261120C00050000", 5)));
+    when(entryQtyReader.enteredQtyByWorkflowId(eq("acme"), any()))
+        .thenReturn(Map.of(wfGrown, 21L, wfManual, 5L));
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    assertThat(rows.get(0).get("entry_qty")).isEqualTo(21L);
+    assertThat(rows.get(1).get("entry_qty")).isEqualTo(5L);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void missingEntryQtyLeavesTheFieldNullWithoutLosingTheRow() {
+    // No audit rows (pre-retention, or a lost entry): the row still renders, showing remaining
+    // only.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                openPos("t-acme/s-s1/pos/AMD   261120C00160000/sig1", "AMD   261120C00160000", 3)));
+    when(entryQtyReader.enteredQtyByWorkflowId(any(), any())).thenReturn(Map.of());
+
+    List<Map<String, Object>> rows =
+        (List<Map<String, Object>>) service.portfolio("acme").get("open_positions");
+
+    assertThat(rows).hasSize(1);
+    assertThat(rows.get(0)).containsKey("entry_qty");
+    assertThat(rows.get(0).get("entry_qty")).isNull();
+    assertThat(rows.get(0).get("remaining_qty")).isEqualTo(3L);
   }
 
   private static OpenPosition openPos(String workflowId, String occ, long qty) {
