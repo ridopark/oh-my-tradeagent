@@ -665,7 +665,7 @@ function HoldingCard({
       </div>
       {/* A two-column grid, NOT the flex/justify-between rows this replaced. justify-between pins
           the label to the left edge and the value to the right, so the space between them is
-          whatever happens to be left over \u2014 on a phone that is a dead gutter wide enough to read
+          whatever happens to be left over — on a phone that is a dead gutter wide enough to read
           as a missing column, and it grows as the values get shorter. Here the label column hugs
           its widest entry and the values start immediately after it, so the slack falls in the
           right margin instead of down the middle. minmax(0,1fr) rather than max-content on the
@@ -681,31 +681,47 @@ function HoldingCard({
         <dt>underlying</dt>
         <dd className="text-slate-200">{underlyingCell(null, row, true)}</dd>
 
-        {/* "P&L", not "P&L total \u00b7 today": it is the widest label here and every value column
-            starts after it, so shortening it pulls the whole card left. The trailing "today"
-            marks the second number, which is what the longer label was carrying. */}
-        <dt>P&amp;L</dt>
-        <dd className="flex flex-wrap items-center gap-x-1.5">
-          <Pnl value={row.unrealized_pl as string | number | null} />
-          <span className="text-slate-600">&middot;</span>
-          <Pnl value={row.unrealized_intraday_pl as string | number | null} />
-          <span className="text-slate-500">today</span>
-        </dd>
+        {/* The three P&L figures get their own block: a row of labels over a row of values,
+            rather than one value cell holding all three.
 
-        {/* Its own row rather than a second line under the P&L value: the grid already gives it a
-            label column, so it can be named instead of relying on the "all-in" prefix the table
-            cell needs. Absent entirely until something has been sold \u2014 see allInPl. */}
-        {allIn !== null && (
-          <>
-            <dt>all-in</dt>
+            They are NOT a progression. "$168.00" is total unrealized on what is still HELD,
+            "$174.00" is only today's move on that same remainder, and all-in adds back what was
+            banked on the part already sold. Separating them with this card's "→" would claim the
+            first became the second, which never happened — every other arrow here does mean
+            exactly that (entry → now), so reusing it would be the one that lies. A "·" dim
+            enough not to compete with the numbers is close to invisible at this size. Giving each
+            figure its own named column says what they are and leaves nothing between them to
+            misread.
+
+            Spans the parent grid with its own columns, so each label sits directly over its value
+            instead of inheriting the label/value split of the rows above. Two columns when nothing
+            has been sold — all-in is absent then (see allInPl), and an empty third column would
+            leave a gap with nothing to explain it. */}
+        <div
+          className={`col-span-2 mt-1.5 grid gap-x-5 ${
+            allIn !== null
+              ? "grid-cols-[repeat(3,max-content)]"
+              : "grid-cols-[repeat(2,max-content)]"
+          }`}
+        >
+          <dt>P&amp;L</dt>
+          <dt>today</dt>
+          {allIn !== null && <dt>all-in</dt>}
+          <dd>
+            <Pnl value={row.unrealized_pl as string | number | null} />
+          </dd>
+          <dd>
+            <Pnl value={row.unrealized_intraday_pl as string | number | null} />
+          </dd>
+          {allIn !== null && (
             <dd
               className={`whitespace-nowrap ${allIn >= 0 ? "text-emerald-400" : "text-rose-400"}`}
               title="Unrealized on what is still held, plus what was already banked on the part sold"
             >
               {fmtCurrency(allIn)}
             </dd>
-          </>
-        )}
+          )}
+        </div>
       </dl>
       {actions && <div className="mt-2">{actions(row)}</div>}
     </div>
