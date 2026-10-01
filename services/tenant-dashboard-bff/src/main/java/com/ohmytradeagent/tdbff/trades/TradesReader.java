@@ -12,6 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -99,6 +100,17 @@ public class TradesReader {
    *
    * <p>Only fills that carried a price contribute to both the quantity and the cost, so the average
    * stays consistent rather than diluted by quantity it cannot value.
+   *
+   * <p>QTY-KEY CONTRACT, because the two sides of this feature read different keys and a silent
+   * mismatch would mis-value every row: ENTRY events carry the quantity as {@code filled_qty}
+   * (EntryFilled) or {@code qty_added} (PositionEntryIncreased) — the COALESCE below — while EXIT
+   * events carry {@code qty_filled}, which is what {@code tradeFill} reads on the dashboard. The
+   * keys are disjoint by kind, so neither fallback can pick up the other's events. If an entry kind
+   * ever starts emitting {@code qty_filled}, this average silently drops it.
+   *
+   * <p>Raw SQL rather than the jOOQ DSL: this is a JSONB extraction with a FILTER-less conditional
+   * COALESCE and a NULLIF guard, which the DSL expresses far less legibly than the SQL does. Every
+   * value is still bound, never concatenated.
    */
   private Map<String, BigDecimal> entryBasisBySignal(String tenantId, Set<String> correlationIds) {
     if (correlationIds.isEmpty()) {
@@ -122,13 +134,16 @@ public class TradesReader {
               correlationIds.toArray(new String[0]))
           .stream()
           .filter(r -> r.get(1, BigDecimal.class) != null)
-          .collect(
-              java.util.stream.Collectors.toMap(
-                  r -> r.get(0, String.class), r -> r.get(1, BigDecimal.class)));
+          .collect(Collectors.toMap(r -> r.get(0, String.class), r -> r.get(1, BigDecimal.class)));
     } catch (RuntimeException e) {
-      // Fail-soft, like every other enrichment on this page: no basis means the strip shows the
-      // fill without a P&L, never a failed read.
-      log.debug("entry-basis read failed tenant={}: {}", tenantId, e.toString());
+      // Fail-soft — no basis means the strip shows the fill without a P&L, never a failed read.
+      //
+      // WARN, not debug: this is all-or-nothing. A single bad cast (a non-numeric avg_fill_price, a
+      // non-integer qty, a typo in the SQL above) takes out the basis for EVERY correlation id in
+      // the batch, so P&L silently vanishes from the whole strip. At debug that is invisible in
+      // production — which is exactly how TradeContextPeakReader stayed dead for months.
+      log.warn(
+          "entry-basis read failed; strip P&L suppressed tenant={}: {}", tenantId, e.toString());
       return Map.of();
     }
   }
@@ -144,9 +159,8 @@ public class TradesReader {
       }
     }
     Map<String, BigDecimal> basis = entryBasisBySignal(tenantId, ids);
-    if (basis.isEmpty()) {
-      return items;
-    }
+    // The key is attached even when the lookup came back empty, so every row has the same shape and
+    // "no basis" is one case (null) rather than two (absent vs null).
     List<Map<String, Object>> out = new ArrayList<>(items.size());
     for (Map<String, Object> m : items) {
       Map<String, Object> copy = new LinkedHashMap<>(m);
