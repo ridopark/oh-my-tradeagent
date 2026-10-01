@@ -11,7 +11,7 @@ import {
   occCompact,
   occExpiryYmd,
 } from "@/components/ContractLink";
-import { Pnl, pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
+import { Pnl, pnlCell, fmtCurrency } from "@/components/Pnl";
 import {
   ForceExitButton,
   type ForceExitActionResult,
@@ -442,8 +442,10 @@ export default async function LivePage() {
     // The MOVE is the part the rest of the row cannot tell you — the stock can be up while the
     // option is down (theta/IV).
     { key: "underlying_spot_entry", label: "Underlying", render: underlyingCell },
-    { key: "open_notional", label: "Cost", render: priceCell },
-    { key: "position_value", label: "Value", render: valueCell },
+    // Third and last pair. Unlike Premium and Underlying — the same quantity at two times — these
+    // are two DIFFERENT quantities (cost basis vs what it is worth now), so the header keeps both
+    // nouns rather than collapsing to one.
+    { key: "open_notional", label: "Cost → Value", render: costValueCell },
     { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlCell },
   ];
@@ -558,11 +560,14 @@ export default async function LivePage() {
               </span>
             )}
           </div>
-          {/* Two layouts, one data set. The 9-column table needs ~900px, so below lg it would force
-              the sideways scroll this page is read on a phone to avoid; cards carry the same numbers
-              in four lines. The cutover is lg (not md) because a 768px tablet still cannot fit the
-              table. Both branches are server-rendered — no JS decides which one you get. */}
-          <div className="flex flex-col gap-3 lg:hidden">
+          {/* Two layouts, one data set; cards carry the same numbers in four lines.
+              The cutover is xl, chosen by measurement rather than taste. At a 1024 viewport the
+              container is 990px and the table measures 996-1014px depending on the symbol
+              (SMCI 996, GOOGL 1005, NVDA $1100C 1014), so lg handed narrow laptops a table that
+              scrolled sideways — the exact thing this split exists to prevent. At xl the container
+              is 1118px and the widest case fits with ~100px to spare. Both branches are
+              server-rendered — no JS decides which one you get. */}
+          <div className="flex flex-col gap-3 xl:hidden">
             {count === 0 ? (
               <p className="text-sm text-slate-400">No open positions.</p>
             ) : (
@@ -575,7 +580,7 @@ export default async function LivePage() {
               ))
             )}
           </div>
-          <div className="hidden lg:block">
+          <div className="hidden xl:block">
             <DataTable
               empty="No open positions."
               columns={holdingsColumns}
@@ -682,6 +687,25 @@ function HoldingCard({
       </dl>
       {actions && <div className="mt-2">{actions(row)}</div>}
     </div>
+  );
+}
+
+// "$1,390.00 → $1,275.00" — what the position cost against what it is worth now. Value is derived
+// (remaining_qty × mark × 100), so it blanks on an unpriced position while cost still shows.
+function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
+  const value = positionMarketValue(row.remaining_qty, row.current_price);
+  return (
+    <span className="whitespace-nowrap">
+      <span className="text-slate-200">
+        {fmtCurrency(row.open_notional as string | number | null)}
+      </span>
+      <span className="text-slate-600"> → </span>
+      {value === null ? (
+        <span className="text-slate-500">—</span>
+      ) : (
+        <span className="text-slate-200">{fmtCurrency(value)}</span>
+      )}
+    </span>
   );
 }
 
@@ -807,16 +831,6 @@ function positionMarketValue(qty: unknown, mark: unknown): number | null {
   return Number.isNaN(p) || Number.isNaN(q) ? null : q * p * OPTIONS_MULTIPLIER;
 }
 
-// DataTable cell renderer for the live mark-to-market Value column. "—" when the broker carries no
-// mark (e.g. a phantom — matching the Current-mark blank).
-function valueCell(_value: unknown, row: Record<string, unknown>): ReactNode {
-  const v = positionMarketValue(row.remaining_qty, row.current_price);
-  return v == null ? (
-    <span className="text-slate-500">—</span>
-  ) : (
-    <span className="text-slate-200">{fmtCurrency(v)}</span>
-  );
-}
 
 // A strategy's per-day realized-loss limit (`daily_loss_threshold`, absolute USD) read from its
 // strategy config. When a strategy's realized losses for the day reach it, that strategy's kill
