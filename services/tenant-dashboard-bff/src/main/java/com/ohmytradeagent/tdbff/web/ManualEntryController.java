@@ -25,6 +25,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,22 @@ public class ManualEntryController {
    * map removal that cannot throw — it never changes the entry's outcome or response.
    */
   private final PortfolioCache portfolioCache;
+
+  /**
+   * Signal workflows whose FILLED status already invalidated the caches. The status GET is a poll,
+   * so without this every repeat call on a filled entry (a second tab, a retry) would flush the
+   * tenant's portfolio cache and send the next read back to the broker. Bounded: the oldest ids
+   * drop out, which at worst costs one extra invalidation.
+   */
+  private final Set<String> filledInvalidated =
+      Collections.synchronizedSet(
+          Collections.newSetFromMap(
+              new LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                  return size() > 1024;
+                }
+              }));
 
   private final OpenOccCache openOccCache;
 
@@ -342,7 +359,8 @@ public class ManualEntryController {
 
     CopytradeEntryStatus status =
         client.newUntypedWorkflowStub(workflowId).query("entryStatus", CopytradeEntryStatus.class);
-    if (status.getState() == CopytradeEntryStatus.State.FILLED) {
+    if (status.getState() == CopytradeEntryStatus.State.FILLED
+        && filledInvalidated.add(workflowId)) {
       portfolioCache.invalidate(tenant);
       openOccCache.invalidate(tenant);
     }

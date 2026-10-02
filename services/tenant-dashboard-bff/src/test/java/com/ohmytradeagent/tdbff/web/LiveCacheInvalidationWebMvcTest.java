@@ -219,11 +219,17 @@ class LiveCacheInvalidationWebMvcTest {
   }
 
   private void entryStatusIs(CopytradeEntryStatus.State state) throws Exception {
+    entryStatusIs("manual:idem-1", state);
+  }
+
+  // The controller (and its once-per-fill memory) is shared across tests in this context, so a test
+  // that depends on that memory uses its own signal id.
+  private void entryStatusIs(String signalId, CopytradeEntryStatus.State state) throws Exception {
     CopytradeEntryStatus s = new CopytradeEntryStatus();
     s.setState(state);
     when(stub.query("entryStatus", CopytradeEntryStatus.class)).thenReturn(s);
     mvc.perform(
-            get("/api/entries/manual:idem-1/status")
+            get("/api/entries/" + signalId + "/status")
                 .param("strategy_id", "copytrade-v1")
                 .header("X-Tenant-Id", "acme"))
         .andExpect(status().isOk());
@@ -241,9 +247,9 @@ class LiveCacheInvalidationWebMvcTest {
   void manualEntryStatus_filledPolledRepeatedly_invalidatesOnce() throws Exception {
     // The status endpoint is a poll: repeat GETs on an already-filled entry must not keep flushing
     // the tenant's cache (each flush sends the next portfolio read back to the broker).
-    entryStatusIs(CopytradeEntryStatus.State.FILLED);
-    entryStatusIs(CopytradeEntryStatus.State.FILLED);
-    entryStatusIs(CopytradeEntryStatus.State.FILLED);
+    entryStatusIs("manual:idem-repeat", CopytradeEntryStatus.State.FILLED);
+    entryStatusIs("manual:idem-repeat", CopytradeEntryStatus.State.FILLED);
+    entryStatusIs("manual:idem-repeat", CopytradeEntryStatus.State.FILLED);
 
     verify(portfolioCache, times(1)).invalidate("acme");
     verify(openOccCache, times(1)).invalidate("acme");
