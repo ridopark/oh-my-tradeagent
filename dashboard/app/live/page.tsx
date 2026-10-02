@@ -14,7 +14,18 @@ import {
   occCompactParts,
   occExpiryYmd,
 } from "@/components/ContractLink";
-import { Pnl, pnlCell, fmtCurrency } from "@/components/Pnl";
+import { fmtCurrency } from "@/components/Pnl";
+import {
+  LiveMarksProvider,
+  LivePremium,
+  LiveUnderlying,
+  LiveCostValue,
+  LivePnlToday,
+  LivePnlTotal,
+  LiveAllIn,
+} from "@/components/LiveMarks";
+import { ConnectionStrip } from "@/components/ConnectionStrip";
+import { LiveRefresh } from "@/components/LiveRefresh";
 import {
   ForceExitButton,
   type ForceExitActionResult,
@@ -464,7 +475,7 @@ export default async function LivePage() {
     // are two DIFFERENT quantities (cost basis vs what it is worth now), so the header keeps both
     // nouns rather than collapsing to one.
     { key: "open_notional", label: "Cost → Value", render: costValueCell },
-    { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlCell },
+    { key: "unrealized_intraday_pl", label: "P&L (today)", render: pnlTodayCell },
     { key: "unrealized_pl", label: "P&L (total)", render: pnlTotalCell },
   ];
   const actionsEnabled =
@@ -529,7 +540,17 @@ export default async function LivePage() {
     });
   }
 
+  // PLAN-2026-10-01-live-realtime-holdings P4. The holdings cells re-mark themselves every second
+  // from LiveMarksProvider's client poll (falling back to the values rendered here, shown stale);
+  // LiveRefresh re-renders this whole page every 15s. Neither adds a server-side read to this
+  // render — the new BFF endpoints are only ever polled from the client, so a BFF that predates
+  // them degrades the strip and cells to unknown/stale and can never reach LiveUnavailable.
+  const renderedAt = new Date().toISOString();
+  const heldOccs = portfolio.open_positions.map((p) => String(p.contract_symbol ?? ""));
+
   return (
+    <LiveRefresh>
+    <LiveMarksProvider renderedAt={renderedAt}>
     <TrailLivenessProvider>
       <FloorBreachProvider>
       <Nav tenantId={session?.tenantId} />
@@ -548,6 +569,7 @@ export default async function LivePage() {
           that cannot place orders at all should not be told so in an inset card. */}
       <LiveActivationBanner promotion={livePromotion} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
+        <ConnectionStrip occs={heldOccs} />
         <div>
           <h1 className="mb-1 text-xl font-semibold text-slate-100">Live</h1>
           <p className="text-sm text-slate-400">
@@ -656,6 +678,8 @@ export default async function LivePage() {
       </main>
       </FloorBreachProvider>
     </TrailLivenessProvider>
+    </LiveMarksProvider>
+    </LiveRefresh>
   );
 }
 
@@ -726,18 +750,11 @@ function HoldingCard({
           <dt>P&amp;L</dt>
           <dt>today</dt>
           {allIn !== null && <dt>all-in</dt>}
-          <dd>
-            <Pnl value={row.unrealized_pl as string | number | null} />
-          </dd>
-          <dd>
-            <Pnl value={row.unrealized_intraday_pl as string | number | null} />
-          </dd>
+          <dd>{pnlTotalOnly(row)}</dd>
+          <dd>{pnlTodayCell(null, row, true)}</dd>
           {allIn !== null && (
-            <dd
-              className={`whitespace-nowrap ${allIn >= 0 ? "text-emerald-400" : "text-rose-400"}`}
-              title="Unrealized on what is still held, plus what was already banked on the part sold"
-            >
-              {fmtCurrency(allIn)}
+            <dd title="Unrealized on what is still held, plus what was already banked on the part sold">
+              {allInLive(row, allIn, "whitespace-nowrap")}
             </dd>
           )}
         </div>
@@ -747,49 +764,34 @@ function HoldingCard({
   );
 }
 
-// The percentage move between two prices, or null when it cannot be computed. A zero entry is
-// excluded rather than yielding Infinity.
-function pctMove(entry: number | null, now: number | null): number | null {
-  return entry !== null && now !== null && entry !== 0
-    ? ((now - entry) / entry) * 100
-    : null;
-}
-
-// The "(+7.4%)" move beside a paired price cell. Red/green is DATA — it stays coloured even inside
-// a linked cell, where the prices themselves take the link colour.
-//
-// Stacked under the prices by default, which is what the narrow table columns need. `inline` puts
-// it on the same line instead, for the mobile card: there the row is a label and a value packed
-// side by side with room to spare, so a second line would be spent width rather than saved.
-function moveLine(pct: number | null, inline = false): ReactNode {
-  if (pct === null) {
-    return null;
-  }
-  const tone = pct >= 0 ? "text-emerald-400" : "text-rose-400";
-  const text = `(${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`;
-  return inline ? (
-    <span className={`whitespace-nowrap text-xs ${tone}`}> {text}</span>
-  ) : (
-    <span className={`block text-xs ${tone}`}>{text}</span>
-  );
-}
-
 // "$1,390.00 → $1,275.00" — what the position cost against what it is worth now. Value is derived
 // (remaining_qty × mark × 100), so it blanks on an unpriced position while cost still shows.
 function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
-  const value = positionMarketValue(row.remaining_qty, row.current_price);
   return (
-    <span className="whitespace-nowrap">
-      <span className="text-slate-200">
-        {fmtCurrency(row.open_notional as string | number | null)}
-      </span>
-      <span className="text-slate-200"> → </span>
-      {value === null ? (
-        <span className="text-slate-500">—</span>
-      ) : (
-        <span className="text-slate-200">{fmtCurrency(value)}</span>
-      )}
-    </span>
+    <LiveCostValue
+      occ={String(row.contract_symbol ?? "")}
+      qty={num(row.remaining_qty)}
+      cost={row.open_notional as string | number | null}
+      serverValue={positionMarketValue(row.remaining_qty, row.current_price)}
+    />
+  );
+}
+
+// P&L (today): (bid − lastday_price) × qty × 100 live; the broker's prorated intraday figure from
+// this render, shown stale, when the mark is unusable or the BFF sent no lastday_price.
+function pnlTodayCell(
+  _v: unknown,
+  row: Record<string, unknown>,
+  inline = false,
+): ReactNode {
+  return (
+    <LivePnlToday
+      occ={String(row.contract_symbol ?? "")}
+      qty={num(row.remaining_qty)}
+      lastday={num(row.lastday_price)}
+      serverValue={num(row.unrealized_intraday_pl)}
+      inline={inline}
+    />
   );
 }
 
@@ -802,23 +804,56 @@ function costValueCell(_v: unknown, row: Record<string, unknown>): ReactNode {
 // It appears only once something has been sold. An untouched position has realized nothing, and
 // repeating the same number twice would be noise — worse, a "$0.00" there would read as "sold at
 // break-even" rather than "sold nothing".
+//
+// Both lines re-mark live at the bid: unrealized = (bid − entry_premium) × remaining_qty × 100 (the
+// BFF's own unrealized_pl formula) and all-in = that + realized_pl. Whether the all-in line exists
+// at all is still decided by the server values (allInPl), so the layout never flickers.
 function pnlTotalCell(_v: unknown, row: Record<string, unknown>): ReactNode {
-  const unrealized = num(row.unrealized_pl);
   const allIn = allInPl(row);
   return (
     <span className="inline-block">
-      <span className="block">
-        <Pnl value={unrealized} />
-      </span>
+      <span className="block">{pnlTotalOnly(row)}</span>
       {allIn !== null && (
         <span
-          className={`block whitespace-nowrap text-xs ${allIn >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+          className="block"
           title="Unrealized on what is still held, plus what was already banked on the part sold"
         >
-          all-in {fmtCurrency(allIn)}
+          {allInLive(row, allIn, "whitespace-nowrap text-xs", "all-in ")}
         </span>
       )}
     </span>
+  );
+}
+
+// Unrealized P&L (total) alone — the table's first line and the card's "P&L" figure.
+function pnlTotalOnly(row: Record<string, unknown>): ReactNode {
+  return (
+    <LivePnlTotal
+      occ={String(row.contract_symbol ?? "")}
+      qty={num(row.remaining_qty)}
+      entry={num(row.entry_premium)}
+      serverValue={num(row.unrealized_pl)}
+    />
+  );
+}
+
+// The live all-in figure; `serverAllIn` (allInPl) is the stale fallback.
+function allInLive(
+  row: Record<string, unknown>,
+  serverAllIn: number,
+  className: string,
+  prefix?: string,
+): ReactNode {
+  return (
+    <LiveAllIn
+      occ={String(row.contract_symbol ?? "")}
+      qty={num(row.remaining_qty)}
+      entry={num(row.entry_premium)}
+      realized={num(row.realized_pl)}
+      serverValue={serverAllIn}
+      prefix={prefix}
+      className={className}
+    />
   );
 }
 
@@ -855,90 +890,46 @@ function qtyCell(_v: unknown, row: Record<string, unknown>): ReactNode {
   );
 }
 
-// "$2.78 → $2.55" — the option's entry premium and its live mark, paired like Underlying.
+// "$2.78 → $2.55 bid" — the option's entry premium and its live BID, paired like Underlying.
 //
 // The entry premium is NOT run through fmtCurrency: it is a cost basis and carries more than two
-// decimals (2.805 on a live position right now), which rounding to $2.81 would quietly change. The
-// broker's mark is a quote and renders as given.
+// decimals (2.805 on a live position right now), which rounding to $2.81 would quietly change. When
+// the live bid is unusable the broker mark from this render shows instead, marked stale.
 function premiumCell(
   _v: unknown,
   row: Record<string, unknown>,
   inline = false,
 ): ReactNode {
-  const entry = num(row.entry_premium);
-  const mark = num(row.current_price);
-  if (entry === null && mark === null) {
-    return <span className="text-slate-500">—</span>;
-  }
-  // The same move the Underlying column shows, for the option itself — and the one number the row
-  // did not already carry: P&L is in dollars, so the position's RETURN was nowhere on the page.
   return (
-    <span className={inline ? undefined : "inline-block"}>
-      <span
-        className={`whitespace-nowrap text-slate-200 ${inline ? "" : "block"}`}
-      >
-        {entry === null ? "—" : `$${entry}`}
-        <span className="text-slate-200"> → </span>
-        {mark === null ? "—" : `$${mark}`}
-      </span>
-      {moveLine(pctMove(entry, mark), inline)}
-    </span>
+    <LivePremium
+      occ={String(row.contract_symbol ?? "")}
+      entry={num(row.entry_premium)}
+      serverMark={num(row.current_price)}
+      inline={inline}
+    />
   );
 }
 
 // "$38.30 → $41.12 (+7.4%)" for the Holdings Underlying column. Each half renders independently:
 // a position entered before the #783 recorder has no entry spot, and the live equity quote is a
-// best-effort hop, so one missing number must not blank the other. The percentage is omitted unless
-// BOTH are present and the entry spot is non-zero.
+// best-effort hop, so one missing number must not blank the other. The "now" half is the live
+// underlying from the marks poll, falling back to this render's underlying_price shown stale.
 function underlyingCell(
   _v: unknown,
   row: Record<string, unknown>,
   inline = false,
 ): ReactNode {
-  const entry = num(row.underlying_spot_entry);
-  const now = num(row.underlying_price);
-  if (entry === null && now === null) {
-    return <span className="text-slate-500">—</span>;
-  }
-  // The EQUITY ticker, not the contract: this cell is about the stock underneath, so it links to
-  // the stock's quote page while the Contract column links to the option's. Null when the symbol
-  // is not a parseable OCC, in which case the prices render as plain text rather than a dead link.
-  const ticker = occCompactParts(String(row.contract_symbol ?? ""))?.root ?? null;
-
-  // Stacked, and the "$" is affordable again now that entry premium and the mark share one column
-  // instead of two — that merge freed far more width than the four currency symbols cost.
-  //
-  // The arrow is slate-200 like every other paired-value arrow, which means it stays white inside
-  // this sky-coloured link rather than taking the link colour. Deliberate: at slate-600 it was too
-  // dark to see against the dark card, and these arrows carry meaning (entry → now), so they are
-  // held to the same brightness as the numbers they join everywhere on the page.
-  const prices = (
-    <span className={`whitespace-nowrap ${inline ? "" : "block"}`}>
-      {entry === null ? "—" : `$${entry.toFixed(2)}`}
-      <span className="text-slate-200"> → </span>
-      {now === null ? "—" : `$${now.toFixed(2)}`}
-    </span>
-  );
+  // The EQUITY ticker, not the contract: this cell links to the stock's quote page while the
+  // Contract column links to the option's. Null when the symbol is not a parseable OCC.
+  const symbol = String(row.contract_symbol ?? "");
   return (
-    <span className={inline ? undefined : "inline-block"}>
-      {ticker === null ? (
-        <span className="text-slate-200">{prices}</span>
-      ) : (
-        // Sky, like ContractLink: without it the cell is a link with no affordance until hover,
-        // and this is the only numeric column that IS one. The move below keeps its own red/green
-        // — that is data, not a link, and recolouring it would cost the signal.
-        <a
-          href={`https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={`${ticker} on Yahoo Finance`}
-          className="text-sky-400 hover:text-sky-300 hover:underline"
-        >
-          {prices}
-        </a>
-      )}
-      {moveLine(pctMove(entry, now), inline)}
-    </span>
+    <LiveUnderlying
+      occ={symbol}
+      entry={num(row.underlying_spot_entry)}
+      serverPrice={num(row.underlying_price)}
+      ticker={occCompactParts(symbol)?.root ?? null}
+      inline={inline}
+    />
   );
 }
 

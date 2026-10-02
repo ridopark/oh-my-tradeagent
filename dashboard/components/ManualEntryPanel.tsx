@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePanelOpen } from "./LiveRefresh";
 
 // PLAN-2026-08-10-live-manual-bto: the /live "Manual entry" panel — the operator's way to OPEN a
 // position by hand. Same interaction model as TrimButton (inline steps, no modal — the repo has no
@@ -189,6 +190,7 @@ export function ManualEntryPanel({
   const [qty, setQty] = useState(String(strategies[0]?.minContracts ?? 1));
   const [strategyId, setStrategyId] = useState(strategies[0]?.strategyId ?? "");
   const [step, setStep] = useState<Step>({ kind: "idle" });
+  usePanelOpen(step.kind !== "idle");
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   // clearTimers() alone does NOT stop the loops: if the component unmounts while a poll tick or a
   // quote refresh is awaiting its server action, the cleanup has already run by the time that

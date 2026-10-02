@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePanelOpen } from "./LiveRefresh";
 import { TrailFeedDot, useTrailLiveness } from "./TrailLiveness";
 
 // Client island for the per-position "Stop-loss" button on /live — arms the EXISTING chandelier
@@ -143,6 +144,7 @@ export function StopLossButton({
   const [picking, setPicking] = useState(false);
   const [confirming, setConfirming] = useState<number | null>(null);
   const [result, setResult] = useState<StopLossActionResult | null>(null);
+  usePanelOpen(picking || confirming !== null || submitting);
   // #778: the true-peak-since-entry candidate, fetched once per picker open. Null = not available
   // (or not fetched yet) = today's single-anchor flow.
   const [truePeak, setTruePeak] = useState<{ peak: number; stop: number } | null>(

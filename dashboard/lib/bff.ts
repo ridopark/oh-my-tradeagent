@@ -27,7 +27,9 @@ if (!BFF_TOKEN) {
 
 export class NotAuthenticatedError extends Error {}
 
-async function bffGet<T>(path: string): Promise<T> {
+// `timeoutMs` defaults to the page-render budget above. Only the /live client polls pass a shorter
+// one: a 1s poll whose request hangs for 12s just stacks up behind itself.
+async function bffGet<T>(path: string, timeoutMs: number = BFF_TIMEOUT_MS): Promise<T> {
   const session = await auth();
   const tenantId = session?.tenantId;
   if (!tenantId) {
@@ -41,7 +43,7 @@ async function bffGet<T>(path: string): Promise<T> {
     // Dashboard reads are always live — never serve a cached tenant's data.
     cache: "no-store",
     // Abort a hung/unreachable BFF rather than block the server-rendered page indefinitely.
-    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     throw new Error(`BFF ${path} -> ${res.status}`);
@@ -570,6 +572,12 @@ export interface Position {
    * nothing priced has been sold, which is NOT the same as zero.
    */
   realized_pl?: string | number | null;
+  /**
+   * Per-contract intraday base the BFF derives from the broker's intraday P&L (scope lock #7):
+   * the prior close, or the entry premium for a position opened today. P&L today at the bid =
+   * (bid − lastday_price) × qty × 100. Absent from an older BFF / when an input is missing.
+   */
+  lastday_price?: string | number | null;
   underlying_spot_entry?: string | number | null;
   underlying_price?: string | number | null;
   // trail_stop_price is PEAK-anchored (the price the stop fires at NOW). Render it as given; do not
@@ -828,6 +836,48 @@ export interface ProximityResponse {
   positions: PositionProximity[];
 }
 export const getProximity = () => bffGet<ProximityResponse>("/api/proximity");
+
+// PLAN-2026-10-01-live-realtime-holdings: the /live 1s marks poll and 5s connection strip.
+// Both are cache-only reads on the BFF side (no broker call), polled through app/api/live-marks and
+// app/api/live-connection. Short timeouts: a slow answer is a stale answer for a 1s poll.
+//
+// `occ` is the row's contract_symbol exactly as /api/portfolio carries it. Every price is null when
+// unknown; `warming` = first sight before the first poll landed; `capped` = over the 25-OCC display
+// cap, prices null. None of those may be rendered as live — see lib/liveMarks.ts.
+export interface LiveMark {
+  occ: string;
+  bid: number | null;
+  mid: number | null;
+  ask: number | null;
+  quote_at: string | null;
+  underlying: { ticker: string | null; price: number | null; at: string | null } | null;
+  warming: boolean;
+  capped: boolean;
+}
+export interface LiveMarksResponse {
+  now: string;
+  market_data_reachable: boolean;
+  occs_status: "ok" | "unknown";
+  marks: LiveMark[];
+}
+export type LivePartStatus = "ok" | "stale" | "down" | "unknown";
+export interface LivePart {
+  status: LivePartStatus;
+  age_s: number | null;
+  reason: string | null;
+  [extra: string]: unknown;
+}
+export interface LiveConnection {
+  server_time: string;
+  market_open: boolean;
+  market_data: { equity: LivePart; option: LivePart };
+  broker: LivePart;
+  discord: LivePart;
+}
+export const getLiveMarks = () => bffGet<LiveMarksResponse>("/api/live/marks", 3_000);
+// The BFF runs each part with its own <=2s timeout, concurrently; leave headroom above that.
+export const getLiveConnection = () =>
+  bffGet<LiveConnection>("/api/live/connection", 4_000);
 
 // Per-position trailing-stop liveness (#717) for the /live badge's pulse + feed dot.
 //
