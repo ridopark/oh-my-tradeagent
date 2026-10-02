@@ -96,4 +96,40 @@ class DisplayMarksControllerTest {
             jsonPath("$.marks[0].underlying.ticker").value(org.hamcrest.Matchers.nullValue()))
         .andExpect(jsonPath("$.marks[0].underlying.at").value(org.hamcrest.Matchers.nullValue()));
   }
+
+  @Test
+  void marks_invalidOccsAreDroppedAndNeverReachTheService() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    when(service.marks(List.of(LIVE)))
+        .thenReturn(
+            List.of(new DisplayMark(LIVE, null, new Underlying("NVDA", null, null), true, false)));
+
+    mvc.perform(
+            get("/md/marks")
+                .param(
+                    "occ",
+                    "junk",
+                    LIVE,
+                    "TOOLONGX260516C00140000",
+                    "NVDA261316X00140000",
+                    "NVDA260516C0014000",
+                    "nvda260516c00140000"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.marks.length()").value(1))
+        .andExpect(jsonPath("$.marks[0].occ").value(LIVE));
+
+    verify(service).marks(List.of(LIVE));
+  }
+
+  @Test
+  void marks_atMostTwentyFiveOccsPerRequestReachTheService() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    String[] occs = new String[40];
+    for (int i = 0; i < 40; i++) {
+      occs[i] = "NVDA260516C00%03d000".formatted(100 + i);
+    }
+    mvc.perform(get("/md/marks").param("occ", occs)).andExpect(status().isOk());
+
+    verify(service).marks(List.of(occs).subList(0, 25));
+  }
 }

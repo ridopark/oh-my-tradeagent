@@ -155,4 +155,40 @@ class OpenOccCacheTest {
     }
     assertThat(calls.get()).isEqualTo(1);
   }
+
+  @Test
+  void waiterOnInFlightRead_givesUpAfter2s_asUnknown_withoutCachingAFailure() throws Exception {
+    PositionsReader reader = mock(PositionsReader.class);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch started = new CountDownLatch(1);
+    when(reader.openPositions("acme"))
+        .thenAnswer(
+            inv -> {
+              started.countDown();
+              release.await(10, TimeUnit.SECONDS);
+              return List.of(pos("wf1", OCC_A));
+            });
+    OpenOccCache cache = new OpenOccCache(reader, new MutableClock());
+
+    ExecutorService pool = Executors.newFixedThreadPool(1);
+    try {
+      Future<OpenOccCache.Snapshot> loader = pool.submit(() -> cache.get("acme"));
+      assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+
+      long t0 = System.nanoTime();
+      OpenOccCache.Snapshot waited = cache.get("acme");
+      long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+
+      assertThat(waitedMs).isBetween(1_900L, 3_000L);
+      assertThat(waited.ok()).isFalse(); // -> occs_status "unknown"
+
+      // The loader's eventual success is what gets cached, not the waiter's timeout.
+      release.countDown();
+      assertThat(loader.get(5, TimeUnit.SECONDS).ok()).isTrue();
+      assertThat(cache.get("acme").contractSymbols()).containsExactly(OCC_A);
+      verify(reader, times(1)).openPositions("acme");
+    } finally {
+      pool.shutdownNow();
+    }
+  }
 }

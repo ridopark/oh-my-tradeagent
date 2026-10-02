@@ -34,8 +34,12 @@ public class OpenOccCache {
   static final Duration TTL = Duration.ofSeconds(15);
   static final Duration FAILURE_TTL = Duration.ofSeconds(5);
 
-  /** Bound on how long a caller waits for someone else's in-flight read. */
-  private static final long WAIT_SECONDS = 10;
+  /**
+   * Bound on how long a caller waits for someone else's in-flight read. Short, so a slow Temporal
+   * read cannot pin request threads under the 1Hz poll; a timed-out waiter answers "unknown" and
+   * caches nothing — the loader's own result is what gets cached.
+   */
+  static final Duration WAIT = Duration.ofSeconds(2);
 
   private final PositionsReader reader;
   private final Clock clock;
@@ -66,7 +70,7 @@ public class OpenOccCache {
       load(tenantId, mine);
     }
     try {
-      return current.get(WAIT_SECONDS, TimeUnit.SECONDS);
+      return current.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       return failed();

@@ -39,6 +39,7 @@ public class LiveConnectionService {
   static final Duration PART_TIMEOUT = Duration.ofSeconds(2);
   static final double DISCORD_OK_BELOW_S = 15;
   static final double DISCORD_STALE_BELOW_S = 120;
+  static final long FEED_OK_MAX_TICK_AGE_MS = 30_000;
 
   // Mirrors market-data's MarketHours: Mon-Fri 09:30 inclusive to 16:00 exclusive ET, no holidays.
   private static final ZoneId ET = ZoneId.of("America/New_York");
@@ -172,7 +173,12 @@ public class LiveConnectionService {
     return null;
   }
 
-  /** market-data feedhealth → {equity: Part, option: Part}. Connected → ok, else down. */
+  /**
+   * market-data feedhealth → {equity: Part, option: Part}, graded by tick age, not connection
+   * alone: connected and ticked ≤ 30s ago → ok; connected and older → stale; connected, never
+   * ticked → unknown; not connected but ticked before → down; never opened (lazy socket, no
+   * subscribers) → unknown.
+   */
   static Map<String, Object> feedParts(Map<String, Object> feedHealth) {
     Map<String, Object> out = new LinkedHashMap<>();
     boolean answered = feedHealth != null && "ok".equals(feedHealth.get("status"));
@@ -184,10 +190,19 @@ public class LiveConnectionService {
         out.put(feed, unknown("feed missing from market-data feedhealth"));
       } else {
         Number ageMs = f.get("lastTickAgeMs") instanceof Number n ? n : null;
-        // -1 = no tick since boot: connected, but the age is unknown.
-        Double ageS = ageMs == null || ageMs.longValue() < 0 ? null : ageMs.longValue() / 1000.0;
-        Map<String, Object> p =
-            part(connected ? "ok" : "down", ageS, connected ? null : "feed disconnected");
+        // -1 / null = no tick since boot.
+        boolean ticked = ageMs != null && ageMs.longValue() >= 0;
+        Double ageS = ticked ? ageMs.longValue() / 1000.0 : null;
+        Map<String, Object> p;
+        if (!ticked) {
+          p = unknown(connected ? "connected, no ticks yet" : "idle (no stream subscribers)");
+        } else if (!connected) {
+          p = part("down", ageS, "feed disconnected");
+        } else if (ageMs.longValue() <= FEED_OK_MAX_TICK_AGE_MS) {
+          p = part("ok", ageS, null);
+        } else {
+          p = part("stale", ageS, "no tick for over 30s");
+        }
         p.put("connected", connected);
         p.put("last_tick_age_ms", ageMs);
         out.put(feed, p);
@@ -199,7 +214,9 @@ public class LiveConnectionService {
   /**
    * exec fill-listener status → this tenant's Part. ok = connected && subscription_confirmed; stale
    * = connected but subscription not confirmed; down = not connected; unknown = listener disabled
-   * or no row for this tenant. Other tenants' rows are never read into the response.
+   * or no row for this tenant. Other tenants' rows are never read into the response. When the row
+   * is {@code metrics_scope:"pod"} and the pod carries more than one tenant row, the confirmation
+   * may be another tenant's, so a connected tenant is at best stale.
    */
   static Map<String, Object> brokerPart(
       Map<String, Object> status, String tenantId, String brokerTarget) {
@@ -208,7 +225,9 @@ public class LiveConnectionService {
       p = unknown("fill listener disabled");
     } else {
       Map<?, ?> row = null;
+      int tenantRows = 0;
       if (status.get("tenants") instanceof List<?> rows) {
+        tenantRows = rows.size();
         for (Object r : rows) {
           if (r instanceof Map<?, ?> m && tenantId.equals(m.get("tenant_id"))) {
             row = m;
@@ -226,6 +245,8 @@ public class LiveConnectionService {
           p = part("down", age, "fill stream not connected");
         } else if (!confirmed) {
           p = part("stale", age, "subscription not confirmed");
+        } else if ("pod".equals(row.get("metrics_scope")) && tenantRows > 1) {
+          p = part("stale", age, "subscription confirmation is pod-wide");
         } else {
           p = part("ok", age, null);
         }

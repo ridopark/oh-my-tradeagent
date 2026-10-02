@@ -41,8 +41,14 @@ class DisplayMarksServiceTest {
     provider = mock(MarketDataProvider.class);
     when(provider.snapshotQuote(anyString()))
         .thenAnswer(inv -> Optional.of(quote(inv.getArgument(0), "2.90", "3.00")));
-    when(provider.snapshotEquityPrice(anyString()))
-        .thenReturn(Optional.of(new BigDecimal("140.10")));
+    when(provider.snapshotEquityTrade(anyString()))
+        .thenAnswer(
+            inv ->
+                Optional.of(
+                    new Tick(
+                        inv.getArgument(0),
+                        new BigDecimal("140.10"),
+                        OffsetDateTime.parse("2026-10-01T14:29:59.500Z"))));
     feedHealth = new FeedHealth(new SimpleMeterRegistry());
     clock = new MutableClock(T0);
     scheduler = new ManualScheduler();
@@ -185,12 +191,12 @@ class DisplayMarksServiceTest {
     scheduler.runAll();
     clock.advance(Duration.ofMillis(999));
     scheduler.runAll();
-    verify(provider, times(1)).snapshotEquityPrice("NVDA");
+    verify(provider, times(1)).snapshotEquityTrade("NVDA");
 
     clock.advance(Duration.ofMillis(1));
     scheduler.runAll();
     scheduler.runAll();
-    verify(provider, times(2)).snapshotEquityPrice("NVDA");
+    verify(provider, times(2)).snapshotEquityTrade("NVDA");
   }
 
   @Test
@@ -203,7 +209,7 @@ class DisplayMarksServiceTest {
     service.marks(List.of(OCC));
     scheduler.runAll();
 
-    verify(provider, never()).snapshotEquityPrice(anyString());
+    verify(provider, never()).snapshotEquityTrade(anyString());
     var u = only(service.marks(List.of(OCC))).underlying();
     assertThat(u.price()).isEqualByComparingTo("141.55");
     assertThat(u.at()).isEqualTo(tickAt.toInstant());
@@ -219,10 +225,10 @@ class DisplayMarksServiceTest {
     service.marks(List.of(OCC));
     scheduler.runAll();
 
-    verify(provider, times(1)).snapshotEquityPrice("NVDA");
+    verify(provider, times(1)).snapshotEquityTrade("NVDA");
     var u = only(service.marks(List.of(OCC))).underlying();
     assertThat(u.price()).isEqualByComparingTo("140.10");
-    assertThat(u.at()).isEqualTo(T0);
+    assertThat(u.at()).isEqualTo(Instant.parse("2026-10-01T14:29:59.500Z"));
 
     // Fresh tick, but the feed is down -> still the snapshot.
     feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
@@ -242,7 +248,7 @@ class DisplayMarksServiceTest {
     var m = only(service.marks(List.of("TSLA1260516C00200000")));
     scheduler.runAll();
 
-    verify(provider, never()).snapshotEquityPrice(anyString());
+    verify(provider, never()).snapshotEquityTrade(anyString());
     assertThat(m.underlying().ticker()).isEqualTo("TSLA1");
     assertThat(m.underlying().price()).isNull();
   }
@@ -260,5 +266,118 @@ class DisplayMarksServiceTest {
     service.marks(List.of(OCC));
     scheduler.runAll(); // must not throw
     assertThat(only(service.marks(List.of(OCC))).warming()).isTrue();
+  }
+
+  @Test
+  void underlying_snapshotAt_isTheTradesOwnTimestampNotFetchTime() {
+    OffsetDateTime hourOld = OffsetDateTime.ofInstant(T0.minusSeconds(3600), ZoneOffset.UTC);
+    when(provider.snapshotEquityTrade("NVDA"))
+        .thenReturn(Optional.of(new Tick("NVDA", new BigDecimal("139.00"), hourOld)));
+
+    service.marks(List.of(OCC));
+    scheduler.runAll();
+
+    var u = only(service.marks(List.of(OCC))).underlying();
+    assertThat(u.price()).isEqualByComparingTo("139.00");
+    assertThat(u.at()).isEqualTo(T0.minusSeconds(3600));
+  }
+
+  @Test
+  void budget_twentyFiveOccsTickingInsideOneSecond_issueAtMostTenRestCalls() {
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < 25; i++) {
+      occs.add("NVDA260516C00%03d000".formatted(100 + i));
+    }
+    service.marks(occs);
+    for (int tick = 0; tick < 4; tick++) { // 4 ticks x 25 OCCs, all within 999ms
+      scheduler.runAll();
+      clock.advance(Duration.ofMillis(250));
+    }
+    verify(provider, org.mockito.Mockito.atMost(10)).snapshotQuote(anyString());
+    // Shared budget: option and stock snapshots together stay within 10.
+    assertThat(
+            org.mockito.Mockito.mockingDetails(provider).getInvocations().stream()
+                .filter(
+                    inv ->
+                        inv.getMethod().getName().equals("snapshotQuote")
+                            || inv.getMethod().getName().equals("snapshotEquityTrade"))
+                .count())
+        .isEqualTo(10);
+
+    // Next second: the budget refills.
+    clock.advance(Duration.ofSeconds(1));
+    scheduler.runAll();
+    verify(provider, org.mockito.Mockito.atLeast(11)).snapshotQuote(anyString());
+  }
+
+  @Test
+  void budget_noPermit_skipsTheRestCallAndKeepsThePreviousCachedQuote() {
+    service.marks(List.of(OCC));
+    scheduler.tasks.get(0).run(); // OCC cached
+    clock.advance(Duration.ofSeconds(1)); // fresh budget
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < 10; i++) {
+      occs.add("NVDA260516C00%03d000".formatted(100 + i));
+    }
+    service.marks(occs);
+    for (int i = 1; i <= 10; i++) {
+      scheduler.tasks.get(i).run(); // 9 option + 1 stock snapshot: budget spent
+    }
+
+    scheduler.tasks.get(0).run(); // no permit left this second
+
+    verify(provider, times(1)).snapshotQuote(OCC);
+    var m = service.marks(List.of(OCC)).get(0);
+    assertThat(m.warming()).isFalse();
+    assertThat(m.quote().bid()).isEqualByComparingTo("2.90");
+  }
+
+  @Test
+  void budget_trailReuseConsumesNoPermit() {
+    when(provider.premiumPollActive(anyString())).thenReturn(true);
+    when(provider.lastPolledQuote(anyString())).thenReturn(Optional.of(quote(OCC, "4.10", "4.20")));
+    when(provider.snapshotEquityTrade(anyString())).thenReturn(Optional.empty());
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < 24; i++) {
+      occs.add("NVDA260516C00%03d000".formatted(100 + i));
+    }
+    service.marks(occs);
+    scheduler.runAll();
+    scheduler.runAll();
+    verify(provider, never()).snapshotQuote(anyString());
+    // Only the stock snapshot drew a permit; an uncached OCC can still poll this second.
+    when(provider.premiumPollActive(anyString())).thenReturn(false);
+    service.marks(List.of("AMD260516C00150000"));
+    scheduler.tasks.get(24).run();
+    verify(provider).snapshotQuote("AMD260516C00150000");
+  }
+
+  @Test
+  void schedulingFailure_rollsBackTheRegistrySlot() {
+    when(scheduler.executor.scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(Runnable.class),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.any()))
+        .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < 26; i++) {
+      occs.add("NVDA260516C00%03d000".formatted(100 + i));
+    }
+    var marks = service.marks(occs); // must not throw
+    // Nothing was admitted, so the 26th is not capped by 25 leaked slots.
+    assertThat(marks).allSatisfy(m -> assertThat(m.capped()).isFalse());
+  }
+
+  @Test
+  void anErrorInAPoll_releasesTheSlotSoTheOccCanReRegister() {
+    when(provider.snapshotQuote(anyString())).thenThrow(new LinkageError("bad class"));
+    service.marks(List.of(OCC));
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> scheduler.runAll())
+        .isInstanceOf(LinkageError.class);
+    verify(scheduler.futures.get(0)).cancel(false);
+    // Slot freed: the next request re-registers with a fresh task.
+    assertThat(only(service.marks(List.of(OCC))).warming()).isTrue();
+    assertThat(scheduler.tasks).hasSize(2);
   }
 }

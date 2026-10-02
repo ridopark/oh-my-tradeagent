@@ -357,6 +357,36 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   @Override
+  public Optional<Tick> snapshotEquityTrade(String ticker) {
+    // Same endpoint as snapshotEquityPrice, plus latestTrade.t. No fetch-time fallback (unlike
+    // parseTimestamp): a missing/garbled stamp must not make an old print look fresh.
+    try {
+      JsonNode body =
+          rest.get().uri("/v2/stocks/{s}/snapshot", ticker).retrieve().body(JsonNode.class);
+      if (body == null) {
+        return Optional.empty();
+      }
+      JsonNode trade = body.path("latestTrade");
+      JsonNode p = trade.path("p");
+      if (!p.isNumber() || !trade.path("t").isTextual()) {
+        return Optional.empty();
+      }
+      return Optional.of(
+          new Tick(ticker, p.decimalValue(), OffsetDateTime.parse(trade.path("t").asText())));
+    } catch (HttpStatusCodeException e) {
+      log.warn(
+          "Alpaca snapshotEquityTrade failed for {}: status={} body={}",
+          ticker,
+          e.getStatusCode().value(),
+          e.getResponseBodyAsString());
+      return Optional.empty();
+    } catch (RuntimeException e) {
+      log.warn("Alpaca snapshotEquityTrade failed for {}: {}", ticker, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     List<Consumer<Tick>> listeners =
         bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());

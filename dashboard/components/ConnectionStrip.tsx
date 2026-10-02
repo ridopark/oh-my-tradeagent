@@ -41,7 +41,7 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
   const clock = frameClock(s);
   const held = occs.map((o) => bidUsability(s?.frame?.marks.get(occKey(o)), clock));
 
-  const items: { label: string; light: Light; reason?: string | null }[] = [
+  const items: { label: string; light: Light; reason?: string | null; hint?: string }[] = [
     {
       label: "Server",
       light:
@@ -65,9 +65,10 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
       reason: conn?.data.broker?.reason,
     },
     {
-      label: "Discord",
+      label: "Discord watcher",
       light: partLight(conn?.data.discord, connAgeS, false, marketOpen),
       reason: conn?.data.discord?.reason,
+      hint: "watch loop alive — does not prove the Discord session can read messages",
     },
   ];
 
@@ -76,9 +77,9 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
       className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded border border-slate-800 bg-slate-900 px-3 py-2 text-xs"
       aria-label="Pipeline connection status"
     >
-      {items.map(({ label, light, reason }) => {
+      {items.map(({ label, light, reason, hint }) => {
         const age = light.ageS === null ? "" : ` · ${fmtAge(light.ageS)}`;
-        const title = `${label}: ${light.text}${age}${reason ? ` (${reason})` : ""}`;
+        const title = `${label}: ${light.text}${age}${reason ? ` (${reason})` : ""}${hint ? ` — ${hint}` : ""}`;
         return (
           <span key={label} className="inline-flex items-center gap-1.5" title={title}>
             <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${DOT[light.tone]}`} />

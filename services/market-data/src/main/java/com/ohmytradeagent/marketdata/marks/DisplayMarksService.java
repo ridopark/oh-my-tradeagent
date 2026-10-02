@@ -40,7 +40,11 @@ import org.springframework.stereotype.Component;
  *
  * <p>Underlying: the last SIP trade already received (passive, no subscription) when the equity
  * feed is connected and the trade is at most {@link #SIP_MAX_AGE} old; otherwise a stock snapshot
- * cached per ticker and refreshed at most once per {@link #SNAPSHOT_MIN_GAP}.
+ * cached per ticker and refreshed at most once per {@link #SNAPSHOT_MIN_GAP}, stamped with the
+ * trade's own time.
+ *
+ * <p>Every display REST call (option or stock snapshot) draws from one {@link
+ * DisplayRequestBudget}; without a permit the run is skipped and the cached value kept.
  */
 @Component
 public class DisplayMarksService {
@@ -66,6 +70,7 @@ public class DisplayMarksService {
 
   private final Object lock = new Object();
   private final DisplayInterestRegistry registry;
+  private final DisplayRequestBudget budget;
   private final Map<String, ScheduledFuture<?>> tasks = new HashMap<>(); // guarded by lock
   private final ConcurrentHashMap<String, Quote> quotes = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Underlying> snapshots = new ConcurrentHashMap<>();
@@ -95,6 +100,7 @@ public class DisplayMarksService {
     this.intervalMs = intervalMs > 0 ? intervalMs : 500L;
     this.scheduler = scheduler;
     this.registry = new DisplayInterestRegistry(clock);
+    this.budget = new DisplayRequestBudget(clock);
   }
 
   private static ScheduledExecutorService defaultScheduler() {
@@ -123,10 +129,16 @@ public class DisplayMarksService {
       synchronized (lock) {
         admission = registry.touch(occ);
         if (admission == Admission.NEW) {
-          tasks.put(
-              occ,
-              scheduler.scheduleAtFixedRate(
-                  () -> pollOnce(occ), 0L, intervalMs, TimeUnit.MILLISECONDS));
+          try {
+            tasks.put(
+                occ,
+                scheduler.scheduleAtFixedRate(
+                    () -> pollOnce(occ), 0L, intervalMs, TimeUnit.MILLISECONDS));
+          } catch (RuntimeException e) {
+            // e.g. RejectedExecutionException on a shutdown race: never keep a slot with no task.
+            registry.forget(occ);
+            log.warn("display marks scheduling failed for {}: {}", occ, e.getMessage());
+          }
         }
       }
       String ticker = tickerOf(occ);
@@ -152,15 +164,30 @@ public class DisplayMarksService {
           return;
         }
       }
+      // Reusing the trail poll's quote costs no permit; a REST snapshot needs one (else keep the
+      // previous cached quote).
       Optional<Quote> q =
           provider.premiumPollActive(occ)
               ? provider.lastPolledQuote(occ)
-              : provider.snapshotQuote(occ);
+              : budget.tryAcquire() ? provider.snapshotQuote(occ) : Optional.empty();
       q.ifPresent(v -> quotes.put(occ, v));
       refreshUnderlying(tickerOf(occ));
     } catch (RuntimeException e) {
       // Fail-soft: a thrown task would be silently descheduled by the executor.
       log.warn("display marks poll failed for {}: {}", occ, e.getMessage());
+    } catch (Error e) {
+      // The executor deschedules the task on rethrow; free the slot so it cannot leak, and let the
+      // next request re-register a fresh task.
+      log.error("display marks poll died for {}; releasing its slot", occ, e);
+      synchronized (lock) {
+        registry.forget(occ);
+        ScheduledFuture<?> task = tasks.remove(occ);
+        if (task != null) {
+          task.cancel(false);
+        }
+      }
+      quotes.remove(occ);
+      throw e;
     }
   }
 
@@ -185,16 +212,20 @@ public class DisplayMarksService {
     snapshotFetchedAt.compute(
         ticker,
         (k, prev) -> {
-          if (prev == null || !now.isBefore(prev.plus(SNAPSHOT_MIN_GAP))) {
+          if ((prev == null || !now.isBefore(prev.plus(SNAPSHOT_MIN_GAP))) && budget.tryAcquire()) {
             due[0] = true;
             return now;
           }
           return prev;
         });
     if (due[0]) {
+      // Stamp with the trade's own time, so an old print never reads as fresh.
       provider
-          .snapshotEquityPrice(ticker)
-          .ifPresent(p -> snapshots.put(ticker, new Underlying(ticker, p, now)));
+          .snapshotEquityTrade(ticker)
+          .ifPresent(
+              t ->
+                  snapshots.put(
+                      ticker, new Underlying(ticker, t.premium(), t.retrievedAt().toInstant())));
     }
   }
 

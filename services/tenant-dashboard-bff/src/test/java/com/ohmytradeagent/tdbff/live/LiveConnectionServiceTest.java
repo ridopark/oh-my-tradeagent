@@ -109,8 +109,11 @@ class LiveConnectionServiceTest {
         .containsEntry("status", "ok")
         .containsEntry("age_s", 1.5)
         .containsEntry("connected", true);
-    // -1 = no tick yet: connected, age unknown.
-    assertThat(mdPart(body, "option")).containsEntry("status", "ok").containsEntry("age_s", null);
+    // -1 = no tick yet: connected, but nothing proves data flows -> unknown, never green.
+    assertThat(mdPart(body, "option"))
+        .containsEntry("status", "unknown")
+        .containsEntry("age_s", null)
+        .containsEntry("reason", "connected, no ticks yet");
     assertThat(part(body, "broker"))
         .containsEntry("status", "ok")
         .containsEntry("age_s", 4.0)
@@ -133,6 +136,67 @@ class LiveConnectionServiceTest {
     assertThat(mdPart(body, "equity")).containsEntry("status", "unknown");
     assertThat(mdPart(body, "option")).containsEntry("status", "unknown");
     assertThat(mdPart(body, "option").get("reason")).isNotNull();
+  }
+
+  private static Map<String, Object> equityPart(Boolean connected, Long ageMs) {
+    Map<String, Object> f = new HashMap<>();
+    f.put("connected", connected);
+    f.put("lastTickAgeMs", ageMs);
+    Map<String, Object> fh = new HashMap<>();
+    fh.put("status", "ok");
+    fh.put("equity", f);
+    fh.put("option", f);
+    return (Map<String, Object>) LiveConnectionService.feedParts(fh).get("equity");
+  }
+
+  @Test
+  void feedMapping_gradesByTickAge_notConnectionAlone() {
+    // Lazily-opened stock socket never opened (prod shape): idle, not down.
+    assertThat(equityPart(false, -1L))
+        .containsEntry("status", "unknown")
+        .containsEntry("age_s", null)
+        .containsEntry("reason", "idle (no stream subscribers)");
+    assertThat(equityPart(false, null))
+        .containsEntry("status", "unknown")
+        .containsEntry("reason", "idle (no stream subscribers)");
+    assertThat(equityPart(true, 30_000L))
+        .containsEntry("status", "ok")
+        .containsEntry("age_s", 30.0);
+    assertThat(equityPart(true, 30_001L))
+        .containsEntry("status", "stale")
+        .containsEntry("age_s", 30.001);
+    assertThat(equityPart(true, -1L))
+        .containsEntry("status", "unknown")
+        .containsEntry("age_s", null)
+        .containsEntry("reason", "connected, no ticks yet");
+    assertThat(equityPart(false, 5_000L))
+        .containsEntry("status", "down")
+        .containsEntry("age_s", 5.0);
+  }
+
+  @Test
+  void podWideConfirmation_withSeveralTenantRows_isNeverGreen() {
+    // subscription_confirmed is pod-wide: with another tenant on the pod it cannot prove ours.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener(row("other", true, true, 1.0), row("acme", true, true, 2.0)),
+                "acme",
+                "alpaca-live"))
+        .containsEntry("status", "stale")
+        .containsEntry("reason", "subscription confirmation is pod-wide")
+        .containsEntry("age_s", 2.0);
+    // Exactly one tenant row: the pod-wide signal is this tenant's own.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener(row("acme", true, true, 2.0)), "acme", "alpaca-live"))
+        .containsEntry("status", "ok");
+    // Several rows, ours disconnected: still down.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener(row("other", true, true, 1.0), row("acme", false, true, null)),
+                "acme",
+                "alpaca-live"))
+        .containsEntry("status", "down");
   }
 
   @Test

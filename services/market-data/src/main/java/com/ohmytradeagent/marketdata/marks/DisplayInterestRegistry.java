@@ -43,6 +43,11 @@ final class DisplayInterestRegistry {
     return Admission.NEW;
   }
 
+  /** Unconditionally drops {@code occ} (rollback / failed task), freeing its slot. */
+  void forget(String occ) {
+    lastRequested.remove(occ);
+  }
+
   /** Drops {@code occ} when it has not been requested for longer than the TTL; true if gone. */
   boolean expireIfIdle(String occ) {
     Instant last = lastRequested.get(occ);

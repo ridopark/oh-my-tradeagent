@@ -38,6 +38,15 @@ public interface MarketDataProvider {
   Optional<BigDecimal> snapshotEquityPrice(String ticker);
 
   /**
+   * Like {@link #snapshotEquityPrice} but returns the last trade as a {@link Tick} stamped with the
+   * TRADE's own time (not fetch time), so a display can tell a stale print from a fresh one. Empty
+   * when unavailable or the trade carries no parseable timestamp. Display-only. Default empty.
+   */
+  default Optional<Tick> snapshotEquityTrade(String ticker) {
+    return Optional.empty();
+  }
+
+  /**
    * One-shot REST snapshot of {@code occSymbol}'s implied volatility + greeks (#783), or {@link
    * Optional#empty()} when the provider has none. Display/recording-only — never drives a trigger.
    * Default empty so providers without a greeks surface (in-memory test fan-out) need no change.

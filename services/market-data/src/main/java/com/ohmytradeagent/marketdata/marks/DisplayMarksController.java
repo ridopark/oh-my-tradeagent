@@ -8,6 +8,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -24,6 +25,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class DisplayMarksController {
 
+  /** Compact OCC: root (1-6 alnum), yymmdd, C|P, 8-digit strike x1000. */
+  private static final Pattern OCC = Pattern.compile("[A-Z0-9]{1,6}\\d{6}[CP]\\d{8}");
+
   private final DisplayMarksService service;
 
   public DisplayMarksController(DisplayMarksService service) {
@@ -34,8 +38,12 @@ public class DisplayMarksController {
   public Map<String, Object> marks(@RequestParam("occ") List<String> occs) {
     Set<String> compact = new LinkedHashSet<>();
     for (String occ : occs) {
+      if (compact.size() >= DisplayInterestRegistry.CAP) {
+        break;
+      }
       String c = occ.replaceAll("\\s", "");
-      if (!c.isEmpty()) {
+      // Junk never reaches the registry (it would occupy display slots); dropped from the reply.
+      if (OCC.matcher(c).matches()) {
         compact.add(c);
       }
     }

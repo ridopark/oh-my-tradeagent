@@ -55,6 +55,24 @@ test("older than 10s is stale; a held frame keeps ageing on the client clock", (
   assert.equal(bidUsability(mark(), clock({ elapsedMs: 9000 })).reason, "stale");
 });
 
+test("a malformed timestamp is not usable (never NaN-aged live)", () => {
+  const u = bidUsability(mark({ quote_at: "garbage" }), clock());
+  assert.deepEqual(u, { usable: false, reason: "no-quote", ageS: null });
+  const v = underlyingUsability(mark({ underlying: { price: 41.12, at: "garbage" } }), clock());
+  assert.deepEqual(v, { usable: false, reason: "no-quote", ageS: null });
+});
+
+test("a null timestamp with a price is no-quote, not aged from the epoch", () => {
+  assert.deepEqual(bidUsability(mark({ quote_at: null }), clock()), { usable: false, reason: "no-quote", ageS: null });
+  const v = underlyingUsability(mark({ underlying: { price: 41.12, at: null } }), clock());
+  assert.deepEqual(v, { usable: false, reason: "no-quote", ageS: null });
+});
+
+test("a future-dated quote (clock skew) clamps to age 0, never negative", () => {
+  const u = bidUsability(mark({ quote_at: "2026-10-01T15:00:15Z" }), clock()); // 5s ahead of now
+  assert.deepEqual(u, { usable: true, value: 2.5, ageS: 0 });
+});
+
 test("three consecutive failed polls make every mark unusable", () => {
   assert.equal(bidUsability(mark(), clock({ failures: 2 })).usable, true);
   assert.equal(bidUsability(mark(), clock({ failures: 3 })).reason, "server");

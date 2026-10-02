@@ -122,6 +122,42 @@ class AlpacaMarketDataTest {
     assertThat(q).isEmpty();
   }
 
+  @Test
+  void snapshotEquityTrade_carriesTheTradesOwnTimestamp() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"latestTrade\":{\"p\":140.10,\"t\":\"2026-10-01T13:30:00.25Z\"}}"));
+
+    Optional<Tick> t = provider.snapshotEquityTrade("NVDA");
+
+    assertThat(t).isPresent();
+    assertThat(t.get().occSymbol()).isEqualTo("NVDA");
+    assertThat(t.get().premium()).isEqualByComparingTo("140.10");
+    assertThat(t.get().retrievedAt().toInstant())
+        .isEqualTo(Instant.parse("2026-10-01T13:30:00.25Z"));
+    assertThat(server.takeRequest().getPath()).isEqualTo("/v2/stocks/NVDA/snapshot");
+  }
+
+  @Test
+  void snapshotEquityTrade_missingOrBadTimestamp_returnsEmptyRatherThanAFreshStamp() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"latestTrade\":{\"p\":140.10}}"));
+    assertThat(provider.snapshotEquityTrade("NVDA")).isEmpty();
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"latestTrade\":{\"p\":140.10,\"t\":\"garbage\"}}"));
+    assertThat(provider.snapshotEquityTrade("NVDA")).isEmpty();
+    server.enqueue(new MockResponse().setResponseCode(503).setBody("{}"));
+    assertThat(provider.snapshotEquityTrade("NVDA")).isEmpty();
+  }
+
   // --- #783 snapshotGreeks: entry-time IV + greeks for the trade-context recorder ---
 
   @Test
