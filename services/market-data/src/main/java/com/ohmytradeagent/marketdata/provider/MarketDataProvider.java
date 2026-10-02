@@ -78,4 +78,29 @@ public interface MarketDataProvider {
   default java.util.Map<String, PremiumFeedStatus> premiumFeedStatus() {
     return java.util.Map.of();
   }
+
+  /**
+   * True when a trail premium poll is running for {@code occSymbol} (compact or space-padded form).
+   * Read-only: lets the display-marks path reuse that poll's quote instead of polling a second
+   * time. Default false (providers that do not poll).
+   */
+  default boolean premiumPollActive(String occSymbol) {
+    return false;
+  }
+
+  /**
+   * The quote from the last successful trail premium poll for {@code occSymbol} (compact or
+   * space-padded form), or empty when none has landed. Read-only; never triggers a request.
+   */
+  default Optional<Quote> lastPolledQuote(String occSymbol) {
+    return Optional.empty();
+  }
+
+  /**
+   * The last stock trade already received on the equity stream for {@code ticker}, or empty.
+   * Passive: never subscribes, never changes stream dispatch. Display-only.
+   */
+  default Optional<Tick> lastEquityTick(String ticker) {
+    return Optional.empty();
+  }
 }
