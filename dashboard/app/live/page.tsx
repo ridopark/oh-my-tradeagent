@@ -545,12 +545,11 @@ export default async function LivePage() {
   // LiveRefresh re-renders this whole page every 15s. Neither adds a server-side read to this
   // render — the new BFF endpoints are only ever polled from the client, so a BFF that predates
   // them degrades the strip and cells to unknown/stale and can never reach LiveUnavailable.
-  const renderedAt = new Date().toISOString();
   const heldOccs = portfolio.open_positions.map((p) => String(p.contract_symbol ?? ""));
 
   return (
     <LiveRefresh>
-    <LiveMarksProvider renderedAt={renderedAt}>
+    <LiveMarksProvider>
     <TrailLivenessProvider>
       <FloorBreachProvider>
       <Nav tenantId={session?.tenantId} />
@@ -569,9 +568,11 @@ export default async function LivePage() {
           that cannot place orders at all should not be told so in an inset card. */}
       <LiveActivationBanner promotion={livePromotion} />
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
-        <ConnectionStrip occs={heldOccs} />
         <div>
-          <h1 className="mb-1 text-xl font-semibold text-slate-100">Live</h1>
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-1">
+            <h1 className="text-xl font-semibold text-slate-100">Live</h1>
+            <ConnectionStrip occs={heldOccs} />
+          </div>
           <p className="text-sm text-slate-400">
             Account equity over time, your open holdings, and recent activity. The account total is an
             account-level (shared) value, not your tenant&apos;s slice.

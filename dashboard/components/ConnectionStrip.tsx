@@ -27,9 +27,10 @@ const TEXT: Record<Tone, string> = {
 
 /**
  * The /live pipeline strip (PLAN-2026-10-01 P4): Server (dashboard↔BFF, from the 1s marks poll),
- * Stock stream, Option prices, Broker (fill stream) and Discord watcher — each a coloured light with
- * an age. Anything the page cannot vouch for reads "unknown", never green; outside regular hours
- * the two market feeds read grey "market closed" rather than red.
+ * Stock stream, Option prices, Broker (fill stream) and Discord watcher — each a coloured light.
+ * Compact: a green light shows only its name; anything else adds its state ("Broker: stale"). The
+ * full state, age and reason are in the tooltip. Anything the page cannot vouch for reads "unknown",
+ * never green; outside regular hours the two market feeds read grey "closed" rather than red.
  */
 export function ConnectionStrip({ occs }: { occs: string[] }) {
   const s = useLiveMarks();
@@ -50,12 +51,12 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
           : serverLight(s?.lastOkMs ?? null, nowMs, s?.failures ?? 0),
     },
     {
-      label: "Stock stream",
+      label: "Stock",
       light: partLight(conn?.data.market_data?.equity, connAgeS, true, marketOpen),
       reason: conn?.data.market_data?.equity?.reason,
     },
     {
-      label: "Option prices",
+      label: "Options",
       light: optionLight(held, conn?.data.market_data?.option, connAgeS, marketOpen),
       reason: conn?.data.market_data?.option?.reason,
     },
@@ -65,7 +66,7 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
       reason: conn?.data.broker?.reason,
     },
     {
-      label: "Discord watcher",
+      label: "Discord",
       light: partLight(conn?.data.discord, connAgeS, false, marketOpen),
       reason: conn?.data.discord?.reason,
       hint: "watch loop alive — does not prove the Discord session can read messages",
@@ -74,19 +75,19 @@ export function ConnectionStrip({ occs }: { occs: string[] }) {
 
   return (
     <div
-      className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded border border-slate-800 bg-slate-900 px-3 py-2 text-xs"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
       aria-label="Pipeline connection status"
     >
       {items.map(({ label, light, reason, hint }) => {
         const age = light.ageS === null ? "" : ` · ${fmtAge(light.ageS)}`;
         const title = `${label}: ${light.text}${age}${reason ? ` (${reason})` : ""}${hint ? ` — ${hint}` : ""}`;
+        const state = light.text === "market closed" ? "closed" : light.text;
         return (
-          <span key={label} className="inline-flex items-center gap-1.5" title={title}>
+          <span key={label} className="inline-flex items-center gap-1.5 whitespace-nowrap" title={title}>
             <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${DOT[light.tone]}`} />
-            <span className="text-slate-400">{label}</span>
-            <span className={`whitespace-nowrap ${TEXT[light.tone]}`}>
-              {light.text}
-              {age}
+            <span className="text-slate-400">
+              {label}
+              {light.tone !== "green" && <span className={TEXT[light.tone]}>: {state}</span>}
             </span>
           </span>
         );
