@@ -49,6 +49,11 @@ spec:
         - name: sidecar
           image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
           imagePullPolicy: Always
+          ports:
+            # Read-only GET /healthz (heartbeat age) for the BFF's /live Discord light. Served only
+            # because HEALTHZ_PORT is set below; the chat/signals mirrors (same image) leave it off.
+            - containerPort: 8090
+              name: http
           env:
             # Phase 5b.E: shared Temporal at temporal/temporal-frontend, Temporal-level ns `copytrade`.
             - name: TEMPORAL_TARGET
@@ -57,6 +62,11 @@ spec:
               value: copytrade
             - name: STATE_DIR
               value: /app/state
+            # live-realtime-holdings P2: enables the sidecar's daemon-thread /healthz server
+            # (ohmytradeagent_sidecar/healthz.py). It only stats the heartbeat file; a bind failure
+            # is logged, never raised, so it cannot affect the watch loop.
+            - name: HEALTHZ_PORT
+              value: "8090"
             # Channel + tenant + strategy come from the `sidecar-config` Secret. Env-var
             # names match exactly what services/signal-source-discord/ohmytradeagent_sidecar/
             # main.py reads (TENANT_ID / STRATEGY_ID / DISCORD_CHANNEL_URL). Secret is
@@ -156,3 +166,22 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: signal-source-discord-state
+---
+# live-realtime-holdings P2: lets tenant-dashboard-bff read GET /healthz on the watcher above
+# (default BFF config: signal-source-discord.base-url=http://signal-source-discord:8090). Selects
+# ONLY app=signal-source-discord — the discord-chat-mirror / discord-signals-mirror pods carry their
+# own app labels. No NetworkPolicy selects these pods, so no allow rule is needed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: signal-source-discord
+  namespace: copytrade
+  labels:
+    app: signal-source-discord
+spec:
+  selector:
+    app: signal-source-discord
+  ports:
+    - port: 8090
+      targetPort: http
+      name: http

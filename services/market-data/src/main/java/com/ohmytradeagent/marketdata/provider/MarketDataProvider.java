@@ -38,6 +38,15 @@ public interface MarketDataProvider {
   Optional<BigDecimal> snapshotEquityPrice(String ticker);
 
   /**
+   * Like {@link #snapshotEquityPrice} but returns the last trade as a {@link Tick} stamped with the
+   * TRADE's own time (not fetch time), so a display can tell a stale print from a fresh one. Empty
+   * when unavailable or the trade carries no parseable timestamp. Display-only. Default empty.
+   */
+  default Optional<Tick> snapshotEquityTrade(String ticker) {
+    return Optional.empty();
+  }
+
+  /**
    * One-shot REST snapshot of {@code occSymbol}'s implied volatility + greeks (#783), or {@link
    * Optional#empty()} when the provider has none. Display/recording-only — never drives a trigger.
    * Default empty so providers without a greeks surface (in-memory test fan-out) need no change.
@@ -77,5 +86,30 @@ public interface MarketDataProvider {
    */
   default java.util.Map<String, PremiumFeedStatus> premiumFeedStatus() {
     return java.util.Map.of();
+  }
+
+  /**
+   * True when a trail premium poll is running for {@code occSymbol} (compact or space-padded form).
+   * Read-only: lets the display-marks path reuse that poll's quote instead of polling a second
+   * time. Default false (providers that do not poll).
+   */
+  default boolean premiumPollActive(String occSymbol) {
+    return false;
+  }
+
+  /**
+   * The quote from the last successful trail premium poll for {@code occSymbol} (compact or
+   * space-padded form), or empty when none has landed. Read-only; never triggers a request.
+   */
+  default Optional<Quote> lastPolledQuote(String occSymbol) {
+    return Optional.empty();
+  }
+
+  /**
+   * The last stock trade already received on the equity stream for {@code ticker}, or empty.
+   * Passive: never subscribes, never changes stream dispatch. Display-only.
+   */
+  default Optional<Tick> lastEquityTick(String ticker) {
+    return Optional.empty();
   }
 }

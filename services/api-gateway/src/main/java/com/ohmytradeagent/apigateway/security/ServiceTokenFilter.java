@@ -52,7 +52,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
         + " or ${operator.strategy-enable.enabled:false}"
         + " or ${operator.tenant-delete.enabled:false}"
         + " or ${copytrade.fanout.enabled:false}"
-        + " or ${watchlist.fanout.enabled:false}")
+        + " or ${watchlist.fanout.enabled:false}"
+        + " or ${live.fill-listener-status.enabled:false}")
 public class ServiceTokenFilter extends OncePerRequestFilter {
 
   private static final String BEARER_PREFIX = "Bearer ";
@@ -68,6 +69,9 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // copytrade fan-out route. Same SERVICE-token bearer gate; watchlist.fanout.enabled is in the
   // @ConditionalOnExpression above so turning ON only that flag still brings up this gate.
   static final String INTERNAL_WATCHLIST_FANOUT_ROUTE_PREFIX = "/internal/watchlist-fanout-targets";
+  // live-realtime-holdings: the read-only fill-listener status route the tenant-dashboard-bff calls
+  // (SERVICE caller). live.fill-listener-status.enabled is in the @ConditionalOnExpression above.
+  static final String INTERNAL_LIVE_STATUS_ROUTE_PREFIX = "/internal/live/fill-listener-status";
   // The application.yml fallback used for local dev. Accepting it under prod would silently trust a
   // value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
@@ -96,7 +100,8 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
         || !(path.startsWith(ROUTE_PREFIX)
             || path.startsWith(ADMIN_ROUTE_PREFIX)
             || path.startsWith(INTERNAL_FANOUT_ROUTE_PREFIX)
-            || path.startsWith(INTERNAL_WATCHLIST_FANOUT_ROUTE_PREFIX));
+            || path.startsWith(INTERNAL_WATCHLIST_FANOUT_ROUTE_PREFIX)
+            || path.startsWith(INTERNAL_LIVE_STATUS_ROUTE_PREFIX));
   }
 
   @Override

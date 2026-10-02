@@ -5,6 +5,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioService;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -18,7 +19,7 @@ import org.springframework.test.web.servlet.MockMvc;
 /** Guards the shared no-`dev`-fallback contract at the web layer for {@code /api/portfolio}. */
 @WebMvcTest(PortfolioController.class)
 @AutoConfigureMockMvc(addFilters = false)
-@Import(TenantContext.class)
+@Import({TenantContext.class, PortfolioCache.class})
 class PortfolioControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;

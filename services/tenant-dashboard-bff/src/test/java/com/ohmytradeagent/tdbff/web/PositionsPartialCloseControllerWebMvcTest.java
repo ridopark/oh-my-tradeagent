@@ -45,6 +45,8 @@ class PositionsPartialCloseControllerWebMvcTest {
 
   @Autowired private MockMvc mvc;
   @MockitoBean private WorkflowClient client;
+  @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioCache portfolioCache;
+  @MockitoBean private com.ohmytradeagent.tdbff.live.OpenOccCache openOccCache;
 
   // PositionsController also depends on PositionsReader for its GET; mock it so the context loads.
   @MockitoBean private com.ohmytradeagent.tdbff.positions.PositionsReader reader;

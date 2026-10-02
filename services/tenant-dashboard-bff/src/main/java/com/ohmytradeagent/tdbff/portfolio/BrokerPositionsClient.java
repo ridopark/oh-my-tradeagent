@@ -158,7 +158,7 @@ public class BrokerPositionsClient {
   }
 
   /** Strip ALL whitespace so a padded OCC and a compact OCC for the same contract collide. */
-  static String compactOcc(String occ) {
+  public static String compactOcc(String occ) {
     if (occ == null) {
       return null;
     }

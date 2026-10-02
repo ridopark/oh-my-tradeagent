@@ -48,6 +48,8 @@ class ManualEntryTenantAllowlistTest {
 
   @Autowired private MockMvc mvc;
   @MockitoBean private WorkflowClient client;
+  @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioCache portfolioCache;
+  @MockitoBean private com.ohmytradeagent.tdbff.live.OpenOccCache openOccCache;
   @MockitoBean private MarketDataQuoteClient quotes;
   @MockitoBean private StrategyConfigReader strategyConfigs;
 

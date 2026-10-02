@@ -220,6 +220,17 @@ positions:
   arm-trail:
     write-enabled: ${POSITIONS_ARM_TRAIL_WRITE_ENABLED:true}
 
+# PLAN-2026-10-01 P3 /api/live/connection status sources (read-only probes, never order paths).
+# Broker fill listener: api-gateway GET /internal/live/fill-listener-status?tenant= (which reads exec's
+# /status/fill-listener on the pod serving the tenant's broker_target — the BFF never reaches exec).
+# The token is api-gateway's inbound API_GATEWAY_SHARED_TOKEN; blank → broker part "unknown".
+api-gateway:
+  base-url: ${API_GATEWAY_BASE_URL:http://api-gateway:8082}
+  service-token: ${API_GATEWAY_SHARED_TOKEN:}
+# Discord sidecar: GET /healthz -> {"heartbeat_age_s": num|null}.
+signal-source-discord:
+  base-url: ${SIGNAL_SOURCE_DISCORD_BASE_URL:http://signal-source-discord:8090}
+
 management:
   endpoints:
     web:

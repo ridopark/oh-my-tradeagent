@@ -107,6 +107,13 @@ public class AlpacaMarketData implements MarketDataProvider {
   // while a GENUINE sustained fast move (two agreeing prints) is not false-rejected. Feed-layer
   // only: this drops at the source; it does not touch evaluation/EntryStateMachine.
   private final ConcurrentHashMap<String, BigDecimal> lastAcceptedPrice = new ConcurrentHashMap<>();
+
+  /**
+   * Last accepted stock trade per ticker, recorded passively where the stream already dispatches.
+   * Read by the display-marks path only ({@link #lastEquityTick}); never consulted by dispatch.
+   */
+  private final ConcurrentHashMap<String, Tick> lastEquityTicks = new ConcurrentHashMap<>();
+
   private final ConcurrentHashMap<String, BigDecimal> pendingCandidate = new ConcurrentHashMap<>();
   private static final BigDecimal MAX_DEVIATION_PCT = new BigDecimal("0.02");
 
@@ -350,6 +357,36 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   @Override
+  public Optional<Tick> snapshotEquityTrade(String ticker) {
+    // Same endpoint as snapshotEquityPrice, plus latestTrade.t. No fetch-time fallback (unlike
+    // parseTimestamp): a missing/garbled stamp must not make an old print look fresh.
+    try {
+      JsonNode body =
+          rest.get().uri("/v2/stocks/{s}/snapshot", ticker).retrieve().body(JsonNode.class);
+      if (body == null) {
+        return Optional.empty();
+      }
+      JsonNode trade = body.path("latestTrade");
+      JsonNode p = trade.path("p");
+      if (!p.isNumber() || !trade.path("t").isTextual()) {
+        return Optional.empty();
+      }
+      return Optional.of(
+          new Tick(ticker, p.decimalValue(), OffsetDateTime.parse(trade.path("t").asText())));
+    } catch (HttpStatusCodeException e) {
+      log.warn(
+          "Alpaca snapshotEquityTrade failed for {}: status={} body={}",
+          ticker,
+          e.getStatusCode().value(),
+          e.getResponseBodyAsString());
+      return Optional.empty();
+    } catch (RuntimeException e) {
+      log.warn("Alpaca snapshotEquityTrade failed for {}: {}", ticker, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  @Override
   public Subscription subscribePremium(String occSymbol, Consumer<Tick> onTick) {
     List<Consumer<Tick>> listeners =
         bySymbol.computeIfAbsent(occSymbol, k -> new CopyOnWriteArrayList<>());
@@ -440,6 +477,7 @@ public class AlpacaMarketData implements MarketDataProvider {
         continue;
       }
       feedHealth.recordTick(FeedHealth.Feed.EQUITY);
+      lastEquityTicks.put(tick.occSymbol(), tick);
       List<Consumer<Tick>> listeners = byTicker.get(tick.occSymbol());
       if (listeners == null) {
         continue;
@@ -890,7 +928,9 @@ public class AlpacaMarketData implements MarketDataProvider {
       // Stamped for ANY successful snapshot, on the same reasoning as feedHealth above: a quote the
       // guard goes on to reject still proves the feed is alive. This is the stamp /live reads, not
       // the emit stamp — see PremiumFeedStatus for why a tick clock cannot answer the question.
-      premiumLiveness.computeIfAbsent(occSymbol, k -> new Liveness()).recordPollOk();
+      Liveness liveness = premiumLiveness.computeIfAbsent(occSymbol, k -> new Liveness());
+      liveness.recordPollOk();
+      liveness.lastQuote = q;
       if (!acceptPremiumQuote(occSymbol, q)) {
         return;
       }
@@ -1047,6 +1087,27 @@ public class AlpacaMarketData implements MarketDataProvider {
     return out;
   }
 
+  @Override
+  public boolean premiumPollActive(String occSymbol) {
+    String compact = occSymbol.replace(" ", "");
+    return premiumPolls.keySet().stream().anyMatch(k -> k.replace(" ", "").equals(compact));
+  }
+
+  @Override
+  public Optional<Quote> lastPolledQuote(String occSymbol) {
+    String compact = occSymbol.replace(" ", "");
+    return premiumLiveness.entrySet().stream()
+        .filter(e -> e.getKey().replace(" ", "").equals(compact))
+        .map(e -> e.getValue().lastQuote)
+        .filter(java.util.Objects::nonNull)
+        .findFirst();
+  }
+
+  @Override
+  public Optional<Tick> lastEquityTick(String ticker) {
+    return Optional.ofNullable(lastEquityTicks.get(ticker));
+  }
+
   /**
    * Mutable per-OCC liveness counters. Fields are volatile rather than atomic: the poll for one OCC
    * is single-threaded (one scheduled task per contract), so there is no increment race to lose —
@@ -1056,6 +1117,8 @@ public class AlpacaMarketData implements MarketDataProvider {
     private volatile long pollOkCount;
     private volatile Instant lastPollOkAt;
     private volatile Instant lastEmitAt;
+    // Display-marks reuse (lastPolledQuote): the quote of the last successful poll. Read-only.
+    private volatile Quote lastQuote;
 
     void recordPollOk() {
       pollOkCount++;

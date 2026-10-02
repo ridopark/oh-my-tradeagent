@@ -7,7 +7,9 @@ import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.entries.OccParser;
 import com.ohmytradeagent.tdbff.entries.OccParser.InvalidOccException;
 import com.ohmytradeagent.tdbff.entries.OccParser.ParsedOcc;
+import com.ohmytradeagent.tdbff.live.OpenOccCache;
 import com.ohmytradeagent.tdbff.platform.StrategyConfigReader;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.OptionQuote;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
@@ -23,6 +25,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +94,31 @@ public class ManualEntryController {
   private final String orchestratorTaskQueue;
 
   /**
+   * /live read caches, invalidated when an entry starts and again when it reports FILLED (the
+   * moment the new position actually exists), so the new row and its marks show on the next poll. A
+   * map removal that cannot throw — it never changes the entry's outcome or response.
+   */
+  private final PortfolioCache portfolioCache;
+
+  /**
+   * Signal workflows whose FILLED status already invalidated the caches. The status GET is a poll,
+   * so without this every repeat call on a filled entry (a second tab, a retry) would flush the
+   * tenant's portfolio cache and send the next read back to the broker. Bounded: the oldest ids
+   * drop out, which at worst costs one extra invalidation.
+   */
+  private final Set<String> filledInvalidated =
+      Collections.synchronizedSet(
+          Collections.newSetFromMap(
+              new LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                  return size() > 1024;
+                }
+              }));
+
+  private final OpenOccCache openOccCache;
+
+  /**
    * Tenants allowed to use manual entry, on top of the dark flag. EMPTY (the default) means the
    * flag alone governs — i.e. every tenant.
    *
@@ -115,6 +143,8 @@ public class ManualEntryController {
       TenantContext ctx,
       MarketDataQuoteClient quotes,
       StrategyConfigReader strategyConfigs,
+      PortfolioCache portfolioCache,
+      OpenOccCache openOccCache,
       @Value("${temporal.orchestrator-task-queue:orchestrator-core}") String orchestratorTaskQueue,
       @Value("${entries.manual.write-enabled:false}") boolean manualEntryWriteEnabled,
       @Value("${entries.manual.allowed-tenants:}") String allowedTenants) {
@@ -122,6 +152,8 @@ public class ManualEntryController {
     this.ctx = ctx;
     this.quotes = quotes;
     this.strategyConfigs = strategyConfigs;
+    this.portfolioCache = portfolioCache;
+    this.openOccCache = openOccCache;
     this.orchestratorTaskQueue = orchestratorTaskQueue;
     this.manualEntryWriteEnabled = manualEntryWriteEnabled;
     this.allowedTenants =
@@ -282,6 +314,9 @@ public class ManualEntryController {
       return ResponseEntity.status(HttpStatus.CONFLICT).body(dup);
     }
 
+    portfolioCache.invalidate(tenant);
+    openOccCache.invalidate(tenant);
+
     log.info(
         "manual entry started tenant={} strategy_id={} occ={} qty={} ask={} operator={}",
         tenant,
@@ -324,6 +359,11 @@ public class ManualEntryController {
 
     CopytradeEntryStatus status =
         client.newUntypedWorkflowStub(workflowId).query("entryStatus", CopytradeEntryStatus.class);
+    if (status.getState() == CopytradeEntryStatus.State.FILLED
+        && filledInvalidated.add(workflowId)) {
+      portfolioCache.invalidate(tenant);
+      openOccCache.invalidate(tenant);
+    }
 
     Map<String, Object> resp = new LinkedHashMap<>();
     resp.put("signal_id", signalId);

@@ -10,6 +10,7 @@ import pathlib
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
+from . import healthz
 from .emitter import TemporalDeriskEmitter, TemporalEmitter, TemporalWatchlistEmitter
 from .runtime import required, setup_logging
 from .watcher import Watcher
@@ -124,6 +125,11 @@ async def _amain() -> None:
         watchlist_author = os.getenv("WATCHLIST_AUTHOR", "TradingTheTrend")
 
     state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Optional read-only GET /healthz (heartbeat age) on a daemon thread, only when HEALTHZ_PORT is
+    # set. Fire-and-forget: never awaited, never raises (bind failure is a logged warning), and it
+    # only stats the heartbeat file the signal watcher already touches — the watch loop is untouched.
+    healthz.start_from_env(state_dir / "heartbeat", log)
 
     # Fail fast on a missing Discord session BEFORE dialing Temporal, so we never
     # leave a connected emitter unclosed (its close() lives in the finally below).

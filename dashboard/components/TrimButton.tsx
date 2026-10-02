@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePanelOpen } from "./LiveRefresh";
 
 // Client island for the per-position "Trim" button on /live — the reduce-only sibling of
 // ForceExitButton. Same interaction model (inline confirm, no modal component exists in the repo)
@@ -73,6 +74,7 @@ export function TrimButton({
     qty: number;
   } | null>(null);
   const [result, setResult] = useState<TrimActionResult | null>(null);
+  usePanelOpen(picking || confirming !== null || submitting);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = () => {

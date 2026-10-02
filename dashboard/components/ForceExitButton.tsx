@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePanelOpen } from "./LiveRefresh";
 
 // Client island for the per-position "Force exit" button on /live. Modeled on AccountKillSwitchReset
 // (useTransition + a server-action prop), but this is a per-ROW real-money control, so it uses an
@@ -43,6 +44,7 @@ export function ForceExitButton({
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<ForceExitActionResult | null>(null);
+  usePanelOpen(confirming || submitting);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearTimer = () => {
