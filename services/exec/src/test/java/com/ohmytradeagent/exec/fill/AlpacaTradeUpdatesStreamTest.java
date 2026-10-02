@@ -1559,7 +1559,7 @@ class AlpacaTradeUpdatesStreamTest {
     stream.start();
     awaitHandshake();
     assertThat(stream.socketStatus())
-        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true));
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true, false));
 
     // Stop the server: the socket closes and every reconnect attempt is refused, so the runner's
     // current-socket handle stays null.
@@ -1570,7 +1570,7 @@ class AlpacaTradeUpdatesStreamTest {
       Thread.sleep(25L);
     }
     assertThat(stream.socketStatus())
-        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", false));
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", false, false));
   }
 
   @Test
@@ -1589,8 +1589,113 @@ class AlpacaTradeUpdatesStreamTest {
 
     assertThat(stream.socketStatus())
         .containsExactlyInAnyOrder(
-            new AlpacaTradeUpdatesStream.TenantSocketStatus("alice", true),
-            new AlpacaTradeUpdatesStream.TenantSocketStatus("bob", true));
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("alice", true, false),
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("bob", true, false));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Per-socket subscription flag. The /live Broker light read a POD-WIDE "any socket ever acked"
+  // counter, so a pod carrying several tenants could never prove any one tenant's subscription.
+  // Each runner now reports whether ITS CURRENT socket received a trade_updates listening ack.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void socketStatusIsSubscribedOnlyAfterThisSocketsTradeUpdatesAck() throws Exception {
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.socketStatus().get(0).subscribed())
+        .as("listen sent but not yet acked: not subscribed")
+        .isFalse();
+
+    server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+
+    assertThat(awaitSubscribed(0, true))
+        .isEqualTo(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true, true));
+  }
+
+  @Test
+  void anAckThatOmitsTradeUpdatesDoesNotMarkTheSocketSubscribed() throws Exception {
+    ListAppender<ILoggingEvent> logs = attachLogCapture();
+    try {
+      stream.start();
+      awaitHandshake();
+
+      server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[]}}");
+      // The WARN is emitted in the same handleFrame call that would have set the flag, so once it
+      // is visible the flag's final value for this frame is too.
+      assertThat(awaitLog(logs, "subscription ack")).isNotNull();
+
+      assertThat(stream.socketStatus())
+          .containsExactly(
+              new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true, false));
+    } finally {
+      detachLogCapture(logs);
+    }
+  }
+
+  @Test
+  void aReconnectedSocketIsNotSubscribedUntilItsOwnAckArrives() throws Exception {
+    stream.start();
+    awaitHandshake();
+    server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+    awaitSubscribed(0, true);
+
+    server.closeAllClients();
+    // The reconnected socket re-handshakes (auth + listen); the fixture never auto-acks listen.
+    awaitHandshake();
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (!stream.socketStatus().get(0).connected() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20L);
+    }
+    assertThat(stream.socketStatus())
+        .as("the previous socket's ack must not carry over to the reconnected socket")
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true, false));
+
+    server.broadcastBinary("{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+    assertThat(awaitSubscribed(0, true).subscribed()).isTrue();
+  }
+
+  @Test
+  void anAckIsAttributedToTheTenantWhoseSocketReceivedIt() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of(
+                "alice", new BrokerCredentials("alice-key", "alice-secret", "", url, ""),
+                "bob", new BrokerCredentials("bob-key", "bob-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    for (int i = 0; i < 4; i++) { // 2 tenants x (auth + listen)
+      assertThat(server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+    }
+
+    server.sendBinaryToKey(
+        "alice-key", "{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (stream.socketStatus().stream()
+            .noneMatch(AlpacaTradeUpdatesStream.TenantSocketStatus::subscribed)
+        && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20L);
+    }
+    // Give a misattributed write (to bob) time to land before asserting it did not.
+    Thread.sleep(200L);
+    assertThat(stream.socketStatus())
+        .containsExactlyInAnyOrder(
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("alice", true, true),
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("bob", true, false));
+  }
+
+  private AlpacaTradeUpdatesStream.TenantSocketStatus awaitSubscribed(int row, boolean expected)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (stream.socketStatus().get(row).subscribed() != expected
+        && System.currentTimeMillis() < deadline) {
+      Thread.sleep(20L);
+    }
+    AlpacaTradeUpdatesStream.TenantSocketStatus s = stream.socketStatus().get(row);
+    assertThat(s.subscribed()).as("subscribed%s", server.diagnosis()).isEqualTo(expected);
+    return s;
   }
 
   private List<String> drainFrames(long quietMs) throws InterruptedException {
@@ -1659,6 +1764,10 @@ class AlpacaTradeUpdatesStreamTest {
     final List<String> errors = new CopyOnWriteArrayList<>();
 
     final List<WebSocket> clients = new ArrayList<>();
+
+    /** Auth key each connection presented, so a test can address ONE tenant's socket. */
+    final Map<WebSocket, String> keyByConn = new java.util.concurrent.ConcurrentHashMap<>();
+
     volatile AuthReplyMode authReplyMode = AuthReplyMode.AUTHORIZED;
     private final CountDownLatch started = new CountDownLatch(1);
 
@@ -1688,6 +1797,11 @@ class AlpacaTradeUpdatesStreamTest {
       // uses (#693). The listen frame is deliberately NOT auto-acked: tests that assert on the
       // `listening` branch send that reply themselves.
       if (message.contains("\"action\":\"auth\"")) {
+        java.util.regex.Matcher key =
+            java.util.regex.Pattern.compile("\"key\":\"([^\"]*)\"").matcher(message);
+        if (key.find()) {
+          keyByConn.put(conn, key.group(1));
+        }
         String reply =
             switch (authReplyMode) {
               case AUTHORIZED ->
@@ -1764,6 +1878,19 @@ class AlpacaTradeUpdatesStreamTest {
     /** Sends {@code payload} as a single BINARY frame — the channel Alpaca actually uses. */
     void broadcastBinary(String payload) {
       broadcastBinaryBytes(payload.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Sends {@code payload} as BINARY only to the connection(s) that authed with {@code key}. */
+    void sendBinaryToKey(String key, String payload) {
+      List<WebSocket> snapshot;
+      synchronized (clients) {
+        snapshot = new ArrayList<>(clients);
+      }
+      for (WebSocket c : snapshot) {
+        if (key.equals(keyByConn.get(c))) {
+          c.send(ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8)));
+        }
+      }
     }
 
     void broadcastBinaryBytes(byte[] payload) {

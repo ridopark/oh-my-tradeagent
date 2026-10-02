@@ -41,9 +41,11 @@ class LiveFillListenerStatusControllerTest {
       """
       {"enabled":true,"now":"2026-10-01T14:00:00Z","tenants":[
         {"tenant_id":"other","connected":true,"subscription_confirmed":true,
-         "last_event_age_s":1.0,"reconnects":0,"metrics_scope":"pod"},
+         "last_event_age_s":1.0,"reconnects":0,"metrics_scope":"pod",
+         "subscription_scope":"socket"},
         {"tenant_id":"acme","connected":true,"subscription_confirmed":false,
-         "last_event_age_s":4.5,"reconnects":2,"metrics_scope":"pod"}]}
+         "last_event_age_s":4.5,"reconnects":2,"metrics_scope":"pod",
+         "subscription_scope":"socket"}]}
       """;
 
   private final TenantBrokerTargetResolver resolver = mock(TenantBrokerTargetResolver.class);
@@ -94,7 +96,8 @@ class LiveFillListenerStatusControllerTest {
         .andExpect(jsonPath("$.tenants[0].subscription_confirmed").value(false))
         .andExpect(jsonPath("$.tenants[0].last_event_age_s").value(4.5))
         .andExpect(jsonPath("$.tenants[0].reconnects").value(2))
-        .andExpect(jsonPath("$.tenants[0].metrics_scope").value("pod"));
+        .andExpect(jsonPath("$.tenants[0].metrics_scope").value("pod"))
+        .andExpect(jsonPath("$.tenants[0].subscription_scope").value("socket"));
     exec.verify();
   }
 

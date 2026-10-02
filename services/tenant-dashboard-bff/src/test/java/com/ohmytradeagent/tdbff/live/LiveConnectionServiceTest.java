@@ -209,6 +209,53 @@ class LiveConnectionServiceTest {
     assertThat(LiveConnectionService.brokerPart(noCount, "acme")).containsEntry("status", "stale");
   }
 
+  /**
+   * New exec shape: each row carries {@code subscription_scope:"socket"}, so its {@code
+   * subscription_confirmed} is THIS tenant's current socket — the pod-wide cap no longer applies.
+   * The old shape ({@link #row}, no subscription_scope) is still pinned stale above: exec-alpaca-
+   * live is rolled by hand, so the BFF reads the old shape for a while after it rolls.
+   */
+  @Test
+  void perSocketConfirmation_isTrustedEvenWithSeveralTenantRows() {
+    // (a) confirmed on our own socket, four tenants on the pod -> ok.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener(
+                    "acme",
+                    socketRow("a", true, true),
+                    socketRow("b", true, true),
+                    socketRow("c", true, false),
+                    socketRow("acme", true, true)),
+                "acme"))
+        .containsEntry("status", "ok")
+        .containsEntry("subscription_scope", "socket");
+    // pod_tenant_count absent is irrelevant once the confirmation is per socket.
+    Map<String, Object> noCount = new HashMap<>(listener("acme", socketRow("acme", true, true)));
+    noCount.remove("pod_tenant_count");
+    assertThat(LiveConnectionService.brokerPart(noCount, "acme")).containsEntry("status", "ok");
+    // (b) our socket connected but not acked, even though another tenant's is -> stale.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener("acme", socketRow("other", true, true), socketRow("acme", true, false)),
+                "acme"))
+        .containsEntry("status", "stale")
+        .containsEntry("reason", "subscription not confirmed");
+    // (d) not connected -> down.
+    assertThat(
+            LiveConnectionService.brokerPart(
+                listener("acme", socketRow("other", true, true), socketRow("acme", false, false)),
+                "acme"))
+        .containsEntry("status", "down");
+  }
+
+  /** Exec's row as of the per-socket change: {@link #row} plus {@code subscription_scope}. */
+  private static Map<String, Object> socketRow(
+      String tenant, boolean connected, boolean confirmed) {
+    Map<String, Object> r = row(tenant, connected, confirmed, 2.0);
+    r.put("subscription_scope", "socket");
+    return r;
+  }
+
   @Test
   void discordThresholds() {
     assertThat(LiveConnectionService.discordPart(Map.of("heartbeat_age_s", 14.9)))
