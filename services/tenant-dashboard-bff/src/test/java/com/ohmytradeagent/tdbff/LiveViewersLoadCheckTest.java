@@ -7,7 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.tdbff.live.DiscordHealthClient;
-import com.ohmytradeagent.tdbff.live.ExecFillListenerClient;
+import com.ohmytradeagent.tdbff.live.FillListenerStatusClient;
 import com.ohmytradeagent.tdbff.live.MarketDataMarksClient;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
@@ -100,7 +100,7 @@ class LiveViewersLoadCheckTest {
   @MockitoBean private MarketDataMarksClient marksClient;
   @MockitoBean private MarketDataLivenessClient liveness;
   @MockitoBean private MarketDataQuoteClient quotes;
-  @MockitoBean private ExecFillListenerClient execFillListener;
+  @MockitoBean private FillListenerStatusClient fillListener;
   @MockitoBean private DiscordHealthClient discord;
   // Postgres-backed readers (no DB locally).
   @MockitoBean private TenantStrategyResolver strategyResolver;
@@ -193,8 +193,8 @@ class LiveViewersLoadCheckTest {
             });
     when(liveness.feedHealth())
         .thenAnswer(inv -> counted("MarketDataLivenessClient.feedHealth", 5, 30, Map::of));
-    when(execFillListener.status(BROKER_TARGET))
-        .thenAnswer(inv -> counted("ExecFillListenerClient.status", 5, 30, Map::of));
+    when(fillListener.status(TENANT))
+        .thenAnswer(inv -> counted("FillListenerStatusClient.status", 5, 30, Map::of));
     when(discord.health()).thenAnswer(inv -> counted("DiscordHealthClient.health", 5, 30, Map::of));
     when(quotes.equityPrice(anyString()))
         .thenAnswer(

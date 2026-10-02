@@ -4,8 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
-import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.proximity.MarketDataLivenessClient;
 import java.time.Clock;
 import java.time.Duration;
@@ -34,18 +32,14 @@ class LiveConnectionServiceTest {
   private static final Instant RTH = Instant.parse("2026-09-30T14:00:00Z");
 
   private final MarketDataLivenessClient md = mock(MarketDataLivenessClient.class);
-  private final ExecFillListenerClient exec = mock(ExecFillListenerClient.class);
+  private final FillListenerStatusClient exec = mock(FillListenerStatusClient.class);
   private final DiscordHealthClient discord = mock(DiscordHealthClient.class);
-  private final TenantStrategyResolver resolver = mock(TenantStrategyResolver.class);
-  private final DbStrategyConfigReader registry = mock(DbStrategyConfigReader.class);
   private final CountDownLatch hang = new CountDownLatch(1);
   private ExecutorService pool;
 
   @BeforeEach
   void setUp() {
     pool = Executors.newFixedThreadPool(4);
-    when(resolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
-    when(registry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
   }
 
   @AfterEach
@@ -56,7 +50,7 @@ class LiveConnectionServiceTest {
 
   private LiveConnectionService service(Instant now, Duration timeout) {
     return new LiveConnectionService(
-        md, exec, discord, resolver, registry, Clock.fixed(now, ZoneOffset.UTC), pool, timeout);
+        md, exec, discord, Clock.fixed(now, ZoneOffset.UTC), pool, timeout);
   }
 
   private LiveConnectionService service() {
@@ -71,8 +65,22 @@ class LiveConnectionServiceTest {
     return m;
   }
 
-  private static Map<String, Object> listener(Map<String, Object>... rows) {
-    return Map.of("enabled", true, "now", "2026-09-30T14:00:00Z", "tenants", List.of(rows));
+  /**
+   * api-gateway's answer: exec's status narrowed to the asking tenant. {@code rows} are what exec
+   * reported for the whole pod; like api-gateway, only {@code tenant}'s row is passed on.
+   */
+  private static Map<String, Object> listener(String tenant, Map<String, Object>... rows) {
+    return Map.of(
+        "enabled",
+        true,
+        "now",
+        "2026-09-30T14:00:00Z",
+        "broker_target",
+        "alpaca-live",
+        "pod_tenant_count",
+        rows.length,
+        "tenants",
+        List.of(rows).stream().filter(r -> tenant.equals(r.get("tenant_id"))).toList());
   }
 
   private static Map<String, Object> row(
@@ -98,7 +106,7 @@ class LiveConnectionServiceTest {
   @Test
   void allHealthy_shapeAndStatuses() {
     when(md.feedHealth()).thenReturn(feeds(true, 1500L, true));
-    when(exec.status("alpaca-live")).thenReturn(listener(row("acme", true, true, 4.0)));
+    when(exec.status("acme")).thenReturn(listener("acme", row("acme", true, true, 4.0)));
     when(discord.health()).thenReturn(Map.of("heartbeat_age_s", 3.2));
 
     Map<String, Object> body = service().connection("acme");
@@ -179,24 +187,26 @@ class LiveConnectionServiceTest {
     // subscription_confirmed is pod-wide: with another tenant on the pod it cannot prove ours.
     assertThat(
             LiveConnectionService.brokerPart(
-                listener(row("other", true, true, 1.0), row("acme", true, true, 2.0)),
-                "acme",
-                "alpaca-live"))
+                listener("acme", row("other", true, true, 1.0), row("acme", true, true, 2.0)),
+                "acme"))
         .containsEntry("status", "stale")
         .containsEntry("reason", "subscription confirmation is pod-wide")
         .containsEntry("age_s", 2.0);
     // Exactly one tenant row: the pod-wide signal is this tenant's own.
     assertThat(
             LiveConnectionService.brokerPart(
-                listener(row("acme", true, true, 2.0)), "acme", "alpaca-live"))
+                listener("acme", row("acme", true, true, 2.0)), "acme"))
         .containsEntry("status", "ok");
     // Several rows, ours disconnected: still down.
     assertThat(
             LiveConnectionService.brokerPart(
-                listener(row("other", true, true, 1.0), row("acme", false, true, null)),
-                "acme",
-                "alpaca-live"))
+                listener("acme", row("other", true, true, 1.0), row("acme", false, true, null)),
+                "acme"))
         .containsEntry("status", "down");
+    // pod_tenant_count absent: cannot prove we are alone on the pod -> never green.
+    Map<String, Object> noCount = new HashMap<>(listener("acme", row("acme", true, true, 2.0)));
+    noCount.remove("pod_tenant_count");
+    assertThat(LiveConnectionService.brokerPart(noCount, "acme")).containsEntry("status", "stale");
   }
 
   @Test
@@ -219,7 +229,7 @@ class LiveConnectionServiceTest {
   @Test
   void discordUnreachable_isUnknown() {
     when(md.feedHealth()).thenReturn(feeds(true, 0L, true));
-    when(exec.status("alpaca-live")).thenReturn(listener(row("acme", true, true, 1.0)));
+    when(exec.status("acme")).thenReturn(listener("acme", row("acme", true, true, 1.0)));
     when(discord.health()).thenThrow(new RuntimeException("connection refused"));
 
     Map<String, Object> d = part(service().connection("acme"), "discord");
@@ -230,32 +240,52 @@ class LiveConnectionServiceTest {
 
   @Test
   void brokerMapping_andTenantFiltering() {
-    // Only THIS tenant's row is read; another tenant's healthy row must not leak or count.
-    when(exec.status("alpaca-live"))
-        .thenReturn(listener(row("other", true, true, 1.0), row("acme", false, false, null)));
-    assertThat(LiveConnectionService.brokerPart(exec.status("alpaca-live"), "acme", "alpaca-live"))
+    // Only THIS tenant's row is read, even if an unfiltered list ever arrived.
+    Map<String, Object> unfiltered = new HashMap<>(listener("acme"));
+    unfiltered.put("pod_tenant_count", 2);
+    unfiltered.put(
+        "tenants", List.of(row("other", true, true, 1.0), row("acme", false, false, null)));
+    assertThat(LiveConnectionService.brokerPart(unfiltered, "acme"))
         .containsEntry("status", "down")
         .doesNotContainValue("other");
 
     assertThat(
             LiveConnectionService.brokerPart(
-                listener(row("acme", true, false, 2.0)), "acme", "alpaca-live"))
+                listener("acme", row("acme", true, false, 2.0)), "acme"))
         .containsEntry("status", "stale");
     assertThat(
             LiveConnectionService.brokerPart(
-                listener(row("other", true, true, 1.0)), "acme", "alpaca-live"))
+                listener("acme", row("other", true, true, 1.0)), "acme"))
         .containsEntry("status", "unknown");
     assertThat(
             LiveConnectionService.brokerPart(
-                Map.of("enabled", false, "tenants", List.of()), "acme", "alpaca-live"))
+                Map.of("enabled", false, "tenants", List.of()), "acme"))
         .containsEntry("status", "unknown");
   }
 
   @Test
-  void brokerTargetResolvedFromTenantStrategies() {
+  void apiGatewayUnknown_isUnknownWithReason_neverGreenOrRed() {
     when(md.feedHealth()).thenReturn(feeds(true, 0L, true));
-    when(registry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
-    when(exec.status("alpaca-paper")).thenReturn(listener(row("acme", true, true, 1.0)));
+    when(exec.status("acme"))
+        .thenReturn(
+            Map.of(
+                "status", "unknown",
+                "reason", "api-gateway: exec status read failed",
+                "broker_target", "alpaca-live"));
+    when(discord.health()).thenReturn(Map.of("heartbeat_age_s", 1.0));
+
+    assertThat(part(service().connection("acme"), "broker"))
+        .containsEntry("status", "unknown")
+        .containsEntry("reason", "api-gateway: exec status read failed")
+        .containsEntry("broker_target", "alpaca-live");
+  }
+
+  @Test
+  void brokerTargetComesFromApiGateway() {
+    when(md.feedHealth()).thenReturn(feeds(true, 0L, true));
+    Map<String, Object> paper = new HashMap<>(listener("acme", row("acme", true, true, 1.0)));
+    paper.put("broker_target", "alpaca-paper");
+    when(exec.status("acme")).thenReturn(paper);
     when(discord.health()).thenReturn(Map.of("heartbeat_age_s", 1.0));
 
     assertThat(part(service().connection("acme"), "broker"))
@@ -266,7 +296,7 @@ class LiveConnectionServiceTest {
   @Test
   void onePartThrows_othersStillAnswer() {
     when(md.feedHealth()).thenReturn(feeds(true, 0L, true));
-    when(exec.status("alpaca-live")).thenThrow(new RuntimeException("exec unreachable"));
+    when(exec.status("acme")).thenThrow(new RuntimeException("exec unreachable"));
     when(discord.health()).thenReturn(Map.of("heartbeat_age_s", 1.0));
 
     Map<String, Object> body = service().connection("acme");
@@ -285,7 +315,7 @@ class LiveConnectionServiceTest {
               hang.await(30, TimeUnit.SECONDS);
               return feeds(true, 0L, true);
             });
-    when(exec.status("alpaca-live")).thenReturn(listener(row("acme", true, true, 1.0)));
+    when(exec.status("acme")).thenReturn(listener("acme", row("acme", true, true, 1.0)));
     when(discord.health()).thenReturn(Map.of("heartbeat_age_s", 1.0));
 
     long start = System.nanoTime();

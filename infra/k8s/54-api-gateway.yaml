@@ -139,6 +139,12 @@ spec:
               value: "true"
             - name: WATCHLIST_FANOUT_ENABLED
               value: "true"
+            # live-realtime-holdings: read-only GET /internal/live/fill-listener-status the
+            # tenant-dashboard-bff calls for the /live broker light (proxies exec's
+            # /status/fill-listener via the tenant's broker_target → EXEC_ALPACA_*_BASE_URL above, so
+            # the BFF never reaches exec). Bearer-gated by the same API_GATEWAY_SHARED_TOKEN.
+            - name: LIVE_FILL_LISTENER_STATUS_ENABLED
+              value: "true"
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

@@ -124,6 +124,14 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: BFF_SHARED_TOKEN
+            # Outbound bearer for api-gateway's read-only /internal/live/fill-listener-status (the
+            # /live broker light). Same key api-gateway checks inbound (54-api-gateway.yaml). Unset →
+            # the broker light shows "unknown"; it never blocks boot.
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
             # `dashboard` DB (Flyway owner — the one schema this service owns).
             - name: DASHBOARD_DB_URL
               value: jdbc:postgresql://postgres:5432/dashboard

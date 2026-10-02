@@ -1,7 +1,5 @@
 package com.ohmytradeagent.tdbff.live;
 
-import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
-import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.proximity.MarketDataLivenessClient;
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -47,10 +45,8 @@ public class LiveConnectionService {
   private static final LocalTime RTH_CLOSE = LocalTime.of(16, 0);
 
   private final MarketDataLivenessClient marketData;
-  private final ExecFillListenerClient exec;
+  private final FillListenerStatusClient fillListener;
   private final DiscordHealthClient discord;
-  private final TenantStrategyResolver strategyResolver;
-  private final DbStrategyConfigReader strategyRegistry;
   private final Clock clock;
   private final Executor executor;
   private final Duration partTimeout;
@@ -58,35 +54,21 @@ public class LiveConnectionService {
   @Autowired
   public LiveConnectionService(
       MarketDataLivenessClient marketData,
-      ExecFillListenerClient exec,
-      DiscordHealthClient discord,
-      TenantStrategyResolver strategyResolver,
-      DbStrategyConfigReader strategyRegistry) {
-    this(
-        marketData,
-        exec,
-        discord,
-        strategyResolver,
-        strategyRegistry,
-        Clock.systemUTC(),
-        boundedDaemonPool(),
-        PART_TIMEOUT);
+      FillListenerStatusClient fillListener,
+      DiscordHealthClient discord) {
+    this(marketData, fillListener, discord, Clock.systemUTC(), boundedDaemonPool(), PART_TIMEOUT);
   }
 
   LiveConnectionService(
       MarketDataLivenessClient marketData,
-      ExecFillListenerClient exec,
+      FillListenerStatusClient fillListener,
       DiscordHealthClient discord,
-      TenantStrategyResolver strategyResolver,
-      DbStrategyConfigReader strategyRegistry,
       Clock clock,
       Executor executor,
       Duration partTimeout) {
     this.marketData = marketData;
-    this.exec = exec;
+    this.fillListener = fillListener;
     this.discord = discord;
-    this.strategyResolver = strategyResolver;
-    this.strategyRegistry = strategyRegistry;
     this.clock = clock;
     this.executor = executor;
     this.partTimeout = partTimeout;
@@ -117,7 +99,10 @@ public class LiveConnectionService {
             () -> feedParts(marketData.feedHealth()),
             reason -> Map.of("equity", unknown(reason), "option", unknown(reason)));
     CompletableFuture<Map<String, Object>> broker =
-        part("broker", () -> brokerPartFor(tenantId), LiveConnectionService::unknown);
+        part(
+            "broker",
+            () -> brokerPart(fillListener.status(tenantId), tenantId),
+            LiveConnectionService::unknown);
     CompletableFuture<Map<String, Object>> discordPart =
         part("discord", () -> discordPart(discord.health()), LiveConnectionService::unknown);
     CompletableFuture.allOf(feeds, broker, discordPart).join();
@@ -150,27 +135,6 @@ public class LiveConnectionService {
     } catch (RuntimeException e) { // RejectedExecutionException: pool saturated
       return CompletableFuture.completedFuture(fallback.apply(name + " not scheduled"));
     }
-  }
-
-  private Map<String, Object> brokerPartFor(String tenantId) {
-    String brokerTarget = primaryBrokerTarget(tenantId);
-    if (brokerTarget == null) {
-      return unknown("no broker_target configured for tenant");
-    }
-    return brokerPart(exec.status(brokerTarget), tenantId, brokerTarget);
-  }
-
-  /**
-   * First non-null broker_target across the tenant's strategies (as PortfolioHistoryController).
-   */
-  private String primaryBrokerTarget(String tenantId) {
-    for (String strategyId : strategyResolver.strategyIdsForTenant(tenantId)) {
-      String bt = strategyRegistry.brokerTarget(tenantId, strategyId);
-      if (bt != null) {
-        return bt;
-      }
-    }
-    return null;
   }
 
   /**
@@ -212,22 +176,25 @@ public class LiveConnectionService {
   }
 
   /**
-   * exec fill-listener status → this tenant's Part. ok = connected && subscription_confirmed; stale
-   * = connected but subscription not confirmed; down = not connected; unknown = listener disabled
-   * or no row for this tenant. Other tenants' rows are never read into the response. When the row
-   * is {@code metrics_scope:"pod"} and the pod carries more than one tenant row, the confirmation
-   * may be another tenant's, so a connected tenant is at best stale.
+   * api-gateway fill-listener status (exec's, narrowed to this tenant) → this tenant's Part. ok =
+   * connected && subscription_confirmed; stale = connected but subscription not confirmed; down =
+   * not connected; unknown = api-gateway/exec could not answer, listener disabled, or no row for
+   * this tenant. Other tenants' rows are never read into the response. When the row is {@code
+   * metrics_scope:"pod"} and the pod carries more than one tenant ({@code pod_tenant_count}; absent
+   * counts as more than one), the confirmation may be another tenant's, so a connected tenant is at
+   * best stale.
    */
-  static Map<String, Object> brokerPart(
-      Map<String, Object> status, String tenantId, String brokerTarget) {
+  static Map<String, Object> brokerPart(Map<String, Object> status, String tenantId) {
     Map<String, Object> p;
-    if (!Boolean.TRUE.equals(status.get("enabled"))) {
+    if ("unknown".equals(status.get("status"))) {
+      p = unknown(status.get("reason") instanceof String r ? r : "fill-listener status unknown");
+    } else if (!Boolean.TRUE.equals(status.get("enabled"))) {
       p = unknown("fill listener disabled");
     } else {
       Map<?, ?> row = null;
-      int tenantRows = 0;
+      int tenantRows =
+          status.get("pod_tenant_count") instanceof Number n ? n.intValue() : Integer.MAX_VALUE;
       if (status.get("tenants") instanceof List<?> rows) {
-        tenantRows = rows.size();
         for (Object r : rows) {
           if (r instanceof Map<?, ?> m && tenantId.equals(m.get("tenant_id"))) {
             row = m;
@@ -257,7 +224,7 @@ public class LiveConnectionService {
         p.put("metrics_scope", row.get("metrics_scope"));
       }
     }
-    p.put("broker_target", brokerTarget);
+    p.put("broker_target", status.get("broker_target"));
     return p;
   }
 

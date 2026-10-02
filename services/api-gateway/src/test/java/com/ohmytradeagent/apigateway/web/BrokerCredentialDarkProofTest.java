@@ -3,6 +3,7 @@ package com.ohmytradeagent.apigateway.web;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.ohmytradeagent.apigateway.config.ExecClientConfig;
+import com.ohmytradeagent.apigateway.config.ExecTargetConfig;
 import com.ohmytradeagent.apigateway.security.CredentialWriteLimiter;
 import com.ohmytradeagent.apigateway.security.ServiceTokenFilter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -39,6 +40,7 @@ class BrokerCredentialDarkProofTest {
           .withConfiguration(AutoConfigurations.of(RestClientAutoConfiguration.class))
           .withUserConfiguration(
               ExecClientConfig.class,
+              ExecTargetConfig.class,
               ServiceTokenFilter.class,
               CredentialWriteLimiter.class,
               TenantBrokerTargetResolver.class,

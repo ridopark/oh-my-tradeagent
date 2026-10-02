@@ -23,11 +23,13 @@ import org.springframework.stereotype.Component;
  * unresolved.
  *
  * <p>Read-only, no secret material. Dark by construction — gated on the same flags as {@link
- * BrokerCredentialForwardService}.
+ * BrokerCredentialForwardService}, plus {@code live.fill-listener-status.enabled} ({@link
+ * LiveFillListenerStatusController} routes its read-only status probe the same way).
  */
 @Component
 @ConditionalOnExpression(
-    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}")
+    "${broker.credentials.write.enabled:false} or ${operator.credential-write.enabled:false}"
+        + " or ${live.fill-listener-status.enabled:false}")
 public class TenantBrokerTargetResolver {
 
   private final DSLContext dsl;

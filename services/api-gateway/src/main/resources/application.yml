@@ -116,6 +116,15 @@ watchlist:
     # The watchlist strategy id the registry query scopes to (bind parameter, not a query literal).
     strategy-id: ${WATCHLIST_FANOUT_STRATEGY_ID:watchlist-trigger-v1}
 
+# live-realtime-holdings read-only fill-listener status proxy. DARK by default: with enabled unset/
+# false the LiveFillListenerStatusController bean does not exist and GET
+# /internal/live/fill-listener-status 404s. When true, ServiceTokenFilter bearer-gates the route (the
+# tenant-dashboard-bff is a SERVICE caller) and it routes via the tenant's broker_target →
+# exec.targets below, exactly like the credential-write forward.
+live:
+  fill-listener-status:
+    enabled: ${LIVE_FILL_LISTENER_STATUS_ENABLED:false}
+
 # Exec internal base URL the credential forward targets (in-cluster service name).
 exec:
   base-url: ${EXEC_BASE_URL:http://exec:8080}
