@@ -135,6 +135,14 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: API_GATEWAY_SHARED_TOKEN
+            # Bearer for the api-gateway -> tenant-dashboard-bff calls (operator tenant-delete:
+            # dashboard-rows delete + newest read). Unset, the client sends an empty bearer, the BFF
+            # 401s, and every delete/Retry cleanup fails closed at the dashboard step.
+            - name: BFF_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_SHARED_TOKEN
             - name: COPYTRADE_FANOUT_ENABLED
               value: "true"
             - name: WATCHLIST_FANOUT_ENABLED
