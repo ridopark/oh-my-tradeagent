@@ -7,9 +7,9 @@ import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import { LiveActivationBanner } from "@/components/LiveActivationBanner";
 import {
+  ContractChartLinks,
   ContractLink,
   contractCell,
-  occCompact,
   occCompactParts,
   occExpiryYmd,
 } from "@/components/ContractLink";
@@ -1045,19 +1045,25 @@ function shortWhen(iso: string): string {
 // The contract and qty come from the audit subject, which is absent on a pre-#276 event and can be
 // unparseable, so each part is appended only when present; a subject that yields nothing at all
 // degrades to "—" (the event kind still shows on the strip's sub-line).
-function fillLabel(t: Trade): string {
+function fillLabel(t: Trade): ReactNode {
   const f = tradeFill(t);
   const parts: string[] = [];
-  if (f.option_symbol) {
-    parts.push(occCompact(f.option_symbol));
-  }
   if (f.qty !== null) {
     parts.push(`×${f.qty}`);
   }
   if (f.avg_fill_price !== null) {
     parts.push(`@ ${fmtCurrency(f.avg_fill_price)}`);
   }
-  return parts.length > 0 ? parts.join(" ") : "—";
+  const rest = parts.join(" ");
+  if (!f.option_symbol) {
+    return rest || "—";
+  }
+  return (
+    <>
+      <ContractChartLinks occ={f.option_symbol} />
+      {rest && ` ${rest}`}
+    </>
+  );
 }
 
 // "SELL MU 260925C01100000 ×2 @ $17.10" — what an order asked for and what became of it, for the
@@ -1065,8 +1071,8 @@ function fillLabel(t: Trade): string {
 // ASKING ("lmt $17.50") instead: a bare "—" would hide the only price such a row carries, and an
 // unfilled order is exactly the row worth reading. Qty renders as filled/requested ("×1/2") only on
 // a cancel-with-partial-fill, the one state where the two differ.
-function orderLabel(o: Order): string {
-  const parts: string[] = [o.side, occCompact(o.option_symbol)];
+function orderLabel(o: Order): ReactNode {
+  const parts: string[] = [];
   parts.push(
     o.filled_qty != null && o.filled_qty !== o.qty
       ? `×${o.filled_qty}/${o.qty}`
@@ -1077,7 +1083,11 @@ function orderLabel(o: Order): string {
   } else if (o.limit_price != null) {
     parts.push(`lmt ${fmtCurrency(o.limit_price)}`);
   }
-  return parts.join(" ");
+  return (
+    <>
+      {o.side} <ContractChartLinks occ={o.option_symbol} /> {parts.join(" ")}
+    </>
+  );
 }
 
 function ActivityStrip({
@@ -1090,7 +1100,7 @@ function ActivityStrip({
   href: string;
   empty: string;
   rows: {
-    primary: string;
+    primary: ReactNode;
     secondary: string;
     when: string;
     /** Optional signed result for this row, rendered coloured after the primary text. */

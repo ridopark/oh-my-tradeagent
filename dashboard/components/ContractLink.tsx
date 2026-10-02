@@ -53,6 +53,49 @@ export function ContractLink({
   );
 }
 
+// "INTC $125C 10/09" as TWO links, for the /live activity strips: the underlying to the stock's
+// Yahoo chart, the strike/expiry to the contract's. An unparseable symbol renders as plain text, as
+// the strips did before they linked anything.
+export function ContractChartLinks({ occ }: { occ: string }) {
+  const parts = occCompactParts(occ);
+  if (parts === null) {
+    return <>{occCompact(occ)}</>;
+  }
+  const contract = occ.replace(/\s+/g, "");
+  return (
+    <>
+      <ChartLink symbol={parts.root} title={`${parts.root} chart on Yahoo Finance`}>
+        {parts.root}
+      </ChartLink>{" "}
+      <ChartLink symbol={contract} title={`${contract} chart on Yahoo Finance`}>
+        {parts.rest}
+      </ChartLink>
+    </>
+  );
+}
+
+function ChartLink({
+  symbol,
+  title,
+  children,
+}: {
+  symbol: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={`https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/chart/`}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={title}
+      className="text-sky-400 hover:text-sky-300 hover:underline"
+    >
+      {children}
+    </a>
+  );
+}
+
 // DataTable cell renderer for an OCC/contract column.
 export function contractCell(value: unknown): ReactNode {
   return typeof value === "string" && value.trim() ? (
