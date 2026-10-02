@@ -267,6 +267,16 @@ spec:
         - podSelector:
             matchLabels:
               app: api-gateway
+        # Prometheus (kube-prometheus-stack) scrapes /actuator/prometheus via the copytrade-actuator
+        # ServiceMonitor. Without this peer every scrape times out (target `down`), so no exec
+        # metric — fill_listener_* included — ever reached Prometheus. Same port-level caveat as
+        # api-gateway: the credential route stays bearer-gated by ExecAdminTokenFilter.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 8080
