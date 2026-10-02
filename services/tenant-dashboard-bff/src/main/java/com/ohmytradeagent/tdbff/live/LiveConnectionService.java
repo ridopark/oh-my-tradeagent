@@ -179,10 +179,15 @@ public class LiveConnectionService {
    * api-gateway fill-listener status (exec's, narrowed to this tenant) → this tenant's Part. ok =
    * connected && subscription_confirmed; stale = connected but subscription not confirmed; down =
    * not connected; unknown = api-gateway/exec could not answer, listener disabled, or no row for
-   * this tenant. Other tenants' rows are never read into the response. When the row is {@code
-   * metrics_scope:"pod"} and the pod carries more than one tenant ({@code pod_tenant_count}; absent
-   * counts as more than one), the confirmation may be another tenant's, so a connected tenant is at
-   * best stale.
+   * this tenant. Other tenants' rows are never read into the response.
+   *
+   * <p>A row carrying {@code subscription_scope:"socket"} reports {@code subscription_confirmed}
+   * for THIS tenant's current socket, so it is trusted as-is regardless of how many tenants share
+   * the pod. A row WITHOUT it is the older exec shape, whose confirmation is pod-wide: when such a
+   * row is {@code metrics_scope:"pod"} and the pod carries more than one tenant ({@code
+   * pod_tenant_count}; absent counts as more than one), the confirmation may be another tenant's,
+   * so a connected tenant is at best stale. That fallback is kept deliberately: exec-alpaca-live is
+   * rolled by hand, so this BFF reads the old shape for a while after it rolls.
    */
   static Map<String, Object> brokerPart(Map<String, Object> status, String tenantId) {
     Map<String, Object> p;
@@ -207,12 +212,13 @@ public class LiveConnectionService {
       } else {
         boolean connected = Boolean.TRUE.equals(row.get("connected"));
         boolean confirmed = Boolean.TRUE.equals(row.get("subscription_confirmed"));
+        boolean perSocket = "socket".equals(row.get("subscription_scope"));
         Double age = row.get("last_event_age_s") instanceof Number n ? n.doubleValue() : null;
         if (!connected) {
           p = part("down", age, "fill stream not connected");
         } else if (!confirmed) {
           p = part("stale", age, "subscription not confirmed");
-        } else if ("pod".equals(row.get("metrics_scope")) && tenantRows > 1) {
+        } else if (!perSocket && "pod".equals(row.get("metrics_scope")) && tenantRows > 1) {
           p = part("stale", age, "subscription confirmation is pod-wide");
         } else {
           p = part("ok", age, null);
@@ -222,6 +228,7 @@ public class LiveConnectionService {
         p.put("last_event_age_s", row.get("last_event_age_s"));
         p.put("reconnects", row.get("reconnects"));
         p.put("metrics_scope", row.get("metrics_scope"));
+        p.put("subscription_scope", row.get("subscription_scope"));
       }
     }
     p.put("broker_target", status.get("broker_target"));

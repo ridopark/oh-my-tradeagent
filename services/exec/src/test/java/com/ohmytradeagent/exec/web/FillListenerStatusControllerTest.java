@@ -91,7 +91,9 @@ class FillListenerStatusControllerTest {
     void beforeAnyConfirmationOrEvent() throws Exception {
       when(stream.socketStatus())
           .thenReturn(
-              List.of(new TenantSocketStatus("alice", true), new TenantSocketStatus("bob", false)));
+              List.of(
+                  new TenantSocketStatus("alice", true, false),
+                  new TenantSocketStatus("bob", false, false)));
 
       mvc.perform(get("/status/fill-listener")) // no Authorization header
           .andExpect(status().isOk())
@@ -104,13 +106,15 @@ class FillListenerStatusControllerTest {
           .andExpect(jsonPath("$.tenants[0].last_event_age_s").value((Object) null))
           .andExpect(jsonPath("$.tenants[0].reconnects").value(0))
           .andExpect(jsonPath("$.tenants[0].metrics_scope").value("pod"))
+          .andExpect(jsonPath("$.tenants[0].subscription_scope").value("socket"))
           .andExpect(jsonPath("$.tenants[1].tenant_id").value("bob"))
           .andExpect(jsonPath("$.tenants[1].connected").value(false));
     }
 
     @Test
     void afterConfirmationReconnectAndEvent() throws Exception {
-      when(stream.socketStatus()).thenReturn(List.of(new TenantSocketStatus("pod-wide", true)));
+      when(stream.socketStatus())
+          .thenReturn(List.of(new TenantSocketStatus("pod-wide", true, true)));
       metrics.recordSubscriptionConfirmed();
       metrics.recordReconnect();
       metrics.recordReconnect();
@@ -120,9 +124,34 @@ class FillListenerStatusControllerTest {
           .andExpect(status().isOk())
           .andExpect(jsonPath("$.tenants[0].tenant_id").value("pod-wide"))
           .andExpect(jsonPath("$.tenants[0].subscription_confirmed").value(true))
+          .andExpect(jsonPath("$.tenants[0].subscription_scope").value("socket"))
           .andExpect(jsonPath("$.tenants[0].reconnects").value(2))
           .andExpect(jsonPath("$.tenants[0].last_event_age_s").isNumber())
           .andExpect(jsonPath("$.tenants[0].metrics_scope").value("pod"));
+    }
+
+    /**
+     * subscription_confirmed is per socket: the pod-wide counter having fired (some OTHER socket
+     * acked) must not make an unacked tenant's row read confirmed — the reason the /live Broker
+     * light could never go green on a multi-tenant pod.
+     */
+    @Test
+    void subscriptionConfirmedIsPerSocketNotPodWide() throws Exception {
+      when(stream.socketStatus())
+          .thenReturn(
+              List.of(
+                  new TenantSocketStatus("alice", true, true),
+                  new TenantSocketStatus("bob", true, false)));
+      metrics.recordSubscriptionConfirmed(); // alice's ack: pod-wide count > 0
+
+      mvc.perform(get("/status/fill-listener"))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.tenants[0].tenant_id").value("alice"))
+          .andExpect(jsonPath("$.tenants[0].subscription_confirmed").value(true))
+          .andExpect(jsonPath("$.tenants[0].subscription_scope").value("socket"))
+          .andExpect(jsonPath("$.tenants[1].tenant_id").value("bob"))
+          .andExpect(jsonPath("$.tenants[1].subscription_confirmed").value(false))
+          .andExpect(jsonPath("$.tenants[1].subscription_scope").value("socket"));
     }
   }
 }

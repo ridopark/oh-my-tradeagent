@@ -392,19 +392,24 @@ public class AlpacaTradeUpdatesStream {
   }
 
   /** One runner's socket state as reported by {@link #socketStatus()}. */
-  public record TenantSocketStatus(String tenantId, boolean connected) {}
+  public record TenantSocketStatus(String tenantId, boolean connected, boolean subscribed) {}
 
   /**
    * Read-only snapshot for {@code GET /status/fill-listener}: one row per runner — the tenant id
-   * ({@code "pod-wide"} in single-socket mode) and whether it currently holds a socket handle.
-   * {@code connected} means a WebSocket is open (set after the HTTP upgrade, before auth); it does
-   * not by itself prove the trade_updates subscription. Mutates nothing.
+   * ({@code "pod-wide"} in single-socket mode), whether it currently holds a socket handle, and
+   * whether THAT socket has received a {@code listening} ack naming {@code trade_updates}. {@code
+   * connected} means a WebSocket is open (set after the HTTP upgrade, before auth); it does not by
+   * itself prove the subscription — {@code subscribed} does, and is never true without {@code
+   * connected}. Mutates nothing.
    */
   public List<TenantSocketStatus> socketStatus() {
     synchronized (runnersLock) {
       List<TenantSocketStatus> out = new ArrayList<>(runners.size());
       for (TenantRunner runner : runners) {
-        out.add(new TenantSocketStatus(runner.tenant, runner.currentSocket.get() != null));
+        boolean connected = runner.currentSocket.get() != null;
+        out.add(
+            new TenantSocketStatus(
+                runner.tenant, connected, connected && runner.currentSubscribed.get().get()));
       }
       return out;
     }
@@ -542,6 +547,18 @@ public class AlpacaTradeUpdatesStream {
     private final EndpointSupplier endpointSupplier;
     private final Map<String, Boolean> dedup;
     private final AtomicReference<WebSocket> currentSocket = new AtomicReference<>();
+
+    /**
+     * The CURRENT connection's subscribed flag, for {@link #socketStatus()}. Each connection gets a
+     * fresh flag at the top of {@link #connectAndRun} — the single entry point of every first
+     * connect, reconnect and recycle — so a new socket never inherits the previous one's ack. The
+     * flag object is per-connection (like {@code authReply}, #751) and handed to that connection's
+     * {@link Listener}, so a late ack surfacing from an aborted previous socket sets ITS stale
+     * flag, never this connection's. The Listener also clears it on close/error/abort.
+     */
+    private final AtomicReference<AtomicBoolean> currentSubscribed =
+        new AtomicReference<>(new AtomicBoolean(false));
+
     // Distinct unmodelled `stream` values already warned about on the CURRENT connection. Damping
     // is per-value so an unmodelled keepalive warns once instead of once per frame, and cleared on
     // every (re)connect (see connectAndRun) so a shape that appears only after a reconnect is not
@@ -636,7 +653,11 @@ public class AlpacaTradeUpdatesStream {
       // #751: per-connection like `closed`, deliberately — a late authorization frame surfacing
       // from an aborted previous socket must never satisfy THIS connection's gate.
       CompletableFuture<String> authReply = new CompletableFuture<>();
-      Listener listener = new Listener(closed, this, authReply);
+      // Per-connection for the same reason; published BEFORE the socket exists so the status read
+      // can never pair the new socket with the previous connection's ack.
+      AtomicBoolean subscribed = new AtomicBoolean(false);
+      currentSubscribed.set(subscribed);
+      Listener listener = new Listener(closed, this, authReply, subscribed);
       WebSocket ws;
       try {
         ws =
@@ -700,6 +721,7 @@ public class AlpacaTradeUpdatesStream {
           try {
             ws.abort();
           } finally {
+            subscribed.set(false);
             currentSocket.compareAndSet(ws, null);
           }
           recordRecycle();
@@ -822,7 +844,8 @@ public class AlpacaTradeUpdatesStream {
     // frames entirely — permanently mute, strictly worse than the bug this logging exists to find.
     // Hence the `path()`-only idiom below: path() yields MissingNode rather than null, so no
     // traversal here can NPE. Never reach for `root.get(...).path(...)` in this method.
-    private void handleFrame(String frame, CompletableFuture<String> authReply) {
+    private void handleFrame(
+        String frame, CompletableFuture<String> authReply, AtomicBoolean connectionSubscribed) {
       JsonNode root;
       try {
         root = mapper.readTree(frame);
@@ -927,6 +950,7 @@ public class AlpacaTradeUpdatesStream {
         // authorization on the AUTHORIZATION stream (status=unauthorized, action=listen), which the
         // branch above already logs. Two distinct failures, deliberately kept distinguishable.
         if (subscribed) {
+          connectionSubscribed.set(true);
           metrics.recordSubscriptionConfirmed();
           log.info(
               "fill-listener[{}] subscription confirmed data={} — the socket IS subscribed",
@@ -1050,6 +1074,13 @@ public class AlpacaTradeUpdatesStream {
      */
     private final CompletableFuture<String> authReply;
 
+    /**
+     * This connection's subscribed flag (see {@code TenantRunner.currentSubscribed}): set by {@code
+     * handleFrame} on a {@code listening} ack naming trade_updates, cleared when this socket
+     * closes, errors or is aborted.
+     */
+    private final AtomicBoolean subscribed;
+
     private final StringBuilder partialFrame = new StringBuilder();
 
     /**
@@ -1067,10 +1098,15 @@ public class AlpacaTradeUpdatesStream {
      */
     private final ByteArrayOutputStream partialBinaryFrame = new ByteArrayOutputStream();
 
-    Listener(CountDownLatch closed, TenantRunner owner, CompletableFuture<String> authReply) {
+    Listener(
+        CountDownLatch closed,
+        TenantRunner owner,
+        CompletableFuture<String> authReply,
+        AtomicBoolean subscribed) {
       this.closed = closed;
       this.owner = owner;
       this.authReply = authReply;
+      this.subscribed = subscribed;
     }
 
     @Override
@@ -1086,6 +1122,7 @@ public class AlpacaTradeUpdatesStream {
             owner.tenant,
             MAX_FRAME_BYTES);
         partialFrame.setLength(0);
+        subscribed.set(false);
         webSocket.abort();
         closed.countDown();
         return null;
@@ -1097,7 +1134,7 @@ public class AlpacaTradeUpdatesStream {
         String frame = partialFrame.toString();
         partialFrame.setLength(0);
         owner.recordPartialBytes(0L);
-        owner.handleFrame(frame, authReply);
+        owner.handleFrame(frame, authReply, subscribed);
       }
       webSocket.request(1);
       return null;
@@ -1112,6 +1149,7 @@ public class AlpacaTradeUpdatesStream {
             owner.tenant,
             MAX_FRAME_BYTES);
         partialBinaryFrame.reset();
+        subscribed.set(false);
         webSocket.abort();
         closed.countDown();
         return null;
@@ -1125,7 +1163,7 @@ public class AlpacaTradeUpdatesStream {
         String frame = partialBinaryFrame.toString(StandardCharsets.UTF_8);
         partialBinaryFrame.reset();
         owner.recordPartialBytes(0L);
-        owner.handleFrame(frame, authReply);
+        owner.handleFrame(frame, authReply, subscribed);
       }
       webSocket.request(1);
       return null;
@@ -1134,6 +1172,7 @@ public class AlpacaTradeUpdatesStream {
     @Override
     public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
       log.info("fill-listener[{}] ws closed code={} reason={}", owner.tenant, statusCode, reason);
+      subscribed.set(false);
       closed.countDown();
       // #751: no-op after the reply was seen; before it, unparks the handshake gate immediately.
       authReply.complete(null);
@@ -1143,6 +1182,7 @@ public class AlpacaTradeUpdatesStream {
     @Override
     public void onError(WebSocket webSocket, Throwable error) {
       log.warn("fill-listener[{}] ws error: {}", owner.tenant, error.toString());
+      subscribed.set(false);
       closed.countDown();
       authReply.complete(null);
     }
