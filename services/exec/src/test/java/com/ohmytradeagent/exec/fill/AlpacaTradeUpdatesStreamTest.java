@@ -460,6 +460,122 @@ class AlpacaTradeUpdatesStreamTest {
         .isEqualTo(expected);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // QA follow-up on #887/#888: an upgrade that completes AFTER the client stopped waiting for it
+  // produced a socket with a live Listener that was never published to currentSocket — nothing
+  // could ever abort it. The server holds the first upgrade past HANDSHAKE_TIMEOUT (5s) so the
+  // real JDK client gives up, then answers it; the orphan must be torn down, not linger open.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void anUpgradeCompletingAfterTheHandshakeTimeoutIsAborted() throws Exception {
+    server.delayFirstUpgradeMs = 6_500L;
+    stream.start();
+
+    awaitHandshake(); // the reconnected socket (the orphan never authenticates)
+    assertThat(server.delayedUpgradeOpened.await(AWAIT_MS, TimeUnit.MILLISECONDS))
+        .as("fixture: the held upgrade must complete server-side after the client gave up")
+        .isTrue();
+    awaitLiveClients(1);
+  }
+
+  @Test
+  void anUpgradeCompletingAfterTheRunnerWasInterruptedIsAborted() throws Exception {
+    server.delayFirstUpgradeMs = 2_000L;
+    stream.start();
+
+    assertThat(server.delayedUpgradeReceived.await(AWAIT_MS, TimeUnit.MILLISECONDS)).isTrue();
+    stream.stop(); // interrupts the runner while it waits on the upgrade
+    assertThat(server.delayedUpgradeOpened.await(AWAIT_MS, TimeUnit.MILLISECONDS))
+        .as("fixture: the held upgrade must complete server-side after the interrupt")
+        .isTrue();
+    awaitLiveClients(0);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // QA follow-up on #888: the per-runner dedup map is an access-ordered LinkedHashMap (mutated even
+  // by a read) reached from every connection's Listener. Callbacks for ONE socket are sequential,
+  // but two sockets of the same runner can overlap. Drives the runner's handleFrame directly from
+  // several threads in lock-step rounds: every thread offers the SAME key plus its own key, so each
+  // round holds a contended check-and-insert and the LRU bound (32) never evicts a live round.
+  // Reflection because TenantRunner is private and no production seam is warranted for this.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void concurrentFramesOnOneRunnerDispatchEachFillExactlyOnce() throws Exception {
+    final int threads = 8;
+    final int rounds = 400;
+    Class<?> runnerType = Class.forName(AlpacaTradeUpdatesStream.class.getName() + "$TenantRunner");
+    java.lang.reflect.Constructor<?> ctor = runnerType.getDeclaredConstructors()[0];
+    ctor.setAccessible(true);
+    Object runner = ctor.newInstance(stream, "pod-wide", "unused", null);
+    java.lang.reflect.Method handleFrame =
+        runnerType.getDeclaredMethod(
+            "handleFrame",
+            String.class,
+            java.util.concurrent.CompletableFuture.class,
+            java.util.concurrent.atomic.AtomicBoolean.class);
+    handleFrame.setAccessible(true);
+    java.util.concurrent.CompletableFuture<String> authReply =
+        new java.util.concurrent.CompletableFuture<>();
+    java.util.concurrent.atomic.AtomicBoolean subscribed =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(threads);
+    List<Throwable> failures = new CopyOnWriteArrayList<>();
+    List<Thread> workers = new ArrayList<>();
+    for (int t = 0; t < threads; t++) {
+      final int me = t;
+      Thread w =
+          new Thread(
+              () -> {
+                try {
+                  for (int r = 0; r < rounds; r++) {
+                    barrier.await(AWAIT_MS, TimeUnit.MILLISECONDS);
+                    handleFrame.invoke(runner, fillFrame("shared-" + r), authReply, subscribed);
+                    handleFrame.invoke(
+                        runner, fillFrame("own-" + r + "-" + me), authReply, subscribed);
+                  }
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                  failures.add(e.getCause());
+                  barrier.reset();
+                } catch (Throwable e) {
+                  failures.add(e);
+                  barrier.reset();
+                }
+              });
+      workers.add(w);
+      w.start();
+    }
+    for (Thread w : workers) {
+      w.join(60_000L);
+    }
+
+    assertThat(failures).as("handleFrame must never throw under concurrency").isEmpty();
+    Map<String, Integer> dispatchCounts = new java.util.HashMap<>();
+    for (BrokerFillEvent e : dispatcher.events) {
+      dispatchCounts.merge(e.brokerOrderId(), 1, Integer::sum);
+    }
+    Map<String, Integer> duplicated = new java.util.TreeMap<>();
+    dispatchCounts.forEach(
+        (id, n) -> {
+          if (n != 1) {
+            duplicated.put(id, n);
+          }
+        });
+    assertThat(duplicated).as("fills dispatched more than once").isEmpty();
+    assertThat(dispatchCounts).hasSize(rounds * (threads + 1));
+  }
+
+  private static String fillFrame(String brokerOrderId) {
+    return "{\"stream\":\"trade_updates\",\"data\":{\"event\":\"fill\","
+        + "\"order\":{\"id\":\""
+        + brokerOrderId
+        + "\",\"client_order_id\":\"ck\","
+        + "\"filled_qty\":\"1\",\"filled_avg_price\":\"1.00\","
+        + "\"filled_at\":\"2026-05-19T17:08:11Z\"}}}";
+  }
+
   @Test
   void fillEventReachesDispatcher() throws Exception {
     stream.start();
@@ -2000,14 +2116,43 @@ class AlpacaTradeUpdatesStreamTest {
     volatile AuthReplyMode authReplyMode = AuthReplyMode.AUTHORIZED;
     private final CountDownLatch started = new CountDownLatch(1);
 
+    /**
+     * When positive, the FIRST upgrade request is held this long before the server answers it, so
+     * the client's handshake wait can give up while the upgrade still completes later.
+     */
+    volatile long delayFirstUpgradeMs;
+
+    private final java.util.concurrent.atomic.AtomicReference<WebSocket> delayedConn =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    final CountDownLatch delayedUpgradeReceived = new CountDownLatch(1);
+    final CountDownLatch delayedUpgradeOpened = new CountDownLatch(1);
+
     RecordingWsServer(int port) {
       super(new InetSocketAddress(port));
+    }
+
+    @Override
+    public org.java_websocket.handshake.ServerHandshakeBuilder onWebsocketHandshakeReceivedAsServer(
+        WebSocket conn, org.java_websocket.drafts.Draft draft, ClientHandshake request)
+        throws org.java_websocket.exceptions.InvalidDataException {
+      if (delayFirstUpgradeMs > 0L && delayedConn.compareAndSet(null, conn)) {
+        delayedUpgradeReceived.countDown();
+        try {
+          Thread.sleep(delayFirstUpgradeMs);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      return super.onWebsocketHandshakeReceivedAsServer(conn, draft, request);
     }
 
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
       synchronized (clients) {
         clients.add(conn);
+      }
+      if (conn == delayedConn.get()) {
+        delayedUpgradeOpened.countDown();
       }
     }
 
