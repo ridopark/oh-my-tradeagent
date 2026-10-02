@@ -666,16 +666,19 @@ public class AlpacaTradeUpdatesStream {
       AtomicBoolean subscribed = new AtomicBoolean(false);
       currentSubscribed.set(subscribed);
       Listener listener = new Listener(closed, this, authReply, subscribed);
+      CompletableFuture<WebSocket> pending =
+          http.newWebSocketBuilder().buildAsync(URI.create(endpoint.wsUrl()), listener);
       WebSocket ws;
       try {
         ws =
-            socketDecorator.apply(
-                http.newWebSocketBuilder()
-                    .buildAsync(URI.create(endpoint.wsUrl()), listener)
-                    .get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
+            socketDecorator.apply(pending.get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
       } catch (ExecutionException | TimeoutException e) {
+        abortIfBuiltLate(pending);
         Throwable cause = e.getCause() != null ? e.getCause() : e;
         throw new RuntimeException("ws connect failed: " + cause, cause);
+      } catch (InterruptedException e) {
+        abortIfBuiltLate(pending);
+        throw e;
       }
       currentSocket.set(ws);
       // Fresh connection => re-arm the unhandled-stream warnings, so a frame shape that only shows
@@ -763,6 +766,18 @@ public class AlpacaTradeUpdatesStream {
         closed.await();
       }
       currentSocket.compareAndSet(ws, null);
+    }
+
+    /**
+     * An upgrade the runner stopped waiting for (timeout, failure, interrupt) can still complete
+     * later, yielding a socket with a live Listener that is never published to {@code
+     * currentSocket} — so neither the runner nor {@link #stop()} could ever reach it. Abort it
+     * whenever it lands. Deliberately NOT {@code cancel()}: the JDK's future is a {@code thenApply}
+     * stage over the opening handshake, so cancelling it does not stop the handshake — it only
+     * guarantees this callback never sees the socket.
+     */
+    private static void abortIfBuiltLate(CompletableFuture<WebSocket> pending) {
+      pending.thenAccept(WebSocket::abort);
     }
 
     private void sendAuth(WebSocket ws, Endpoint endpoint) throws InterruptedException {
@@ -1052,7 +1067,14 @@ public class AlpacaTradeUpdatesStream {
       // filled_qty) key is implicitly account-scoped — the same broker_order_id arriving on a
       // different tenant's socket goes through that tenant's own map and is NOT cross-deduped.
       String dedupKey = brokerOrderId + "|" + filledQty;
-      if (dedup.putIfAbsent(dedupKey, Boolean.TRUE) != null) {
+      // Locked: every connection's Listener of this runner reaches this map, and two of its
+      // sockets can overlap. Access-ordered, so even a lookup mutates it; the check-and-insert
+      // must be atomic or both sockets dispatch the same fill.
+      boolean seen;
+      synchronized (dedup) {
+        seen = dedup.putIfAbsent(dedupKey, Boolean.TRUE) != null;
+      }
+      if (seen) {
         metrics.recordDroppedDedup();
         return;
       }
