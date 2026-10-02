@@ -79,6 +79,16 @@ public class OpenOccCache {
     }
   }
 
+  /**
+   * Drops the tenant's cached OCC set so the next poll re-reads it — called after an operator
+   * action that opens or closes a position. Removing the entry (rather than marking it) means an
+   * in-flight read, which completes only its own future, cannot repopulate the cache with its stale
+   * set.
+   */
+  public void invalidate(String tenantId) {
+    byTenant.remove(tenantId);
+  }
+
   private void load(String tenantId, CompletableFuture<Snapshot> into) {
     try {
       Set<String> symbols = new LinkedHashSet<>();

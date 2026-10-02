@@ -8,6 +8,8 @@ import com.ohmytradeagent.contract.ForceCloseResult;
 import com.ohmytradeagent.contract.PartialCloseRequest;
 import com.ohmytradeagent.contract.PartialCloseResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
+import com.ohmytradeagent.tdbff.live.OpenOccCache;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import io.temporal.client.WorkflowClient;
@@ -56,6 +58,15 @@ public class PositionsController {
   private final WorkflowClient client;
 
   /**
+   * Read caches behind /live, invalidated after a SUCCESSFUL write so the operator sees the result
+   * on the next poll instead of up to a TTL later. Invalidation is a map removal that cannot throw,
+   * and runs only once the Update has returned — it never changes a write's outcome or response.
+   */
+  private final PortfolioCache portfolioCache;
+
+  private final OpenOccCache openOccCache;
+
+  /**
    * Server-side dark-launch gate for the FORCE-CLOSE WRITE (default false). Mirrors the account
    * kill-switch reset flag: this endpoint can place a marketable SELL against a real-money account,
    * so while off {@code POST /force-close} 404s server-side — the write surface is not merely
@@ -90,12 +101,16 @@ public class PositionsController {
       PositionsReader reader,
       TenantContext ctx,
       WorkflowClient client,
+      PortfolioCache portfolioCache,
+      OpenOccCache openOccCache,
       @Value("${positions.force-close.write-enabled:false}") boolean forceCloseWriteEnabled,
       @Value("${positions.partial-close.write-enabled:false}") boolean partialCloseWriteEnabled,
       @Value("${positions.arm-trail.write-enabled:true}") boolean armTrailWriteEnabled) {
     this.reader = reader;
     this.ctx = ctx;
     this.client = client;
+    this.portfolioCache = portfolioCache;
+    this.openOccCache = openOccCache;
     this.forceCloseWriteEnabled = forceCloseWriteEnabled;
     this.partialCloseWriteEnabled = partialCloseWriteEnabled;
     this.armTrailWriteEnabled = armTrailWriteEnabled;
@@ -142,6 +157,8 @@ public class PositionsController {
 
     ForceCloseResult result =
         updateResolvingAdoption(tenant, workflowId, "force_close", ForceCloseResult.class, fr);
+    portfolioCache.invalidate(tenant);
+    openOccCache.invalidate(tenant); // the position is closing — its OCC leaves the marks set
 
     HttpStatus status =
         result.getStatus() == ForceCloseResult.Status.ACCEPTED
@@ -195,6 +212,7 @@ public class PositionsController {
 
     PartialCloseResult result =
         updateResolvingAdoption(tenant, workflowId, "partial_close", PartialCloseResult.class, pr);
+    portfolioCache.invalidate(tenant); // remaining qty changes; the OCC set does not
 
     HttpStatus status =
         result.getStatus() == PartialCloseResult.Status.ACCEPTED
@@ -278,6 +296,7 @@ public class PositionsController {
     HttpStatus status;
     if (result.getStatus() == ArmTrailResult.Status.ARMED) {
       status = HttpStatus.ACCEPTED;
+      portfolioCache.invalidate(tenant); // the row's trailing_armed / stop_price changed
     } else if (result.getStatus() == ArmTrailResult.Status.ALREADY_ARMED) {
       status = HttpStatus.OK;
     } else {

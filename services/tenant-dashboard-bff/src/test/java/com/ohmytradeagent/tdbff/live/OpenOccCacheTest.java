@@ -191,4 +191,18 @@ class OpenOccCacheTest {
       pool.shutdownNow();
     }
   }
+
+  @Test
+  void invalidate_forcesAFreshReadOnTheNextPoll() {
+    PositionsReader reader = mock(PositionsReader.class);
+    when(reader.openPositions("acme"))
+        .thenReturn(List.of(pos("wf1", OCC_A)), List.of(pos("wf1", OCC_A), pos("wf2", OCC_B)));
+    OpenOccCache cache = new OpenOccCache(reader, new MutableClock());
+
+    cache.get("acme");
+    cache.invalidate("acme");
+
+    assertThat(cache.get("acme").contractSymbols()).containsExactly(OCC_A, OCC_B);
+    verify(reader, times(2)).openPositions("acme");
+  }
 }
