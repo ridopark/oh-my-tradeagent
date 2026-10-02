@@ -1486,6 +1486,33 @@ class CopytradeSignalWorkflowImplTest {
     assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(0.5);
   }
 
+  @Test
+  void stc_enforceOn_fullIntent_noExitWord_keepsKeywordSizing() {
+    // 2026-10-01 INTC incident: tail "BANG" (no keyword, no exit word) was classified FULL at 0.71
+    // and flattened 16 contracts the author called a partial. The gate keeps the keyword default.
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit = runStcWithIntent(cfg, "BANG", CopytradeSignalPayload.CloseIntent.FULL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.3);
+    assertThat(exit.getSubject()).containsEntry("close_intent", "full");
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+  }
+
+  @Test
+  void stc_enforceOn_fullIntent_explicitPartialKeyword_keepsKeywordSizing() {
+    // Same incident with the author's second line restored: "half out" is explicit partial sizing,
+    // so a FULL verdict must not override it even though "out" is an exit word.
+    StrategyConfig cfg = intentConfig(new BigDecimal("0.3"), Boolean.TRUE);
+    AuditEvent exit =
+        runStcWithIntent(
+            cfg,
+            "BANG Partial. Half out. Keeping half for the bigger move",
+            CopytradeSignalPayload.CloseIntent.FULL);
+
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(0.5);
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+  }
+
   /** stcConfig()-shaped config with an explicit default_stc_fraction and stc_intent_enforce. */
   private StrategyConfig intentConfig(BigDecimal defaultFraction, Boolean enforce) {
     StrategyConfig c = stcConfig();

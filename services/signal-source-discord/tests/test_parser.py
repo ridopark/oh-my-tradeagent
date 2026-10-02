@@ -108,14 +108,31 @@ def test_sample_multiline_two_stcs():
 
 
 def test_sample_stc_with_continuation_commentary():
-    # Line 1 parses; line 2 ("mostly out now...") is commentary — no BTO/STC prefix
+    # Line 2 ("mostly out now...") has no BTO/STC prefix — it is appended to the STC's tail
     msg = (
         "STC MSFT 4/24 430c @ 3.20 partial\n"
         "mostly out now, holding a few. Also hit 425c from \u26d4 options-watchlist"
     )
     sigs = parse_message(msg, today=REF_DATE)
     assert len(sigs) == 1
-    assert sigs[0].tail == "partial"
+    assert sigs[0].tail == (
+        "partial mostly out now, holding a few. Also hit 425c from \u26d4 options-watchlist"
+    )
+    assert sigs[0].raw_line == "STC MSFT 4/24 430c @ 3.20 partial"
+
+
+def test_stc_sizing_on_next_line_joins_tail():
+    # The 2026-10-01 INTC incident: the sizing ("Partial. Half out.") was on line 2, the tail was
+    # read as just "BANG", and the close-intent classifier flattened 16 contracts.
+    msg = "STC INTC 10/09 125c @ 3.05 BANG\nPartial. Half out. Keeping half for the bigger move"
+    s = _one(msg)
+    assert s.tail == "BANG Partial. Half out. Keeping half for the bigger move"
+
+
+def test_continuation_does_not_attach_to_bto():
+    # BTO tails feed scale-in phrase detection — follow-on commentary stays out of them.
+    msg = "BTO INTC 10/09 125c @ 2.35 risky trying this again.\nDip buyers showing up strong on 30m."
+    assert _one(msg).tail == "risky trying this again."
 
 
 def test_sample_bto_simple():
@@ -270,7 +287,9 @@ def test_mixed_signal_and_noise():
     sigs = parse_message(msg, today=REF_DATE)
     assert len(sigs) == 2
     assert sigs[0].action == "BTO"
+    assert sigs[0].tail == ""
     assert sigs[1].action == "STC"
+    assert sigs[1].tail == "partial"
 
 
 # ---- de-risk cue classification (PLAN-2026-08-04-copytrade-derisk-followup-cue) ----
