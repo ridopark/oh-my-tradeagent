@@ -220,6 +220,235 @@ class AlpacaTradeUpdatesStreamTest {
         .isLessThanOrEqualTo(1);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // #887 — a failed auth/listen SEND must tear the socket down like every other handshake failure:
+  // abort it, clear the runner's handle, clear its subscribed flag. Before the fix the send's
+  // RuntimeException unwound straight to runForever, so the socket was never aborted, the handle
+  // still pointed at it through the backoff (status: connected=true), and the reconnect overwrote
+  // the handle — leaving the old socket open, Listener attached, unreachable by stop().
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Auth send fails (ExecutionException path; the frame never reaches the broker). The status
+   * snapshot is taken in the decorator on the RECONNECT, before the new socket is published — the
+   * one deterministic instant at which a leaked handle is still visible.
+   */
+  @Test
+  void aFailedAuthSendAbortsTheSocketAndClearsTheHandleBeforeReconnecting() throws Exception {
+    FaultySocketDecorator decorator =
+        new FaultySocketDecorator(stream, "\"action\":\"auth\"", FaultySocket.Mode.FAIL);
+    stream.socketDecorator = decorator;
+    stream.start();
+
+    // The first socket's auth was never delivered, so these are the RECONNECTED socket's frames.
+    awaitHandshake();
+    FaultySocket first = decorator.first();
+    assertThat(first.awaitAborted())
+        .as("a socket whose auth send failed must be aborted, not leaked")
+        .isTrue();
+    assertThat(decorator.statusAtReconnect())
+        .as("the failed socket's handle must be cleared before the reconnect")
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", false, false));
+    awaitLiveClients(1);
+  }
+
+  /**
+   * Listen send DELIVERED and ACKED, but its future never completes (TimeoutException path) — the
+   * issue's scenario 2/3: a client-side timeout does not prove Alpaca never got the frame, so the
+   * abandoned socket is subscribed. Teardown must abort it, clear the handle AND clear its
+   * subscribed flag; the status snapshot taken inside abort() — after the flag clear, before the
+   * handle clear — pins that the flag is cleared by the teardown itself, not by luck.
+   */
+  @Test
+  void aTimedOutListenSendAbortsTheSubscribedSocketAndClearsItsFlag() throws Exception {
+    FaultySocketDecorator decorator =
+        new FaultySocketDecorator(
+            stream, "\"action\":\"listen\"", FaultySocket.Mode.DELIVER_ACK_THEN_HANG);
+    decorator.server = server;
+    stream.socketDecorator = decorator;
+    stream.start();
+
+    awaitHandshake(); // first socket: auth + the delivered listen
+    awaitHandshake(); // reconnected socket (5s send timeout + backoff later)
+    FaultySocket first = decorator.first();
+    assertThat(first.ackedBeforeFailing)
+        .as("fixture: the listening ack must land on the first socket before its send times out")
+        .isTrue();
+    assertThat(first.awaitAborted())
+        .as("a socket whose listen send timed out must be aborted, not leaked")
+        .isTrue();
+    assertThat(first.statusAtAbort)
+        .as("teardown must clear the abandoned socket's subscribed flag")
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true, false));
+    assertThat(decorator.statusAtReconnect())
+        .as("the failed socket's handle must be cleared before the reconnect")
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", false, false));
+    awaitLiveClients(1);
+  }
+
+  /**
+   * Wraps the FIRST socket in a {@link FaultySocket}; on the reconnect, records {@code
+   * socketStatus()} before the new socket is published and passes it through unwrapped.
+   */
+  private static final class FaultySocketDecorator
+      implements java.util.function.UnaryOperator<java.net.http.WebSocket> {
+    private final AlpacaTradeUpdatesStream stream;
+    private final String failFrameMarker;
+    private final FaultySocket.Mode mode;
+    private final java.util.concurrent.atomic.AtomicInteger connections =
+        new java.util.concurrent.atomic.AtomicInteger();
+    private final CountDownLatch reconnected = new CountDownLatch(1);
+    private volatile FaultySocket first;
+    private volatile List<AlpacaTradeUpdatesStream.TenantSocketStatus> statusAtReconnect;
+    volatile RecordingWsServer server;
+
+    FaultySocketDecorator(
+        AlpacaTradeUpdatesStream stream, String failFrameMarker, FaultySocket.Mode mode) {
+      this.stream = stream;
+      this.failFrameMarker = failFrameMarker;
+      this.mode = mode;
+    }
+
+    @Override
+    public java.net.http.WebSocket apply(java.net.http.WebSocket ws) {
+      if (connections.incrementAndGet() == 1) {
+        first = new FaultySocket(ws, stream, server, failFrameMarker, mode);
+        return first;
+      }
+      if (reconnected.getCount() > 0) {
+        statusAtReconnect = stream.socketStatus();
+        reconnected.countDown();
+      }
+      return ws;
+    }
+
+    FaultySocket first() {
+      assertThat(first).as("no socket was ever built").isNotNull();
+      return first;
+    }
+
+    List<AlpacaTradeUpdatesStream.TenantSocketStatus> statusAtReconnect()
+        throws InterruptedException {
+      assertThat(reconnected.await(AWAIT_MS, TimeUnit.MILLISECONDS))
+          .as("the runner never reconnected")
+          .isTrue();
+      return statusAtReconnect;
+    }
+  }
+
+  /** Delegating JDK socket whose sendText of one frame fails or hangs. */
+  private static final class FaultySocket implements java.net.http.WebSocket {
+    enum Mode {
+      /** Fail the send without delivering the frame. */
+      FAIL,
+      /** Deliver the frame, have the server ack {@code listening}, then never complete. */
+      DELIVER_ACK_THEN_HANG
+    }
+
+    private final java.net.http.WebSocket delegate;
+    private final AlpacaTradeUpdatesStream stream;
+    private final RecordingWsServer server;
+    private final String failFrameMarker;
+    private final Mode mode;
+    private final CountDownLatch aborted = new CountDownLatch(1);
+    volatile boolean ackedBeforeFailing;
+    volatile List<AlpacaTradeUpdatesStream.TenantSocketStatus> statusAtAbort;
+
+    FaultySocket(
+        java.net.http.WebSocket delegate,
+        AlpacaTradeUpdatesStream stream,
+        RecordingWsServer server,
+        String failFrameMarker,
+        Mode mode) {
+      this.delegate = delegate;
+      this.stream = stream;
+      this.server = server;
+      this.failFrameMarker = failFrameMarker;
+      this.mode = mode;
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<java.net.http.WebSocket> sendText(
+        CharSequence data, boolean last) {
+      if (!data.toString().contains(failFrameMarker)) {
+        return delegate.sendText(data, last);
+      }
+      if (mode == Mode.FAIL) {
+        return java.util.concurrent.CompletableFuture.failedFuture(
+            new java.io.IOException("injected send failure"));
+      }
+      delegate.sendText(data, last).join();
+      server.broadcastBinary(
+          "{\"stream\":\"listening\",\"data\":{\"streams\":[\"trade_updates\"]}}");
+      long deadline = System.currentTimeMillis() + AWAIT_MS;
+      while (!stream.socketStatus().get(0).subscribed() && System.currentTimeMillis() < deadline) {
+        try {
+          Thread.sleep(20L);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+      ackedBeforeFailing = stream.socketStatus().get(0).subscribed();
+      return new java.util.concurrent.CompletableFuture<>(); // never completes
+    }
+
+    @Override
+    public void abort() {
+      statusAtAbort = stream.socketStatus();
+      aborted.countDown();
+      delegate.abort();
+    }
+
+    boolean awaitAborted() throws InterruptedException {
+      return aborted.await(AWAIT_MS, TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<java.net.http.WebSocket> sendBinary(
+        ByteBuffer data, boolean last) {
+      return delegate.sendBinary(data, last);
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<java.net.http.WebSocket> sendPing(
+        ByteBuffer message) {
+      return delegate.sendPing(message);
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<java.net.http.WebSocket> sendPong(
+        ByteBuffer message) {
+      return delegate.sendPong(message);
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<java.net.http.WebSocket> sendClose(
+        int statusCode, String reason) {
+      return delegate.sendClose(statusCode, reason);
+    }
+
+    @Override
+    public void request(long n) {
+      delegate.request(n);
+    }
+
+    @Override
+    public String getSubprotocol() {
+      return delegate.getSubprotocol();
+    }
+
+    @Override
+    public boolean isOutputClosed() {
+      return delegate.isOutputClosed();
+    }
+
+    @Override
+    public boolean isInputClosed() {
+      return delegate.isInputClosed();
+    }
+  }
+
   /** Polls until the server sees exactly {@code expected} live sockets; asserts at the deadline. */
   private void awaitLiveClients(int expected) throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_MS;

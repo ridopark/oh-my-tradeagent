@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -161,6 +162,13 @@ public class AlpacaTradeUpdatesStream {
   private final HttpClient http;
 
   private volatile boolean stopped;
+
+  /**
+   * Visible for testing (#887): applied to every freshly-built socket before the handshake, so a
+   * test can make {@code sendText} fail or hang — the real JDK client against a healthy server
+   * cannot. Identity in production.
+   */
+  volatile UnaryOperator<WebSocket> socketDecorator = UnaryOperator.identity();
 
   // {@code runners} + {@code runningTenants} are now mutated by BOTH the lifecycle thread
   // (start/stop, per-tenant mode) AND the @Scheduled re-enumeration thread. All enumerate-diff-add
@@ -661,9 +669,10 @@ public class AlpacaTradeUpdatesStream {
       WebSocket ws;
       try {
         ws =
-            http.newWebSocketBuilder()
-                .buildAsync(URI.create(endpoint.wsUrl()), listener)
-                .get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            socketDecorator.apply(
+                http.newWebSocketBuilder()
+                    .buildAsync(URI.create(endpoint.wsUrl()), listener)
+                    .get(HANDSHAKE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
       } catch (ExecutionException | TimeoutException e) {
         Throwable cause = e.getCause() != null ? e.getCause() : e;
         throw new RuntimeException("ws connect failed: " + cause, cause);
@@ -672,7 +681,15 @@ public class AlpacaTradeUpdatesStream {
       // Fresh connection => re-arm the unhandled-stream warnings, so a frame shape that only shows
       // up after a reconnect is not silenced by a warning emitted on the previous socket.
       unhandledStreamsWarned.clear();
-      sendAuth(ws, endpoint);
+      // #887: a failed or timed-out send takes the same teardown as every other handshake failure.
+      // Unwinding straight to runForever left the socket open, Listener attached, and its handle
+      // published through the backoff, until the reconnect overwrote it and stop() could no longer
+      // reach it.
+      try {
+        sendAuth(ws, endpoint);
+      } catch (RuntimeException e) {
+        throw abortHandshake(ws, subscribed, "auth send failed: " + e);
+      }
       // #751: the subscribe is GATED on an OBSERVED authorized reply. An unauthorized socket stays
       // OPEN and honors no subscriptions (how the June header-auth bug #471 hid), and a `listen`
       // processed before the auth is applied is dropped the same silent way — so `listen` is never
@@ -683,24 +700,33 @@ public class AlpacaTradeUpdatesStream {
         authStatus = authReply.get(AUTH_REPLY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       } catch (TimeoutException e) {
         throw abortHandshake(
-            ws, "no authorization reply within " + AUTH_REPLY_TIMEOUT.toMillis() + "ms");
+            ws,
+            subscribed,
+            "no authorization reply within " + AUTH_REPLY_TIMEOUT.toMillis() + "ms");
       } catch (ExecutionException e) {
         // authReply is only ever completed with a value, but get() declares this; fail closed.
-        throw abortHandshake(ws, "authorization wait failed: " + e.getCause());
+        throw abortHandshake(ws, subscribed, "authorization wait failed: " + e.getCause());
       }
       if (authStatus == null) {
         // onClose/onError complete with null: the socket died mid-handshake. abort() on a dead
         // socket is harmless; the point is reconnecting NOW instead of stalling out the full wait.
-        throw abortHandshake(ws, "socket closed before the authorization reply");
+        throw abortHandshake(ws, subscribed, "socket closed before the authorization reply");
       }
       if (!"authorized".equals(authStatus)) {
         throw abortHandshake(
             ws,
+            subscribed,
             "authorization reply status="
                 + authStatus
                 + "; refusing to subscribe on an unauthorized socket");
       }
-      sendListen(ws);
+      // #887: a listen send that timed out client-side may still have been DELIVERED, so this
+      // socket can be subscribed (or become so on a late ack). It must not outlive the attempt.
+      try {
+        sendListen(ws);
+      } catch (RuntimeException e) {
+        throw abortHandshake(ws, subscribed, "listen send failed: " + e);
+      }
       long recycleAfterMs = props.recycleAfterMs();
       if (recycleAfterMs > 0L) {
         long wait = recycleAfterMs + staggerMs;
@@ -775,8 +801,14 @@ public class AlpacaTradeUpdatesStream {
      * concurrent {@link #stop()} that reads the handle can find and close it; the finally clears it
      * on both paths so a throwing {@code abort()} cannot strand a stale handle. Returns the
      * exception for the caller to throw, which {@link #runForever} turns into backoff + reconnect.
+     *
+     * <p>#887: also clears this connection's {@code subscribed} flag, FIRST — a listen send that
+     * timed out client-side may have been delivered and acked. Clearing it before the abort means
+     * {@link #socketStatus()} never reports a socket under teardown as subscribed; unlike the
+     * handle, the flag is no reference to the socket, so clearing it early strands nothing.
      */
-    private RuntimeException abortHandshake(WebSocket ws, String reason) {
+    private RuntimeException abortHandshake(WebSocket ws, AtomicBoolean subscribed, String reason) {
+      subscribed.set(false);
       try {
         ws.abort();
       } finally {
