@@ -11,6 +11,8 @@ is connected:
 2. **The rest of the page refreshes every ~15s** (Qty, all-in, activity strips, account header).
 3. **A connection strip** at the top shows, each with green/amber/red and an age:
    Server (dashboard↔BFF), Stock stream, Option prices, Broker (fill stream), Discord watcher.
+4. **At least 10 concurrent `/live` viewers** (scope addition, approved 2026-10-01): broker/Temporal
+   snapshot work per tenant is independent of the number of viewers.
 
 ## Why (current state, verified 2026-10-01)
 
@@ -72,6 +74,12 @@ is connected:
 - exec: read-only `GET /status/fill-listener` →
   `{tenants:[{tenant_id, connected, subscription_confirmed, last_event_age_s, reconnects}]}` from the
   state `FillListenerMetrics` already tracks. No change to the listener itself.
+  *Amended 2026-10-01 (user decision):* the BFF must NOT reach exec directly — a NetworkPolicy is
+  port-level, so admitting the BFF would also expose the live exec pod's
+  `/internal/broker-credentials` route to it, and `infra/k8s/52*-exec-*.yaml` stay untouched by this
+  plan. The BFF reads this status through a read-only api-gateway route
+  (`GET /internal/live/fill-listener-status?tenant=`) that reuses api-gateway's existing
+  tenant → broker_target → exec routing and service-token auth; unreachable → Broker "unknown".
 - signal-source-discord: make the watcher's heartbeat readable by the BFF with the least new
   infrastructure (consult: tiny HTTP `/healthz` on the existing pod behind its Service, or a
   heartbeat key via an endpoint the sidecar already calls). The publish must be fire-and-forget with
@@ -89,6 +97,12 @@ is connected:
   concurrently.
 - Portfolio rows gain an additive `lastday_price` field (already known inside
   `BrokerPositionsClient`) so the dashboard can compute today's P&L at bid.
+- *Scope addition (approved 2026-10-01) — 10 concurrent viewers:* cache each tenant's full portfolio
+  read (positions + Alpaca marks + account equity, the work behind `GET /api/portfolio`) for ~10s,
+  keyed by tenant, single-flight (concurrent requests for the same tenant share one in-flight load).
+  Force-exit / trim / stop-loss (and manual-entry) success paths invalidate that tenant's cache so the
+  operator sees the result immediately. Alpaca trading-API calls per tenant are then independent of
+  viewer count (≤ 2 per 10s window).
 
 ### P4 — dashboard /live (dashboard-dev)
 
@@ -122,6 +136,11 @@ is connected:
 5. Rendered evidence: screenshot of `/live` with the connection strip and live-marked holdings
    (local run against stub/sandbox data is acceptable), plus a screenshot of the degraded state
    (BFF marks endpoint failing → cells stale, Server red within 5s).
+6. *(Scope addition, approved 2026-10-01)* Load check: 10 concurrent viewers of the same tenant for
+   60s (1s marks poll, 5s connection poll, 15s full refresh each) against the BFF with the broker
+   client mocked/counted. Pass = broker/Temporal snapshot calls ≤ 1 load per 10s window for that
+   tenant (not ×10), no request errors, and p95 latency of `/api/live/marks` < 200ms locally. The
+   script lives under `scripts/` or the BFF test tree; its output is pasted into the PR evidence.
 
 ## Halt conditions
 
