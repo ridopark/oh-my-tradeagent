@@ -850,6 +850,8 @@ export interface LiveMark {
   mid: number | null;
   ask: number | null;
   quote_at: string | null;
+  // When market-data last polled the contract; absent = market-data predates the field.
+  polled_at?: string | null;
   underlying: { ticker: string | null; price: number | null; at: string | null } | null;
   warming: boolean;
   capped: boolean;

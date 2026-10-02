@@ -148,3 +148,40 @@ test("fmtAge", () => {
   assert.equal(fmtAge(125), "2m");
   assert.equal(fmtAge(7300), "2h");
 });
+
+// PLAN-2026-10-01-live-marks-polled-at P3: the bid's freshness is when market-data last polled it
+// (`polled_at`), not when the quote last changed (`quote_at`), whenever the field is present.
+test("polled_at: a quiet contract (old quote, fresh poll) is usable, aged by the poll", () => {
+  const quiet = mark({ quote_at: "2026-10-01T14:59:10Z", polled_at: "2026-10-01T15:00:09Z" });
+  assert.deepEqual(bidUsability(quiet, clock()), { usable: true, value: 2.5, ageS: 1 });
+});
+
+test("polled_at: a stalled poll is stale even when quote_at looks fresh", () => {
+  const stalled = mark({ quote_at: "2026-10-01T15:00:08Z", polled_at: "2026-10-01T14:59:55Z" });
+  assert.deepEqual(bidUsability(stalled, clock()), { usable: false, reason: "stale", ageS: 15 });
+});
+
+test("polled_at absent: quote_at decides exactly as before", () => {
+  assert.deepEqual(bidUsability(mark(), clock()), { usable: true, value: 2.5, ageS: 2 });
+  assert.deepEqual(bidUsability(mark({ quote_at: "2026-10-01T14:59:59Z" }), clock()), {
+    usable: false,
+    reason: "stale",
+    ageS: 11,
+  });
+});
+
+test("polled_at: null (present, never polled) is no-quote, not a fallback to a fresh quote_at", () => {
+  assert.deepEqual(bidUsability(mark({ polled_at: null }), clock()), { usable: false, reason: "no-quote", ageS: null });
+});
+
+test("polled_at: server / capped / warming gates still win over a fresh poll", () => {
+  const fresh = { polled_at: "2026-10-01T15:00:09Z" };
+  assert.equal(bidUsability(mark(fresh), clock({ failures: 3 })).reason, "server");
+  assert.equal(bidUsability(mark({ ...fresh, capped: true }), clock()).reason, "capped");
+  assert.equal(bidUsability(mark({ ...fresh, warming: true }), clock()).reason, "warming");
+});
+
+test("polled_at: the underlying is still aged by its own print time", () => {
+  const m = mark({ polled_at: "2026-10-01T15:00:09Z", underlying: { price: 41.12, at: "2026-10-01T14:59:55Z" } });
+  assert.deepEqual(underlyingUsability(m, clock()), { usable: false, reason: "stale", ageS: 15 });
+});
