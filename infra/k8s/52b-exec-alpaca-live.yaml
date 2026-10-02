@@ -223,38 +223,3 @@ spec:
             limits:
               cpu: 1000m
               memory: 768Mi
----
-# Restrict who may reach the LIVE exec pod's HTTP port (8080) — the twin of
-# exec-alpaca-paper-allow-api-gateway-internal in 52-exec-alpaca-paper.yaml. This policy was applied
-# to the cluster by hand (live object created 2026-07-05) and is now declared here verbatim
-# (server-managed fields stripped) so the repo matches prod.
-#
-# live-realtime-holdings P2: tenant-dashboard-bff is ALSO admitted, to read the unauthenticated
-# `GET /status/fill-listener` (the /live broker light). A NetworkPolicy is port-level, so the BFF
-# can reach /internal/broker-credentials too — it stays bearer-gated by ExecAdminTokenFilter, and
-# the BFF does not hold EXEC_ADMIN_SHARED_TOKEN.
-#
-# This file is NOT applied by deploy.yml (the real-money pod is manual-only): apply it by hand.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: exec-alpaca-live-allow-api-gateway-internal
-  namespace: copytrade
-  labels:
-    app: exec-alpaca-live
-spec:
-  podSelector:
-    matchLabels:
-      app: exec-alpaca-live
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: api-gateway
-        - podSelector:
-            matchLabels:
-              app: tenant-dashboard-bff
-      ports:
-        - protocol: TCP
-          port: 8080
