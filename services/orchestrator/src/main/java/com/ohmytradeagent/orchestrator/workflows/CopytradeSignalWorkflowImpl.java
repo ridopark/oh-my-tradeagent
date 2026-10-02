@@ -35,6 +35,7 @@ import com.ohmytradeagent.orchestrator.domain.BtoPricing;
 import com.ohmytradeagent.orchestrator.domain.BtoPricing.PricedLimit;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveInput;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
+import com.ohmytradeagent.orchestrator.domain.ExitCueMatcher;
 import com.ohmytradeagent.orchestrator.domain.KeywordPartialMatcher;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
@@ -1574,7 +1575,16 @@ public class CopytradeSignalWorkflowImpl implements CopytradeSignalWorkflow {
     // enforce is on and the classifier says FULL; otherwise PARTIAL (defer to keyword — no
     // demotion), no verdict, or shadow-mode all size it from the keyword fraction. intentApplied
     // still drives intent_source in the audit subject below.
-    boolean intentApplied = enforce && intent == CopytradeSignalPayload.CloseIntent.FULL;
+    // 2026-10-01 INTC incident gate: promote ONLY when no keyword matched (an explicit partial
+    // keyword like "partial"/"half out" is author sizing the classifier must not override) AND the
+    // tail mentions exiting at all (bare "BANG" was read as FULL at 0.71 and flattened a partial).
+    // Every legitimate prod_real promotion to date satisfied both. Same replay argument as above:
+    // pure computation changing only the signal payload value.
+    boolean intentApplied =
+        enforce
+            && intent == CopytradeSignalPayload.CloseIntent.FULL
+            && matchResult.matchedKey().isEmpty()
+            && ExitCueMatcher.mentionsExit(payload.getTail());
     double effectiveFraction = intentApplied ? 1.0 : keywordFraction;
 
     // The primary dispatch is wrapped in a labeled block so its two bail-outs (target not RUNNING,

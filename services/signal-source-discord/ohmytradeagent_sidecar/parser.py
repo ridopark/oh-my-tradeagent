@@ -3,8 +3,12 @@
 Grammar (per-line, case-insensitive):
     (BTO|STC|AVG) TICKER M/D[/YY] STRIKE(C|P) [@] PRICE [tail]
 
-The tail is captured verbatim. Partial-exit fraction mapping happens
-downstream in the Go strategy (TOML-driven keyword table).
+The tail is captured verbatim. Non-signal lines that follow an STC line are
+appended to that STC's tail: authors often put the sizing on the next line
+("STC ... @ 3.05 BANG" / "Partial. Half out."), and dropping it lets a
+downstream full-close verdict flatten what the author called a partial.
+Partial-exit fraction mapping happens downstream in the Go strategy
+(TOML-driven keyword table).
 
 AVG messages are retrospective in the observed channel (author posts the new
 average after the fill). They are parsed and returned so the caller can decide
@@ -14,7 +18,7 @@ to skip or act; the Go strategy skips by default via `skip_avg = true`.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 _LINE_RE = re.compile(
@@ -139,6 +143,9 @@ def parse_message(text: str, today: date | None = None) -> list[ParsedSignal]:
             continue
         m = _LINE_RE.match(line)
         if not m:
+            if out and out[-1].action == "STC":
+                prev = out[-1]
+                out[-1] = replace(prev, tail=f"{prev.tail} {line}".strip())
             continue
         out.append(
             ParsedSignal(
