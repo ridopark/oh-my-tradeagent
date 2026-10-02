@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.web;
 
+import static org.hamcrest.Matchers.hasEntry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -61,6 +62,7 @@ class LiveMarksControllerWebMvcTest {
     m.put("mid", 1.3);
     m.put("ask", 1.35);
     m.put("quote_at", "2026-10-01T14:00:00Z");
+    m.put("polled_at", "2026-10-01T14:00:01Z");
     m.put("underlying", Map.of("ticker", "SPY", "price", 737.5, "at", "2026-10-01T14:00:00Z"));
     m.put("warming", false);
     m.put("capped", false);
@@ -101,9 +103,27 @@ class LiveMarksControllerWebMvcTest {
         .andExpect(jsonPath("$.marks[0].occ").value(PADDED))
         .andExpect(jsonPath("$.marks[0].bid").value(1.25))
         .andExpect(jsonPath("$.marks[0].quote_at").value("2026-10-01T14:00:00Z"))
+        .andExpect(jsonPath("$.marks[0].polled_at").value("2026-10-01T14:00:01Z"))
         .andExpect(jsonPath("$.marks[0].underlying.price").value(737.5))
         .andExpect(jsonPath("$.marks[0].warming").value(false))
         .andExpect(jsonPath("$.marks[0].capped").value(false));
+  }
+
+  /**
+   * A null {@code polled_at} (never polled) must reach the dashboard as a present null, not be
+   * dropped: an absent key makes the dashboard fall back to {@code quote_at}.
+   */
+  @Test
+  void aNullPolledAt_isPassedThroughAsAPresentNull() throws Exception {
+    when(reader.openPositions("nullpolled")).thenReturn(List.of(pos()));
+    Map<String, Object> m = mark(COMPACT);
+    m.put("polled_at", null);
+    when(marksClient.marks(List.of(COMPACT)))
+        .thenReturn(new MarksResponse("2026-10-01T14:00:01Z", List.of(m)));
+
+    mvc.perform(get("/api/live/marks").header("X-Tenant-Id", "nullpolled"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.marks[0]", hasEntry("polled_at", null)));
   }
 
   @Test

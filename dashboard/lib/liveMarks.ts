@@ -6,7 +6,10 @@
 /** Equity-option contract multiplier — the same ×100 the BFF's unrealized_pl uses. */
 export const OPTIONS_MULTIPLIER = 100;
 
-/** A mark (or underlying print) older than this is not live, whatever the poll says. */
+/**
+ * A mark (or underlying print) older than this is not live. For the bid, "age" is since market-data
+ * last polled it (`polled_at`) when the field is present, else since the quote last changed.
+ */
 export const MARK_MAX_AGE_S = 10;
 
 /** Consecutive failed marks polls after which the Server light is red and every mark is unusable. */
@@ -25,6 +28,8 @@ export const OPTION_LATE_S = 5;
 export interface MarkInput {
   bid: number | null;
   quote_at: string | null;
+  /** When market-data last polled this contract. Absent = market-data predates the field. */
+  polled_at?: string | null;
   underlying?: { price: number | null; at: string | null } | null;
   warming: boolean;
   capped: boolean;
@@ -80,12 +85,16 @@ function gate(mark: MarkInput, clock: FrameClock): MarkReason | null {
   return null;
 }
 
-/** Whether a mark's option BID may be shown as live. Never true for missing/warming/capped/old marks. */
+/**
+ * Whether a mark's option BID may be shown as live. Never true for missing/warming/capped/old marks.
+ * Aged by `polled_at` when present (a quiet contract's unchanged quote is still live); a present
+ * null is no-quote, never a fallback to `quote_at`.
+ */
 export function bidUsability(mark: MarkInput | null | undefined, clock: FrameClock | null): Usability {
   if (mark == null || clock === null) return { usable: false, reason: "missing", ageS: null };
   const reason = gate(mark, clock);
   if (reason !== null) return { usable: false, reason, ageS: null };
-  return usableAt(mark.bid, mark.quote_at, clock);
+  return usableAt(mark.bid, mark.polled_at !== undefined ? mark.polled_at : mark.quote_at, clock);
 }
 
 /** Same rule for the mark's underlying price, which carries its own timestamp. */
