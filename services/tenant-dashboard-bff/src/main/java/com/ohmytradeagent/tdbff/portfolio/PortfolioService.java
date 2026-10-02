@@ -458,6 +458,27 @@ public class PortfolioService {
                 .multiply(BigDecimal.valueOf(p.remainingQty()))
                 .divide(BigDecimal.valueOf(marks.brokerQty()), 2, RoundingMode.HALF_UP));
       }
+      // Per-contract intraday BASE (PLAN-2026-10-01 P3; Alpaca's lastday_price is not mapped):
+      //   lastday_price = current − broker intraday / (broker_qty × 100)
+      // from the BROKER-level figures, so it is identical on sibling rows. For a position opened
+      // today Alpaca measures intraday from cost basis, so this equals the entry premium — the
+      // base the dashboard's live "P&L today" at bid needs. Omitted when any input is missing.
+      if (marks.currentPrice() != null
+          && marks.unrealizedIntradayPl() != null
+          && marks.brokerQty() != null
+          && marks.brokerQty() > 0) {
+        m.put(
+            "lastday_price",
+            marks
+                .currentPrice()
+                .subtract(
+                    marks
+                        .unrealizedIntradayPl()
+                        .divide(
+                            BigDecimal.valueOf(marks.brokerQty()).multiply(OPTIONS_MULTIPLIER),
+                            4,
+                            RoundingMode.HALF_UP)));
+      }
     }
     // Armed-trailing-stop state, straight off the position's own workflow. trailing_armed is
     // ALWAYS present (a row must state its protection status either way, and an absent key would

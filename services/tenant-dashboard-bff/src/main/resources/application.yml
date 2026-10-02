@@ -220,6 +220,16 @@ positions:
   arm-trail:
     write-enabled: ${POSITIONS_ARM_TRAIL_WRITE_ENABLED:true}
 
+# PLAN-2026-10-01 P3 /api/live/connection status sources (read-only probes, never order paths).
+# exec: GET /status/fill-listener on the pod serving the tenant's broker_target.
+exec:
+  base-url:
+    alpaca-paper: ${EXEC_ALPACA_PAPER_BASE_URL:http://exec-alpaca-paper:8080}
+    alpaca-live: ${EXEC_ALPACA_LIVE_BASE_URL:http://exec-alpaca-live:8080}
+# Discord sidecar: GET /healthz -> {"heartbeat_age_s": num|null}.
+signal-source-discord:
+  base-url: ${SIGNAL_SOURCE_DISCORD_BASE_URL:http://signal-source-discord:8090}
+
 management:
   endpoints:
     web:

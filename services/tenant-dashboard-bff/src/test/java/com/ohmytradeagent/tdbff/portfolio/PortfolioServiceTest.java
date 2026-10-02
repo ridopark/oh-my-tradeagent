@@ -364,6 +364,8 @@ class PortfolioServiceTest {
     assertThat((BigDecimal) pos.get("current_price")).isEqualByComparingTo("1.20");
     assertThat((BigDecimal) pos.get("unrealized_pl")).isEqualByComparingTo("180.00");
     assertThat((BigDecimal) pos.get("unrealized_intraday_pl")).isEqualByComparingTo("-15.00");
+    // Per-contract intraday base: 1.20 - (-15.00) / (5 x 100) = 1.23.
+    assertThat((BigDecimal) pos.get("lastday_price")).isEqualByComparingTo("1.23");
   }
 
   @Test
@@ -428,6 +430,10 @@ class PortfolioServiceTest {
     // Shared per-unit mark stays shared.
     assertThat((BigDecimal) manual.get("current_price")).isEqualByComparingTo("2.33");
     assertThat((BigDecimal) healed.get("current_price")).isEqualByComparingTo("2.33");
+    // The intraday base is per-contract and identical on both siblings: derived from the BROKER
+    // figures (2.33 - (-1274.00) / (26 x 100) = 2.82, the incident's real lastday), never prorated.
+    assertThat((BigDecimal) manual.get("lastday_price")).isEqualByComparingTo("2.82");
+    assertThat((BigDecimal) healed.get("lastday_price")).isEqualByComparingTo("2.82");
   }
 
   @Test
@@ -461,6 +467,44 @@ class PortfolioServiceTest {
     assertThat((BigDecimal) pos.get("current_price")).isEqualByComparingTo("2.33");
     assertThat(pos).doesNotContainKey("unrealized_pl");
     assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
+    assertThat(pos).doesNotContainKey("lastday_price");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void lastdayPrice_omittedWhenMarkOrIntradayMissing() {
+    String paddedOcc = "SMCI  261120C00050000";
+    String compactOcc = "SMCI261120C00050000";
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1", "s1", paddedOcc, 5, new BigDecimal("2.78"), new BigDecimal("1390"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("2.33"), new BigDecimal("-225.00"), null, 5L)));
+
+    Map<String, Object> pos =
+        ((List<Map<String, Object>>) service.portfolio("acme").get("open_positions")).get(0);
+    assertThat(pos).doesNotContainKey("lastday_price");
+
+    when(brokerPositions.marksFor("alpaca-paper", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                compactOcc,
+                new BrokerPositionsClient.PositionMarks(
+                    null, null, new BigDecimal("-245.00"), 5L)));
+    pos = ((List<Map<String, Object>>) service.portfolio("acme").get("open_positions")).get(0);
+    assertThat(pos).doesNotContainKey("lastday_price");
   }
 
   @Test
@@ -498,6 +542,7 @@ class PortfolioServiceTest {
     // Total still computes (own basis); TODAY is omitted — never an ArithmeticException.
     assertThat((BigDecimal) pos.get("unrealized_pl")).isEqualByComparingTo("-225.00");
     assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
+    assertThat(pos).doesNotContainKey("lastday_price");
   }
 
   @Test
@@ -536,6 +581,7 @@ class PortfolioServiceTest {
     assertThat(pos).doesNotContainKey("current_price");
     assertThat(pos).doesNotContainKey("unrealized_pl");
     assertThat(pos).doesNotContainKey("unrealized_intraday_pl");
+    assertThat(pos).doesNotContainKey("lastday_price");
     assertThat(pos).containsEntry("contract_symbol", "AAPL260116C00200000");
   }
 
