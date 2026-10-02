@@ -1157,8 +1157,15 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca auth rejected: " + message, "AuthError");
     }
-    if (haystack.contains("insufficient_buying_power")
-        || haystack.contains("insufficient buying power")) {
+    // Matched as the two HALVES rather than a fixed literal, because Alpaca words this per asset
+    // class and slots the qualifier BETWEEN them: an underfunded options buy returns "insufficient
+    // options buying power", which contains neither "insufficient buying power" nor
+    // "insufficient_buying_power". #873: that miss sent a live prod-soonwon rejection down to the
+    // 403/40310000 branch below — Alpaca reuses that code here — and reported a merely underfunded
+    // account as a DELIBERATE operator halt, which also suppresses kill-switch treatment. This
+    // check stays ahead of that branch so the specific classification wins over the generic one.
+    if (haystack.contains("insufficient")
+        && (haystack.contains("buying power") || haystack.contains("buying_power"))) {
       return ApplicationFailure.newNonRetryableFailure(
           "Alpaca rejected order: " + message, "InsufficientFundsError");
     }

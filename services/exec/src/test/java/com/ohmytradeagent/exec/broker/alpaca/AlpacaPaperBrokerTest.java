@@ -239,6 +239,32 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeOrder_insufficientOPTIONSBuyingPower_throwsInsufficientFundsNotAccountOrdersBlocked() {
+    // LIVE 2026-10-01 (prod-soonwon): Alpaca rejects an underfunded OPTIONS buy with the word
+    // "options" sitting between "insufficient" and "buying power", and returns the same 403 code
+    // 40310000 it uses for an operator-requested halt. The literal matched above
+    // ("insufficient buying power") does NOT appear in that string, so this used to fall through
+    // to the account-orders-blocked branch and report an underfunded account as a DELIBERATE
+    // broker-side halt — which also skips the kill-switch treatment that branch deliberately
+    // suppresses. The specific classification must win over the generic 403 one.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(403)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"code\":40310000,\"message\":\"insufficient options buying power\"}"));
+
+    assertThatThrownBy(() -> broker.placeOrder(request("intent-opts")))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            f -> {
+              assertThat(f.getType()).isEqualTo("InsufficientFundsError");
+              assertThat(f.getType())
+                  .isNotEqualTo(AlpacaPaperBroker.ACCOUNT_ORDERS_BLOCKED_ERROR_TYPE);
+              assertThat(f.isNonRetryable()).isTrue();
+            });
+  }
+
+  @Test
   void placeOrder_accountOrdersBlocked_throwsAccountOrdersBlockedErrorNonRetryable() {
     // prod_real intentional halt: Alpaca returns 403 {"code":40310000,"message":"new orders are
     // rejected by user request"} for an operator-halted account. This must fail fast as a terminal,
