@@ -242,6 +242,14 @@ class LiveViewersLoadCheckTest {
     String summary = summary(elapsed);
     System.out.println(summary);
 
+    // Non-vacuous: every endpoint was actually exercised and the portfolio really loaded, so the
+    // bounds below cannot pass on an empty run.
+    for (String path : List.of("/api/live/marks", "/api/live/connection", "/api/portfolio")) {
+      assertThat(latencies(path)).as("requests to %s", path).isNotEmpty();
+    }
+    assertThat(java.util.Arrays.stream(perWindow("BrokerPositionsClient.marksFor", elapsed)).sum())
+        .as("portfolio loads")
+        .isPositive();
     // (a) broker/Temporal snapshot loads: at most one per 10s window, per issuing cache.
     for (String dep :
         List.of(

@@ -58,9 +58,11 @@ public class PositionsController {
   private final WorkflowClient client;
 
   /**
-   * Read caches behind /live, invalidated after a SUCCESSFUL write so the operator sees the result
-   * on the next poll instead of up to a TTL later. Invalidation is a map removal that cannot throw,
-   * and runs only once the Update has returned — it never changes a write's outcome or response.
+   * Read caches behind /live, invalidated once a write's Update has RETURNED (force/partial close:
+   * any non-throwing outcome, a REJECTED one included — a harmless extra reload; stop-loss: ARMED
+   * only) so the operator sees the result on the next poll instead of up to a TTL later.
+   * Invalidation is a map removal that cannot throw; it never changes a write's outcome or
+   * response.
    */
   private final PortfolioCache portfolioCache;
 

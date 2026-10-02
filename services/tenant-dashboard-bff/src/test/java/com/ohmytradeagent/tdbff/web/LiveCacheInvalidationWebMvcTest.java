@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -234,6 +235,18 @@ class LiveCacheInvalidationWebMvcTest {
 
     verify(portfolioCache).invalidate("acme");
     verify(openOccCache).invalidate("acme");
+  }
+
+  @Test
+  void manualEntryStatus_filledPolledRepeatedly_invalidatesOnce() throws Exception {
+    // The status endpoint is a poll: repeat GETs on an already-filled entry must not keep flushing
+    // the tenant's cache (each flush sends the next portfolio read back to the broker).
+    entryStatusIs(CopytradeEntryStatus.State.FILLED);
+    entryStatusIs(CopytradeEntryStatus.State.FILLED);
+    entryStatusIs(CopytradeEntryStatus.State.FILLED);
+
+    verify(portfolioCache, times(1)).invalidate("acme");
+    verify(openOccCache, times(1)).invalidate("acme");
   }
 
   @Test
