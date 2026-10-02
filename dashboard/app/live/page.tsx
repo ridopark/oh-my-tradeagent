@@ -6,6 +6,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import { LiveActivationBanner } from "@/components/LiveActivationBanner";
+import { LocalTime } from "@/components/LocalTime";
 import {
   ContractChartLinks,
   ContractLink,
@@ -1030,17 +1031,6 @@ function accountCapText(cfg: TenantConfig | null): string | null {
   return parts.length > 0 ? parts.join(" or ") : null;
 }
 
-// "2026-09-22T14:31:10.907+00:00" -> "09-22 14:31Z". The raw ISO string is 29 characters and was
-// taking up to 214px of a 368px phone row — 58% of the width — which truncated the contract, qty and
-// price down to ~15 visible characters. UTC is kept (and marked) rather than converted: the rest of
-// the dashboard shows UTC, and a bare "14:31" would read as local. The full value stays in a title.
-function shortWhen(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : `${d.toISOString().slice(5, 16).replace("T", " ")}Z`;
-}
-
 // "INTC 261009C00125000 ×15 @ $2.29" — what a fill actually traded, for the Recent-trades strip.
 // The contract and qty come from the audit subject, which is absent on a pre-#276 event and can be
 // unparseable, so each part is appended only when present; a subject that yields nothing at all
@@ -1142,14 +1132,14 @@ function ActivityStrip({
                     away on a phone. From sm up it returns to its own right-aligned column. */}
                 <div className="truncate text-xs text-slate-500">
                   {r.secondary}
-                  <span className="sm:hidden"> &middot; {shortWhen(r.when)}</span>
+                  <span className="sm:hidden">
+                    {" "}
+                    &middot; <LocalTime iso={r.when} />
+                  </span>
                 </div>
               </div>
-              <div
-                className="hidden shrink-0 pl-3 text-xs text-slate-500 sm:block"
-                title={r.when}
-              >
-                {shortWhen(r.when)}
+              <div className="hidden shrink-0 pl-3 text-xs text-slate-500 sm:block">
+                <LocalTime iso={r.when} />
               </div>
             </li>
           ))}
