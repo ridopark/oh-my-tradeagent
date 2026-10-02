@@ -215,7 +215,11 @@ spec:
 ---
 # Enforce the off-ingress trust boundary at the network layer. ClusterIP already blocks external
 # traffic, but without a policy ANY pod in the namespace could reach the BFF on 8083 and (with the
-# shared token) spoof a tenant. This restricts ingress to the Next.js dashboard pod only.
+# shared token) spoof a tenant. This restricts ingress to the Next.js dashboard pod, plus the
+# api-gateway for the operator tenant-delete calls (DELETE .../dashboard-rows and GET
+# .../dashboard-rows/newest). Without the api-gateway peer those calls were refused at the network
+# layer, so every tenant delete 207'd at its dashboard_user step and "Retry cleanup" always failed
+# closed with "dashboard-row recency read faulted".
 # Note: k3s's NetworkPolicy controller (kube-router) permits health-probe traffic from the hosting
 # node, so the kubelet readiness/liveness probes on 8083 continue to work without an explicit rule.
 apiVersion: networking.k8s.io/v1
@@ -233,6 +237,9 @@ spec:
         - podSelector:
             matchLabels:
               app: dashboard
+        - podSelector:
+            matchLabels:
+              app: api-gateway
       ports:
         - protocol: TCP
           port: 8083
