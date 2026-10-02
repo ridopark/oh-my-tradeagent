@@ -391,6 +391,25 @@ public class AlpacaTradeUpdatesStream {
     }
   }
 
+  /** One runner's socket state as reported by {@link #socketStatus()}. */
+  public record TenantSocketStatus(String tenantId, boolean connected) {}
+
+  /**
+   * Read-only snapshot for {@code GET /status/fill-listener}: one row per runner — the tenant id
+   * ({@code "pod-wide"} in single-socket mode) and whether it currently holds a socket handle.
+   * {@code connected} means a WebSocket is open (set after the HTTP upgrade, before auth); it does
+   * not by itself prove the trade_updates subscription. Mutates nothing.
+   */
+  public List<TenantSocketStatus> socketStatus() {
+    synchronized (runnersLock) {
+      List<TenantSocketStatus> out = new ArrayList<>(runners.size());
+      for (TenantRunner runner : runners) {
+        out.add(new TenantSocketStatus(runner.tenant, runner.currentSocket.get() != null));
+      }
+      return out;
+    }
+  }
+
   /** Visible for testing: current live runner count (both single-socket and per-tenant modes). */
   int runnerCount() {
     synchronized (runnersLock) {

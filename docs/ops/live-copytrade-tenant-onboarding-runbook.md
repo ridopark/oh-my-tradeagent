@@ -83,6 +83,8 @@ manifests before flipping.
 4. **TLS + NetworkPolicy on the secret hop** — confirm `api-gateway → exec /internal/broker-credentials`
    is restricted by `NetworkPolicy` to the api-gateway pod only (`exec-alpaca-live-allow-api-gateway-internal`
    ✅). The api key/secret travels only on that direct HTTP body; it must never be reachable elsewhere.
+   (Since live-realtime-holdings the policy also admits `tenant-dashboard-bff` on 8080 for the unauthenticated
+   `GET /status/fill-listener`; the credential route stays bearer-gated and the BFF holds no exec admin token.)
 5. **`V6` index present on `exec_alpaca_live`** — verify (see Verification §). Already ✅.
 6. **No pre-existing cross-tenant duplicate accounts** in `broker_credentials` (else a write is rejected;
    the table is currently near-empty). Verify (see Verification §).

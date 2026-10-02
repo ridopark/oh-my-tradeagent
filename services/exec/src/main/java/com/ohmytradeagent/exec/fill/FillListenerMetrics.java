@@ -322,4 +322,23 @@ public class FillListenerMetrics {
     long t = lastEventEpochMs.get();
     return t == 0L ? null : Instant.ofEpochMilli(t);
   }
+
+  // --- Read-only accessors for GET /status/fill-listener (live-realtime-holdings P2). POD-WIDE:
+  // these counters carry no tenant tag, so a per-tenant view would need a listener change.
+
+  /** Pod-wide count of {@code listening} acks naming trade_updates since boot. */
+  public long subscriptionConfirmedCount() {
+    return (long) subscriptionConfirmed.count();
+  }
+
+  /** Pod-wide count of socket reconnects since boot (includes planned recycles). */
+  public long reconnectCount() {
+    return (long) reconnects.count();
+  }
+
+  /** Seconds since the most recent trade-update event on this pod; null before the first. */
+  public Double lastEventAgeSeconds() {
+    long t = lastEventEpochMs.get();
+    return t == 0L ? null : (clock.millis() - t) / 1000.0;
+  }
 }

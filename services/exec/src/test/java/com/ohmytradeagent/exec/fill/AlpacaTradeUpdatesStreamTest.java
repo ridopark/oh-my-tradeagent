@@ -1548,6 +1548,51 @@ class AlpacaTradeUpdatesStreamTest {
     assertThat(stream.runnerCount()).isEqualTo(1);
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // live-realtime-holdings P2 — read-only socketStatus() for GET /status/fill-listener
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void socketStatusIsConnectedAfterHandshakeAndDisconnectedOnceTheServerIsGone() throws Exception {
+    assertThat(stream.socketStatus()).as("no runners before start").isEmpty();
+
+    stream.start();
+    awaitHandshake();
+    assertThat(stream.socketStatus())
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", true));
+
+    // Stop the server: the socket closes and every reconnect attempt is refused, so the runner's
+    // current-socket handle stays null.
+    server.stop(500);
+    server = null;
+    long deadline = System.currentTimeMillis() + AWAIT_MS;
+    while (stream.socketStatus().get(0).connected() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(25L);
+    }
+    assertThat(stream.socketStatus())
+        .containsExactly(new AlpacaTradeUpdatesStream.TenantSocketStatus("pod-wide", false));
+  }
+
+  @Test
+  void socketStatusReportsOneRowPerTenantInPerTenantMode() throws Exception {
+    String url = "ws://localhost:" + port + "/stream";
+    MapCredentialSource creds =
+        new MapCredentialSource(
+            Map.of(
+                "alice", new BrokerCredentials("alice-key", "alice-secret", "", url, ""),
+                "bob", new BrokerCredentials("bob-key", "bob-secret", "", url, "")));
+    stream = perTenantStream(creds);
+    stream.start();
+    for (int i = 0; i < 4; i++) { // 2 tenants x (auth + listen)
+      assertThat(server.frames.poll(AWAIT_MS, TimeUnit.MILLISECONDS)).isNotNull();
+    }
+
+    assertThat(stream.socketStatus())
+        .containsExactlyInAnyOrder(
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("alice", true),
+            new AlpacaTradeUpdatesStream.TenantSocketStatus("bob", true));
+  }
+
   private List<String> drainFrames(long quietMs) throws InterruptedException {
     List<String> out = new ArrayList<>();
     String f;

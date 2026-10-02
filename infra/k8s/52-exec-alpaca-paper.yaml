@@ -252,6 +252,11 @@ spec:
 # node, so the kubelet liveness/readiness checks on 8080 keep working without an explicit rule.
 # Per the deploy model this file is applied as a whole (deploy.yml globs *-exec-alpaca-paper.yaml);
 # on a cluster where it is not auto-applied it must be applied manually (`kubectl apply -f`).
+#
+# live-realtime-holdings P2: tenant-dashboard-bff is ALSO admitted, to read the unauthenticated
+# `GET /status/fill-listener` (the /live broker light). A NetworkPolicy is port-level, so the BFF
+# can reach the credential route too — it stays bearer-gated by ExecAdminTokenFilter, and the BFF
+# does not hold EXEC_ADMIN_SHARED_TOKEN.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -267,6 +272,9 @@ spec:
         - podSelector:
             matchLabels:
               app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: tenant-dashboard-bff
       ports:
         - protocol: TCP
           port: 8080
