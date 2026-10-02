@@ -3,6 +3,7 @@ package com.ohmytradeagent.marketdata.marks;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.marks.DisplayInterestRegistry.Admission;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Tick;
 import jakarta.annotation.PreDestroy;
@@ -38,6 +39,10 @@ import org.springframework.stereotype.Component;
  * DisplayInterestRegistry#TTL} after the last request, so polling only runs while someone is
  * watching.
  *
+ * <p>{@code polledAt}: when the cached quote was last confirmed by a successful poll — the display
+ * snapshot's own success time, or on reuse the trail poll's {@code lastPollOkAt} (read-only via
+ * {@link MarketDataProvider#premiumFeedStatus}). A failed or skipped poll never advances it.
+ *
  * <p>Underlying: the last SIP trade already received (passive, no subscription) when the equity
  * feed is connected and the trade is at most {@link #SIP_MAX_AGE} old; otherwise a stock snapshot
  * cached per ticker and refreshed at most once per {@link #SNAPSHOT_MIN_GAP}, stamped with the
@@ -58,9 +63,19 @@ public class DisplayMarksService {
 
   public record Underlying(String ticker, BigDecimal price, Instant at) {}
 
-  /** {@code quote} is null until the first poll lands (then {@code warming}) or when capped. */
+  /**
+   * {@code quote} is null until the first poll lands (then {@code warming}) or when capped. {@code
+   * polledAt} is the last successful poll of that quote; null when unknown.
+   */
   public record DisplayMark(
-      String occ, Quote quote, Underlying underlying, boolean warming, boolean capped) {}
+      String occ,
+      Quote quote,
+      Instant polledAt,
+      Underlying underlying,
+      boolean warming,
+      boolean capped) {}
+
+  private record Cached(Quote quote, Instant polledAt) {}
 
   private final MarketDataProvider provider;
   private final FeedHealth feedHealth;
@@ -72,7 +87,7 @@ public class DisplayMarksService {
   private final DisplayInterestRegistry registry;
   private final DisplayRequestBudget budget;
   private final Map<String, ScheduledFuture<?>> tasks = new HashMap<>(); // guarded by lock
-  private final ConcurrentHashMap<String, Quote> quotes = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Cached> quotes = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Underlying> snapshots = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Instant> snapshotFetchedAt = new ConcurrentHashMap<>();
 
@@ -143,11 +158,14 @@ public class DisplayMarksService {
       }
       String ticker = tickerOf(occ);
       if (admission == Admission.CAPPED) {
-        out.add(new DisplayMark(occ, null, new Underlying(ticker, null, null), false, true));
+        out.add(new DisplayMark(occ, null, null, new Underlying(ticker, null, null), false, true));
         continue;
       }
-      Quote q = quotes.get(occ);
-      out.add(new DisplayMark(occ, q, underlying(ticker), q == null, false));
+      Cached c = quotes.get(occ);
+      out.add(
+          c == null
+              ? new DisplayMark(occ, null, null, underlying(ticker), true, false)
+              : new DisplayMark(occ, c.quote(), c.polledAt(), underlying(ticker), false, false));
     }
     return out;
   }
@@ -166,11 +184,13 @@ public class DisplayMarksService {
       }
       // Reusing the trail poll's quote costs no permit; a REST snapshot needs one (else keep the
       // previous cached quote).
-      Optional<Quote> q =
-          provider.premiumPollActive(occ)
-              ? provider.lastPolledQuote(occ)
-              : budget.tryAcquire() ? provider.snapshotQuote(occ) : Optional.empty();
-      q.ifPresent(v -> quotes.put(occ, v));
+      if (provider.premiumPollActive(occ)) {
+        // Stamp first: the trail writes the stamp before the quote, so it is never newer than it.
+        Instant trailOkAt = trailLastPollOkAt(occ);
+        provider.lastPolledQuote(occ).ifPresent(v -> quotes.put(occ, new Cached(v, trailOkAt)));
+      } else if (budget.tryAcquire()) {
+        provider.snapshotQuote(occ).ifPresent(v -> quotes.put(occ, new Cached(v, clock.instant())));
+      }
       refreshUnderlying(tickerOf(occ));
     } catch (RuntimeException e) {
       // Fail-soft: a thrown task would be silently descheduled by the executor.
@@ -189,6 +209,17 @@ public class DisplayMarksService {
       quotes.remove(occ);
       throw e;
     }
+  }
+
+  /** The trail poll's last-success stamp for {@code occ} (padded keys matched compact), or null. */
+  private Instant trailLastPollOkAt(String occ) {
+    String compact = occ.replace(" ", "");
+    return provider.premiumFeedStatus().values().stream()
+        .filter(st -> st.occSymbol().replace(" ", "").equals(compact))
+        .map(PremiumFeedStatus::lastPollOkAt)
+        .filter(java.util.Objects::nonNull)
+        .findFirst()
+        .orElse(null);
   }
 
   private Underlying underlying(String ticker) {

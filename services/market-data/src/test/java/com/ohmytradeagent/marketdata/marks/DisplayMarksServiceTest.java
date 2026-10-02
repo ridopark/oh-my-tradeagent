@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Tick;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -20,6 +21,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -379,5 +381,111 @@ class DisplayMarksServiceTest {
     // Slot freed: the next request re-registers with a fresh task.
     assertThat(only(service.marks(List.of(OCC))).warming()).isTrue();
     assertThat(scheduler.tasks).hasSize(2);
+  }
+
+  // --- polled_at (PLAN-2026-10-01-live-marks-polled-at P1) ---
+
+  @Test
+  void polledAtNullBeforeFirstSuccess() {
+    assertThat(only(service.marks(List.of(OCC))).polledAt()).isNull();
+    when(provider.snapshotQuote(anyString())).thenReturn(Optional.empty());
+    scheduler.runAll();
+    var m = only(service.marks(List.of(OCC)));
+    assertThat(m.warming()).isTrue();
+    assertThat(m.polledAt()).isNull();
+  }
+
+  @Test
+  void quietQuote_advancesPolledAt_notQuoteAt() {
+    service.marks(List.of(OCC));
+    scheduler.runAll();
+    var first = only(service.marks(List.of(OCC)));
+    assertThat(first.polledAt()).isEqualTo(T0);
+
+    clock.advance(Duration.ofMillis(500));
+    scheduler.runAll(); // same latestQuote.t: the market did not move
+
+    var second = only(service.marks(List.of(OCC)));
+    assertThat(second.quote().retrievedAt()).isEqualTo(first.quote().retrievedAt());
+    assertThat(second.polledAt()).isEqualTo(T0.plusMillis(500));
+  }
+
+  @Test
+  void emptySnapshot_leavesPolledAtUnchanged() {
+    service.marks(List.of(OCC));
+    scheduler.runAll();
+    when(provider.snapshotQuote(anyString())).thenReturn(Optional.empty());
+    clock.advance(Duration.ofSeconds(5));
+    scheduler.runAll();
+
+    var m = only(service.marks(List.of(OCC)));
+    assertThat(m.quote().bid()).isEqualByComparingTo("2.90");
+    assertThat(m.polledAt()).isEqualTo(T0);
+  }
+
+  @Test
+  void throwingSnapshot_leavesPolledAtUnchanged() {
+    service.marks(List.of(OCC));
+    scheduler.runAll();
+    when(provider.snapshotQuote(anyString())).thenThrow(new RuntimeException("boom"));
+    clock.advance(Duration.ofSeconds(5));
+    scheduler.runAll();
+
+    var m = only(service.marks(List.of(OCC)));
+    assertThat(m.quote().bid()).isEqualByComparingTo("2.90");
+    assertThat(m.polledAt()).isEqualTo(T0);
+  }
+
+  @Test
+  void noPermit_leavesPolledAtUnchanged() {
+    service.marks(List.of(OCC));
+    scheduler.tasks.get(0).run(); // OCC cached at T0
+    clock.advance(Duration.ofSeconds(1)); // fresh budget
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < 10; i++) {
+      occs.add("NVDA260516C00%03d000".formatted(100 + i));
+    }
+    service.marks(occs);
+    for (int i = 1; i <= 10; i++) {
+      scheduler.tasks.get(i).run(); // 9 option + 1 stock snapshot: budget spent
+    }
+
+    scheduler.tasks.get(0).run(); // no permit left this second
+
+    verify(provider, times(1)).snapshotQuote(OCC);
+    assertThat(service.marks(List.of(OCC)).get(0).polledAt()).isEqualTo(T0);
+  }
+
+  @Test
+  void trailReuse_reportsTrailLastPollOkAt() {
+    String padded = "NVDA  260516C00140000";
+    Instant trailOkAt = T0.minusMillis(300);
+    when(provider.premiumPollActive(OCC)).thenReturn(true);
+    when(provider.lastPolledQuote(OCC)).thenReturn(Optional.of(quote(padded, "4.10", "4.20")));
+    when(provider.premiumFeedStatus())
+        .thenReturn(Map.of(padded, new PremiumFeedStatus(padded, 1, 42L, trailOkAt, null, 0)));
+
+    service.marks(List.of(OCC)); // compact OCC requested
+    scheduler.runAll();
+
+    var m = only(service.marks(List.of(OCC)));
+    assertThat(m.quote().bid()).isEqualByComparingTo("4.10");
+    assertThat(m.polledAt()).isEqualTo(trailOkAt);
+    verify(provider, never()).snapshotQuote(anyString());
+  }
+
+  @Test
+  void trailReuse_noStatusRow_polledAtNull_quoteStillCached() {
+    when(provider.premiumPollActive(OCC)).thenReturn(true);
+    when(provider.lastPolledQuote(OCC)).thenReturn(Optional.of(quote(OCC, "4.10", "4.20")));
+    when(provider.premiumFeedStatus()).thenReturn(Map.of());
+
+    service.marks(List.of(OCC));
+    scheduler.runAll();
+
+    var m = only(service.marks(List.of(OCC)));
+    assertThat(m.warming()).isFalse();
+    assertThat(m.quote().bid()).isEqualByComparingTo("4.10");
+    assertThat(m.polledAt()).isNull();
   }
 }

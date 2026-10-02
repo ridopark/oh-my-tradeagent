@@ -19,8 +19,9 @@ import org.springframework.web.bind.annotation.RestController;
  * never calls a provider. Same no-auth, cluster-internal, display-only stance as {@code
  * MarketDataQuoteController}; explicit {@code @RequestParam} name for the same -parameters reason.
  *
- * <p>{@code {now, marks:[{occ, bid, mid, ask, quote_at, underlying:{ticker, price, at}, warming,
- * capped}]}} — nulls when unknown, ISO-8601 instants.
+ * <p>{@code {now, marks:[{occ, bid, mid, ask, quote_at, polled_at, underlying:{ticker, price, at},
+ * warming, capped}]}} — nulls when unknown, ISO-8601 instants. {@code quote_at} is the exchange's
+ * quote time; {@code polled_at} is when market-data last successfully polled that quote.
  */
 @RestController
 public class DisplayMarksController {
@@ -58,6 +59,7 @@ public class DisplayMarksController {
       row.put(
           "quote_at",
           q == null || q.retrievedAt() == null ? null : q.retrievedAt().toInstant().toString());
+      row.put("polled_at", m.polledAt() == null ? null : m.polledAt().toString());
       Map<String, Object> underlying = new LinkedHashMap<>();
       underlying.put("ticker", m.underlying().ticker());
       underlying.put("price", m.underlying().price());

@@ -43,14 +43,15 @@ class DisplayMarksControllerTest {
                         new BigDecimal("2.95"),
                         new BigDecimal("3.00"),
                         OffsetDateTime.parse("2026-10-01T14:30:00Z")),
+                    Instant.parse("2026-10-01T14:30:00.800Z"),
                     new Underlying(
                         "NVDA",
                         new BigDecimal("140.10"),
                         Instant.parse("2026-10-01T14:30:00.500Z")),
                     false,
                     false),
-                new DisplayMark(WARM, null, new Underlying("AMD", null, null), true, false),
-                new DisplayMark(CAP, null, new Underlying("TSLA", null, null), false, true)));
+                new DisplayMark(WARM, null, null, new Underlying("AMD", null, null), true, false),
+                new DisplayMark(CAP, null, null, new Underlying("TSLA", null, null), false, true)));
 
     // Whitespace (a padded OCC) is stripped and duplicates are dropped before the service sees it.
     mvc.perform(get("/md/marks").param("occ", LIVE, " AMD 260516C00150000", CAP, LIVE))
@@ -62,6 +63,7 @@ class DisplayMarksControllerTest {
         .andExpect(jsonPath("$.marks[0].mid").value(2.95))
         .andExpect(jsonPath("$.marks[0].ask").value(3.00))
         .andExpect(jsonPath("$.marks[0].quote_at").value("2026-10-01T14:30:00Z"))
+        .andExpect(jsonPath("$.marks[0].polled_at").value("2026-10-01T14:30:00.800Z"))
         .andExpect(jsonPath("$.marks[0].underlying.ticker").value("NVDA"))
         .andExpect(jsonPath("$.marks[0].underlying.price").value(140.10))
         .andExpect(jsonPath("$.marks[0].underlying.at").value("2026-10-01T14:30:00.500Z"))
@@ -86,7 +88,8 @@ class DisplayMarksControllerTest {
     when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
     when(service.marks(List.of(WARM)))
         .thenReturn(
-            List.of(new DisplayMark(WARM, null, new Underlying(null, null, null), true, false)));
+            List.of(
+                new DisplayMark(WARM, null, null, new Underlying(null, null, null), true, false)));
 
     mvc.perform(get("/md/marks").param("occ", WARM))
         .andExpect(status().isOk())
@@ -102,7 +105,9 @@ class DisplayMarksControllerTest {
     when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
     when(service.marks(List.of(LIVE)))
         .thenReturn(
-            List.of(new DisplayMark(LIVE, null, new Underlying("NVDA", null, null), true, false)));
+            List.of(
+                new DisplayMark(
+                    LIVE, null, null, new Underlying("NVDA", null, null), true, false)));
 
     mvc.perform(
             get("/md/marks")
@@ -131,5 +136,54 @@ class DisplayMarksControllerTest {
     mvc.perform(get("/md/marks").param("occ", occs)).andExpect(status().isOk());
 
     verify(service).marks(List.of(occs).subList(0, 25));
+  }
+
+  @Test
+  void serializesPolledAt_rightAfterQuoteAt() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    when(service.marks(List.of(LIVE)))
+        .thenReturn(
+            List.of(
+                new DisplayMark(
+                    LIVE,
+                    new Quote(
+                        LIVE,
+                        new BigDecimal("2.90"),
+                        new BigDecimal("2.95"),
+                        new BigDecimal("3.00"),
+                        OffsetDateTime.parse("2026-10-01T14:29:00Z")),
+                    Instant.parse("2026-10-01T14:30:00.500Z"),
+                    new Underlying("NVDA", null, null),
+                    false,
+                    false)));
+
+    String body =
+        mvc.perform(get("/md/marks").param("occ", LIVE))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.marks[0].quote_at").value("2026-10-01T14:29:00Z"))
+            .andExpect(jsonPath("$.marks[0].polled_at").value("2026-10-01T14:30:00.500Z"))
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    org.assertj.core.api.Assertions.assertThat(body)
+        .contains("\"quote_at\":\"2026-10-01T14:29:00Z\",\"polled_at\":");
+  }
+
+  @Test
+  void polledAtNullWhenUnknown() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    when(service.marks(List.of(WARM)))
+        .thenReturn(
+            List.of(
+                new DisplayMark(WARM, null, null, new Underlying("AMD", null, null), true, false)));
+
+    String body =
+        mvc.perform(get("/md/marks").param("occ", WARM))
+            .andExpect(status().isOk())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    // An explicit null, not an absent key.
+    org.assertj.core.api.Assertions.assertThat(body).contains("\"polled_at\":null");
   }
 }
