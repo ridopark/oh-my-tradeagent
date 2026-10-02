@@ -180,3 +180,8 @@ test("polled_at: server / capped / warming gates still win over a fresh poll", (
   assert.equal(bidUsability(mark({ ...fresh, capped: true }), clock()).reason, "capped");
   assert.equal(bidUsability(mark({ ...fresh, warming: true }), clock()).reason, "warming");
 });
+
+test("polled_at: the underlying is still aged by its own print time", () => {
+  const m = mark({ polled_at: "2026-10-01T15:00:09Z", underlying: { price: 41.12, at: "2026-10-01T14:59:55Z" } });
+  assert.deepEqual(underlyingUsability(m, clock()), { usable: false, reason: "stale", ageS: 15 });
+});

@@ -185,7 +185,7 @@ public class DisplayMarksService {
       // Reusing the trail poll's quote costs no permit; a REST snapshot needs one (else keep the
       // previous cached quote).
       if (provider.premiumPollActive(occ)) {
-        // Stamp first: the trail writes the stamp before the quote, so it is never newer than it.
+        // Two separate reads of the trail's state: the pair can be one trail poll (~500ms) apart.
         Instant trailOkAt = trailLastPollOkAt(occ);
         provider.lastPolledQuote(occ).ifPresent(v -> quotes.put(occ, new Cached(v, trailOkAt)));
       } else if (budget.tryAcquire()) {

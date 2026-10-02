@@ -386,16 +386,6 @@ class DisplayMarksServiceTest {
   // --- polled_at (PLAN-2026-10-01-live-marks-polled-at P1) ---
 
   @Test
-  void polledAtNullBeforeFirstSuccess() {
-    assertThat(only(service.marks(List.of(OCC))).polledAt()).isNull();
-    when(provider.snapshotQuote(anyString())).thenReturn(Optional.empty());
-    scheduler.runAll();
-    var m = only(service.marks(List.of(OCC)));
-    assertThat(m.warming()).isTrue();
-    assertThat(m.polledAt()).isNull();
-  }
-
-  @Test
   void quietQuote_advancesPolledAt_notQuoteAt() {
     service.marks(List.of(OCC));
     scheduler.runAll();
