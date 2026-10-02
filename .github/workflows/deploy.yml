@@ -118,6 +118,9 @@ permissions:
   # calls 403 into their || true guards and the whole baseline mechanism silently
   # no-ops back to single-commit diffing — the bug it exists to fix.
   actions: read
+  # The exec-alpaca-live drift check maps the live pod's image digest back to the commit it was
+  # built from via the GHCR package-versions API (each image carries a 40-hex commit tag).
+  packages: read
 
 concurrency:
   group: deploy-homelab
@@ -517,7 +520,17 @@ jobs:
         # moment it happens, so the operator remembers to hand-roll the live pod when it's safe.
         # Fires only after a successful exec-alpaca-paper roll. Manual `kubectl` rolls of paper are
         # not covered (they're deliberate); this guards the automatic path.
+        #
+        # Drift is judged on SOURCE, not on digest. Every merge that rebuilds the exec image yields a
+        # new digest even when nothing exec is built from changed (builds are not reproducible), so a
+        # digest comparison paged "manual roll needed" for dashboard-only merges (2026-10-02: live at
+        # b6e9f604, paper at 9745a5c1, zero exec changes between them). The live digest is mapped
+        # to its commit via the image's commit tag, and only a change to an exec build input since
+        # that commit alerts. Any lookup failure alerts as before: an unverified "no drift" on the
+        # real-money pod is worse than a spurious page.
         if: ${{ success() && matrix.service == 'exec-alpaca-paper' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           NS="$NAMESPACE"
@@ -535,7 +548,37 @@ jobs:
             echo "::notice::exec-alpaca-live is on the same exec image as exec-alpaca-paper — no drift."
             exit 0
           fi
-          MSG="exec-alpaca-paper was just rolled to a NEW exec image, but exec-alpaca-live (REAL MONEY) is STILL on an OLDER image and was NOT updated — it is intentionally excluded from CI deploy. Roll it MANUALLY when the live account is flat / market is closed (replicas:1 → the roll briefly drops the live fill listener): kubectl rollout restart deployment/exec-alpaca-live -n copytrade   [paper=$paper live=$live commit=${GITHUB_SHA:0:8}]"
+
+          # The commit the live image was built from: its 40-hex tag in GHCR.
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
+          live_sha="$(api "users/${GITHUB_REPOSITORY_OWNER}/packages/container/oh-my-tradeagent-exec/versions?per_page=100" 2>/dev/null \
+            | jq -r --arg d "${live##*@}" '.[] | select(.name == $d) | .metadata.container.tags[] | select(test("^[0-9a-f]{40}$"))' 2>/dev/null \
+            | head -1 || true)"
+          echo "live_sha=${live_sha:-<unresolved>}"
+
+          # exec's build inputs: its own module, contract-java (+ the schemas/fixtures it is generated
+          # from — every contract/ path except contract/python), the root pom and the Docker build
+          # context. Mirrors the exec-alpaca-paper rows of the preflight path map above.
+          changed=""
+          reason="could not resolve the live image's source commit"
+          if [ -n "$live_sha" ]; then
+            if cmp_json="$(api "repos/${GITHUB_REPOSITORY}/compare/${live_sha}...${GITHUB_SHA}" 2>/dev/null)" \
+              && [ "$(jq '.files | length' <<< "$cmp_json")" -lt 300 ]; then
+              changed="$(jq -r '.files[].filename' <<< "$cmp_json" \
+                | grep -E '^(services/exec/|contract/|pom\.xml$|infra/docker/|\.dockerignore$)' \
+                | grep -v '^contract/python/' || true)"
+              if [ -z "$changed" ]; then
+                echo "::notice::exec-alpaca-live (${live_sha:0:8}) has a different digest but the SAME exec source as ${GITHUB_SHA:0:8} — a rebuild, not drift. No roll needed."
+                exit 0
+              fi
+              reason="exec build inputs changed since ${live_sha:0:8}: $(echo "$changed" | head -10 | paste -sd ' ' -)"
+            else
+              reason="could not diff ${live_sha:0:8}...${GITHUB_SHA:0:8} (compare failed or >=300 files)"
+            fi
+          fi
+          echo "$reason"
+
+          MSG="exec-alpaca-paper was just rolled to a NEW exec image, but exec-alpaca-live (REAL MONEY) is STILL on an OLDER image and was NOT updated — it is intentionally excluded from CI deploy. Roll it MANUALLY when the live account is flat / market is closed (replicas:1 → the roll briefly drops the live fill listener): kubectl rollout restart deployment/exec-alpaca-live -n copytrade   [${reason}; paper=$paper live=$live commit=${GITHUB_SHA:0:8}]"
           # Job log annotation + run summary (always).
           echo "::warning::$MSG"
           { echo "## ⚠️ exec-alpaca-live is BEHIND exec-alpaca-paper"; echo ""; echo "$MSG"; } >> "$GITHUB_STEP_SUMMARY"
