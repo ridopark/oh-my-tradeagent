@@ -222,9 +222,12 @@ jobs:
           # successful "Notify (nothing to roll)" job (docs-only runs ARE valid baselines:
           # nothing needed rolling, so the estate matches that sha). Candidates capped at
           # 10 jobs-API lookups; in practice the first candidate matches.
+          # Sorted newest-first HERE, not trusted from the API: on 2026-10-02 the status-filtered
+          # list twice put a 2026-07-26 success first, it became the baseline, the diff hit the
+          # 300-file cap and every service rolled.
           BASE_SHA=""
           candidates=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?status=success&per_page=50" \
-            --jq '[.workflow_runs[] | select(.event == "workflow_run")][:10][] | [(.id|tostring), .head_sha] | @tsv' 2>/dev/null || true)
+            --jq '[.workflow_runs[] | select(.event == "workflow_run")] | sort_by(.created_at) | reverse | .[:10][] | [(.id|tostring), .head_sha] | @tsv' 2>/dev/null || true)
           while IFS=$'\t' read -r rid rsha; do
             [ -z "$rid" ] && continue
             rolled=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}/jobs?per_page=50" \

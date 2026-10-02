@@ -19,8 +19,10 @@ those patterns without editing this file is meant to fail here.
 Run: python3 scripts/tests/test_deploy_matrix_routing.py
 """
 
+import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -144,6 +146,32 @@ class DeployRoutingTest(unittest.TestCase):
     def test_editing_deploy_yml_rolls_nothing(self):
         """Which is why the routing fix itself is safe to merge during market hours."""
         self.assertEqual(rolls([".github/workflows/deploy.yml"]), set())
+
+
+def baseline_candidates(api_response: dict) -> list:
+    """Run the workflow's own baseline-candidate jq filter over a runs-list API response."""
+    m = re.search(r"runs\?status=success[^\n]*\n\s*--jq '([^']+)'", _matrix_step())
+    if m is None:
+        raise AssertionError("baseline-candidate --jq filter not found in deploy.yml; update the extractor")
+    r = subprocess.run(
+        ["jq", "-r", m.group(1)], input=json.dumps(api_response),
+        capture_output=True, text=True, check=True,
+    )
+    return [line.split("\t")[1] for line in r.stdout.splitlines() if line]
+
+
+class DeployBaselineTest(unittest.TestCase):
+
+    def test_newest_run_is_first_even_when_the_api_lists_out_of_order(self):
+        """2026-10-02: twice the runs API listed a 2026-07-26 success first, the old filter took
+        it as the baseline, the diff hit the 300-file cap and every service rolled."""
+        runs = {"workflow_runs": [
+            {"id": 1, "event": "workflow_run", "head_sha": "old", "created_at": "2026-07-26T16:35:07Z"},
+            {"id": 3, "event": "workflow_run", "head_sha": "newest", "created_at": "2026-10-02T03:38:35Z"},
+            {"id": 9, "event": "workflow_dispatch", "head_sha": "dispatch", "created_at": "2026-10-02T04:00:00Z"},
+            {"id": 2, "event": "workflow_run", "head_sha": "newer", "created_at": "2026-10-02T03:11:51Z"},
+        ]}
+        self.assertEqual(baseline_candidates(runs), ["newest", "newer", "old"])
 
 
 if __name__ == "__main__":
