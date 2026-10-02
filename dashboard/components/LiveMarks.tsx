@@ -15,7 +15,6 @@ import {
   allIn,
   bidUsability,
   flashDirection,
-  fmtAge,
   liveValue,
   livePnlToday,
   livePnlTotal,
@@ -51,8 +50,6 @@ export interface LiveMarksState {
   failures: number;
   lastOkMs: number | null;
   conn: { data: LiveConnection; atMs: number } | null;
-  /** When the page's server values (the stale fallback) were rendered. */
-  renderedAtMs: number;
 }
 
 const Ctx = createContext<LiveMarksState | null>(null);
@@ -98,13 +95,7 @@ function useVisiblePoll(poll: () => Promise<void>, ms: number) {
  * clock, and three failures in a row make every mark unusable, so a dead poll can never leave a
  * frozen number looking live.
  */
-export function LiveMarksProvider({
-  renderedAt,
-  children,
-}: {
-  renderedAt: string;
-  children: ReactNode;
-}) {
+export function LiveMarksProvider({ children }: { children: ReactNode }) {
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [failures, setFailures] = useState(0);
@@ -160,9 +151,8 @@ export function LiveMarksProvider({
     }
   }, CONNECTION_POLL_MS);
 
-  const renderedAtMs = Date.parse(renderedAt);
   return (
-    <Ctx.Provider value={{ nowMs, frame, failures, lastOkMs, conn, renderedAtMs }}>
+    <Ctx.Provider value={{ nowMs, frame, failures, lastOkMs, conn }}>
       {children}
     </Ctx.Provider>
   );
@@ -186,15 +176,9 @@ function useMark(occ: string) {
   const s = useLiveMarks();
   const mark = s?.frame?.marks.get(occKey(occ));
   const clock = frameClock(s);
-  // Age of the server-rendered fallback, null before mount (no hydration-unsafe clock reads).
-  const serverAgeS =
-    s && s.nowMs !== null && Number.isFinite(s.renderedAtMs)
-      ? Math.max(0, (s.nowMs - s.renderedAtMs) / 1000)
-      : null;
   return {
     bid: bidUsability(mark, clock),
     underlying: underlyingUsability(mark, clock),
-    serverAgeS,
   };
 }
 
@@ -229,24 +213,11 @@ function Live({ value, children }: { value: number | null; children: ReactNode }
   );
 }
 
-/** The server-rendered broker value, muted and labelled with its age: never mistaken for live. */
-function Stale({
-  ageS,
-  inline,
-  children,
-}: {
-  ageS: number | null;
-  inline?: boolean;
-  children: ReactNode;
-}) {
+/** The server-rendered broker value, muted (no label) so it is never mistaken for a live one. */
+function Stale({ children }: { children: ReactNode }) {
   return (
-    <span title="Not live: broker value from the last page render">
-      <span className="opacity-50">{children}</span>
-      <span
-        className={`whitespace-nowrap text-[10px] uppercase tracking-wide text-slate-500 ${inline ? "ml-1" : "block"}`}
-      >
-        stale{ageS === null ? "" : ` ${fmtAge(ageS)}`}
-      </span>
+    <span className="opacity-50" title="Not live: broker value from the last page render">
+      {children}
     </span>
   );
 }
@@ -284,7 +255,7 @@ export function LivePremium({
   serverMark: number | null;
   inline?: boolean;
 }) {
-  const { bid, serverAgeS } = useMark(occ);
+  const { bid } = useMark(occ);
   const live = liveNumber(bid);
   if (entry === null && live === null && serverMark === null) {
     return <span className="text-slate-500">—</span>;
@@ -295,7 +266,7 @@ export function LivePremium({
   if (live === null) {
     return (
       <span className={wrap}>
-        <Stale ageS={serverAgeS} inline={inline}>
+        <Stale>
           <span className={line}>
             {entryText}
             <span className="text-slate-200"> → </span>
@@ -336,7 +307,7 @@ export function LiveUnderlying({
   ticker: string | null;
   inline?: boolean;
 }) {
-  const { underlying, serverAgeS } = useMark(occ);
+  const { underlying } = useMark(occ);
   const live = liveNumber(underlying);
   const now = live ?? serverPrice;
   if (entry === null && now === null) {
@@ -376,7 +347,7 @@ export function LiveUnderlying({
   return (
     <span className={inline ? undefined : "inline-block"}>
       {live === null ? (
-        <Stale ageS={serverAgeS} inline={inline}>
+        <Stale>
           {body}
         </Stale>
       ) : (
@@ -398,7 +369,7 @@ export function LiveCostValue({
   cost: number | string | null;
   serverValue: number | null;
 }) {
-  const { bid, serverAgeS } = useMark(occ);
+  const { bid } = useMark(occ);
   const live = bid.usable ? liveValue(bid.value, qty) : null;
   return (
     <span className="whitespace-nowrap">
@@ -411,7 +382,7 @@ export function LiveCostValue({
       ) : serverValue === null ? (
         <span className="text-slate-500">—</span>
       ) : (
-        <Stale ageS={serverAgeS} inline>
+        <Stale>
           <span className="text-slate-200">{fmtCurrency(serverValue)}</span>
         </Stale>
       )}
@@ -422,13 +393,9 @@ export function LiveCostValue({
 function LivePnl({
   live,
   server,
-  serverAgeS,
-  inline,
 }: {
   live: number | null;
   server: number | null;
-  serverAgeS: number | null;
-  inline?: boolean;
 }) {
   if (live !== null) {
     return (
@@ -441,7 +408,7 @@ function LivePnl({
     return <Pnl value={null} />;
   }
   return (
-    <Stale ageS={serverAgeS} inline={inline}>
+    <Stale>
       <Pnl value={server} />
     </Stale>
   );
@@ -461,9 +428,9 @@ export function LivePnlToday({
   serverValue: number | null;
   inline?: boolean;
 }) {
-  const { bid, serverAgeS } = useMark(occ);
+  const { bid } = useMark(occ);
   const live = bid.usable ? livePnlToday(bid.value, lastday, qty) : null;
-  return <LivePnl live={live} server={serverValue} serverAgeS={serverAgeS} inline={inline} />;
+  return <LivePnl live={live} server={serverValue} />;
 }
 
 /** P&L total (unrealized) = (bid − entry_premium) × remaining_qty × 100. */
@@ -480,9 +447,9 @@ export function LivePnlTotal({
   serverValue: number | null;
   inline?: boolean;
 }) {
-  const { bid, serverAgeS } = useMark(occ);
+  const { bid } = useMark(occ);
   const live = bid.usable ? livePnlTotal(bid.value, entry, qty) : null;
-  return <LivePnl live={live} server={serverValue} serverAgeS={serverAgeS} inline={inline} />;
+  return <LivePnl live={live} server={serverValue} />;
 }
 
 /** All-in = live unrealized + realized_pl. Only rendered where page.tsx's allInPl is non-null. */
@@ -503,7 +470,7 @@ export function LiveAllIn({
   prefix?: string;
   className: string;
 }) {
-  const { bid, serverAgeS } = useMark(occ);
+  const { bid } = useMark(occ);
   const live = bid.usable ? allIn(livePnlTotal(bid.value, entry, qty), realized) : null;
   const value = live ?? serverValue;
   const tone =
@@ -520,7 +487,7 @@ export function LiveAllIn({
   return value === null ? (
     text
   ) : (
-    <Stale ageS={serverAgeS} inline>
+    <Stale>
       {text}
     </Stale>
   );
