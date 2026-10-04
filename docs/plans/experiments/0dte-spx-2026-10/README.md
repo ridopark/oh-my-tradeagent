@@ -56,6 +56,37 @@ These were pre-registered in the `h1h2.py` docstring before any result was seen.
 - Calendar files are in `calendar/`.
 - To re-run, after `cvd_all.py`, run `offex_all.py $C` (~20 min) and then `h1h2.py $C`.
 
+## Round 3: "find a 0DTE strategy that works" (short premium, same day)
+- **Sources:** candidates came from a web, GitHub and Reddit search; see `candidates-lit-review-2026-10-04.md`.
+- **Pre-registration:** written in the `strategies.py` docstring before any result.
+- **Engine:** `engine.py`.
+  - Multi-leg positions on SPXW trade-print bars.
+  - Strikes chosen by delta or by target credit.
+  - Positions held to the close cash-settle at intrinsic value.
+- **Units:** P&L ÷ max risk, with each day as one observation.
+- **Pass rule:**
+  - base t ≥ 2.7;
+  - both halves (H1 2024-03..2025-06, H2 2025-07..2026-10) positive;
+  - stress mean > 0.
+
+| Candidate | Base mean / t | Zero-spread (fees only) t | Verdict |
+|---|---|---|---|
+| C6 base: Zarattini noise-area momentum, SPY | in-sample-era Sharpe 0.77 (t 2.2) → **post-publication (2024-05+) Sharpe −0.58** | — | dead after publication |
+| C6o short ATM SPXW on noise-area signal | +8.4% / 2.24 | 2.88 | FAIL; per trade t ≤ 1.15. Short puts carry it (bull market); the opposite-side placebo is only about 6 pts worse |
+| C1A MEIC 12:00–14:30 (per-side stop = total credit) | −0.4% / **−4.3** | **+3.46** | FAIL: real gross edge, smaller than 1 tick/leg of spread |
+| C1B MEIC hourly | −0.5% / −5.8 | +1.69 | FAIL |
+| C5 METF afternoon trend credit spreads | −0.2% / −1.1 | **+3.09** | FAIL: same pattern as MEIC |
+| C4A ORB-60 credit spread, hold | −0.6% / −0.5 (88% win) | 0.32 | FAIL; halves flip |
+| C4B ORB-60 credit spread, 2× stop | −1.0% / −1.9 | 1.75 | FAIL |
+| C7 control: 10:00 ATM iron fly | −22% / −7.6 | −4.0 | strongly negative (intraday short ATM vol loses, cf. Muravyev & Ni) |
+
+**Takeaway:**
+- MEIC and METF have a real *gross* edge, which is consistent with the practitioners' self-reports. Whether it is net-positive depends on execution: it needs fills at or near mid and stops on the short leg only.
+- Trade-print bars cannot settle that question. Settling it needs either quote data (ThetaData or Databento) or a paper-trading forward test with real fills.
+- Not tested:
+  - BigERN far-OTM writing: 4% OTM is outside the cache, and its $0.10 premiums are untestable on prints.
+  - Vilkov conditional classifier: needs his trained classifier.
+
 GEX and VVIX were **not tested**: Alpaca has no index data or historical greeks. A test needs paid data
 (ThetaData or Databento, about $80–200/month).
 

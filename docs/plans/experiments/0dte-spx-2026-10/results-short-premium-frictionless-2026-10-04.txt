@@ -1,0 +1,9 @@
+                                  days  mean_pct     t  total_pts     H1     H2
+strat                                                                          
+C1A MEIC 12:00-14:30               641      0.35  3.46     721.87   0.46   0.23
+C1B MEIC hourly                    645      0.20  1.69     486.87   0.34   0.06
+C4A ORB60 credit spread            493      0.40  0.32      31.63   2.83  -2.10
+C4B ORB60 credit spread stop2x     493      0.96  1.75      68.34   1.30   0.60
+C5 METF                            645      0.53  3.09     565.57   0.82   0.23
+C6o noise-area short-ATM overlay   389     10.59  2.88     466.03  15.30   5.87
+C7 ATM iron fly 10:00              638    -12.48 -4.01    -699.95 -13.18 -11.76
