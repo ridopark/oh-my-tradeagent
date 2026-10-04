@@ -33,6 +33,29 @@ Summary and data facts: auto-memory note `reference_0dte_spx_sniping_research_20
 | Power hour (day's direction, 15:01→15:50) | 619 trades | −6% to −29% per trade, t −2 to −14, both halves |
 | −30% vs −50% stop | — | indistinguishable here |
 
+## Follow-up: macro events and dark-pool flow (H1/H2, same day)
+These were pre-registered in the `h1h2.py` docstring before any result was seen.
+- **Tests:** 3 hypotheses × 2 horizons (h30, to 14:45) = 6 tests.
+- **Pass rule:**
+  - pooled Welch t ≥ 2.64 (Bonferroni);
+  - **and** the same sign in P1 2016–20, P2 2021–23 and P3 2024–26.
+
+| Hypothesis | Result |
+|---|---|
+| H1 ORB on CPI / NFP / FOMC days vs other days (311 event days) | diff −0.8 bp (h30, t −0.46), +2.3 bp (h1445, t 0.55); sign flips across periods — **FAIL** |
+| H2a off-exchange share (FINRA TRF, `D`) 09:30–09:44, top vs bottom tercile vs trailing 60d | +0.6 bp (t 0.47), −2.7 bp (t −0.83) — **FAIL** |
+| H2b off-exchange tick-signed imbalance agrees with breakout | −0.6 bp (t −0.56), −0.6 bp (t −0.22) — **FAIL** |
+
+- **Exploratory split** (CPI, NFP and FOMC separately): every |t| < 1.3, and signs flip between periods.
+- **Off-exchange share** of SPY volume in the first 15 minutes:
+  - median 21.6%;
+  - rising from about 18% in 2016–21 to about 27% in 2023–26.
+- **Calendar sources:**
+  - CPI and NFP release dates come from ALFRED vintage dates (series CPIAUCNS and PAYEMS), including the delays from the 2025 shutdown.
+  - FOMC statement days come from the federalreserve.gov calendars.
+- Calendar files are in `calendar/`.
+- To re-run, after `cvd_all.py`, run `offex_all.py $C` (~20 min) and then `h1h2.py $C`.
+
 GEX and VVIX were **not tested**: Alpaca has no index data or historical greeks. A test needs paid data
 (ThetaData or Databento, about $80–200/month).
 
