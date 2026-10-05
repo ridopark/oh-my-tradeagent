@@ -242,15 +242,15 @@
    "to": "D5-event-straddle",
    "rel": "risk-edge",
    "verdict": "U3: prediction falsified - gated FOMC mean HIGHER (+22.2%) but win 58% vs 77% and worst -100%: pre-FOMC premium is rich-for-a-reason, binary. OPERATOR DECISION: skip FOMC days (tail doctrine) or accept the binary profile"
+  },
+  {
+   "from": "M2-iv-richness",
+   "to": "R-MEIC",
+   "rel": "composition-falsified",
+   "verdict": "U1: gate moves MEIC frictionless 0.26->0.46%/day only; base stays -0.29% (t -1.9). Cause: R-MEIC lacks M6-settle-exit - per-side stop churn pays the spread repeatedly; no entry gate can offset exit costs. MEIC shelved."
   }
  ],
  "untested_compositions": [
-  {
-   "id": "U1",
-   "edge": "M2-iv-richness x R-MEIC",
-   "prediction": "gate lifts MEIC gross above fill costs; anti-gate ~0",
-   "cost": "backtest, data in hand"
-  },
   {
    "id": "U5",
    "edge": "R-T4 x DS-quotes-forward",

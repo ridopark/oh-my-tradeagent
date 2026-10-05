@@ -1,5 +1,7 @@
 # PLAN — 2026-10-04 orb30-paper-sniper
 
+> **SUPERSEDED 2026-10-05** by `PLAN-2026-10-05-gated-condor-paper-test.md`: the A7 sniper evidence is mixed-negative (holdout −2.7%/trade, instrument transfer failed) while the gated condor passed its OOS bar; Phase 6 (fill telemetry / mid-walk) moved into the new plan. Kept for the research record; do not execute.
+
 Forward paper test of the frozen ORB30 "A7" 0DTE option-buying rule (research record:
 `docs/plans/experiments/0dte-spx-2026-10/orb30_iterations/README.md`, memory note
 `reference_0dte_spx_sniping_research_2026_10`). The rule buys a same-day ITM option on the first
