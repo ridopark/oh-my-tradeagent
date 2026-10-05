@@ -59,3 +59,15 @@ Same A7 entries (score==2, ITM10), exits on the OPTION mark instead of the under
 +6.0%/+3.9%; ALL 9 cells negative at stress; worst day ~2x worse. Premium prints whipsaw
 the stop (same mechanism as the prod "stop_loss 0% win rate" and E-series tight-stop findings).
 Decision (operator, 2026-10-04): forward test uses UNDERLYING-anchored exits.
+
+## A9: exit-overlay study — can big losses be detected and cut? (pre-registered, data ≤ 2026-03)
+8 overlays on the T15/S30 baseline (breakeven moves, early cuts at m15/m30, tighter stop, trails),
+SPY/QQQ/IWM, ALL + score==2, all cells reported. **Answer: no.**
+- No overlay beats baseline EV beyond noise anywhere (best: EC30 on SPY +0.21bp — noise); none passes
+  the pre-registered bar (EV held + P5 improved + sign holds on QQQ+IWM).
+- Breakeven moves HURT (SPY score2: +1.97 → +0.74bp; win 66% → 43%): pullback-then-win paths are common.
+- Diagnostics: 47-67% of eventual stops were ≥ +8bp green first; 76-92% were ≤ −10bp red by m15 — but
+  25-41% of eventual WINNERS were too. Winner/loser paths overlap too much to separate in-trade.
+- Third independent confirmation of "the tail is unpredictable" (E10 entry-time; A3 cross-instrument;
+  now in-trade). Exit geometry redistributes outcomes; it does not create EV. Baseline EV itself is
+  +2bp (SPY score2) / ~0 (QQQ, IWM) — there is nothing to protect.
