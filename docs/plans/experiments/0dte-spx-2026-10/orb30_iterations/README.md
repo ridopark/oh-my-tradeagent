@@ -51,3 +51,11 @@ So the SPY filter was an overfit pattern, not a market effect.
 - IWM: M/W/F in 2024 → daily by 2026.
 - DIA and leveraged ETFs (TQQQ, SPXL, UPRO, SQQQ, TNA, QLD, SSO): Fridays only.
 - TQQQ/SOXL: M/W/F in 2026.
+
+## A8: premium-exit proxy calibration (DEV only, holdout untouched)
+Same A7 entries (score==2, ITM10), exits on the OPTION mark instead of the underlying:
+9-cell grid, target {+10/15/20%} x stop {-25/30/35%}, 120m timeout.
+**Result: the proxy kills the dev edge.** Best cell +1.7% base / -0.3% stress vs A7's
++6.0%/+3.9%; ALL 9 cells negative at stress; worst day ~2x worse. Premium prints whipsaw
+the stop (same mechanism as the prod "stop_loss 0% win rate" and E-series tight-stop findings).
+Decision (operator, 2026-10-04): forward test uses UNDERLYING-anchored exits.
