@@ -27,3 +27,27 @@ DEV = 2024-03..2026-03 for options. Filter selection used SPY FIT 2016-20 only; 
 - n = 41 is too small to separate the dev +6% from 0.
 - The holdout is now spent. Further iteration on this data would be fitting.
 - Next valid evidence: a forward paper test of the frozen rule.
+
+## Cross-instrument test (fresh out-of-sample)
+**Setup:**
+- The frozen score rule was applied to QQQ, IWM and TQQQ on 1-min data, 2016-2026.
+- Thresholds were re-derived from each instrument's own 2016-20 terciles, using the same recipe as SPY.
+- QQQ and IWM were never used in design.
+- Output: `results-cross-instrument-2026-10-04.txt`.
+
+**Result:** score==2 helps ONLY on SPY, the design instrument.
+- QQQ: ≈ ALL.
+- IWM: WORSE than ALL in every period (±20 bp hit 41-47% vs 47-51%).
+- TQQQ: ≈ or worse.
+
+So the SPY filter was an overfit pattern, not a market effect.
+
+**Win rate:** T15/S30 wins 60-69% everywhere, even unfiltered. That is exit geometry, with EV ≈ 0.
+
+**Options replay:** skipped. Zero underlying EV minus spread and theta can't be positive.
+
+**0DTE availability (Alpaca, checked 2026-10-04):**
+- Daily: SPX/SPXW, XSP, SPY, QQQ.
+- IWM: M/W/F in 2024 → daily by 2026.
+- DIA and leveraged ETFs (TQQQ, SPXL, UPRO, SQQQ, TNA, QLD, SSO): Fridays only.
+- TQQQ/SOXL: M/W/F in 2026.
