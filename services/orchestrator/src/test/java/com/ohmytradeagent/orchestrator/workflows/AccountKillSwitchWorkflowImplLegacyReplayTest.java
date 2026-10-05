@@ -6,12 +6,15 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.GetOptionQuoteRequest;
 import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
+import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -20,11 +23,15 @@ import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.TenantConfigActivities;
+import com.ohmytradeagent.orchestrator.activities.TenantStrategyBrokerTarget;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.common.converter.DataConverter;
+import io.temporal.common.converter.DefaultDataConverter;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
@@ -44,6 +51,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.mockito.Mockito;
@@ -124,6 +132,18 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
               + "account-killswitch-mtm-defer-v1-legacy-history.json");
   private static final String MTM_DEFER_EMULATOR_WORKFLOW_ID =
       "account-killswitch-mtm-defer-v1-emulator";
+
+  // PLAN-2026-10-05: a v2 in-flight history where a LARGE (3-position) book fail-closed on the
+  // FIRST unpriceable tick — the prod_real 2026-10-05 shape. Generated from the PRODUCTION impl as
+  // it was before the large-book debounce (marker account-mtm-debounce-v1 recorded at 2).
+  private static final String LARGE_BOOK_TRIP_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-largebook-trip-v2-legacy-history.json";
+  private static final Path LARGE_BOOK_TRIP_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-largebook-trip-v2-legacy-history.json");
+  private static final String LARGE_BOOK_TRIP_WORKFLOW_ID =
+      "account-killswitch-largebook-trip-v2-legacy";
 
   // PLAN-2026-08-12: a pre-rollover-clear in-flight history for a TRIPPED
   // (auto:account_daily_loss) execution whose trading day ROLLS OVER mid-history. Every other
@@ -385,6 +405,37 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
           MTM_DEFER_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
     } finally {
       AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_INTICK_REFETCHES = origRefetches;
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = origTripTicks;
+    }
+  }
+
+  /**
+   * PLAN-2026-10-05 SENTINEL. A v2 history (marker {@code account-mtm-debounce-v1} recorded at 2)
+   * in which a LARGE 3-position book with 2 of 3 quotes unavailable fail-CLOSED on the first tick,
+   * then ran one tripped tick. Replayed under the widened {@code getVersion(..., 3)}: the recorded
+   * marker resolves to 2, so the large-book debounce ({@code v>=3}) stays OFF and the recorded
+   * {@code doTrip} commands replay byte-for-byte. Ungate the large book at {@code v>=1} and this
+   * replay throws {@code NonDeterministicException} (the tick would defer + emit the deferred audit
+   * instead of tripping).
+   *
+   * <p>Trip ticks pinned to 2; the in-tick re-fetch is left at its default, so a re-fetch leaking
+   * into large books would also schedule quote/timer commands the fixture does not carry.
+   */
+  @Test
+  void legacyLargeBookImmediateTripV2HistoryReplaysCleanly() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(LARGE_BOOK_TRIP_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. It is one-shot (pre-change only); see"
+                + " regenerateLargeBookTripV2Fixture.",
+            LARGE_BOOK_TRIP_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    int origTripTicks = AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS;
+    try {
+      AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+      WorkflowReplayer.replayWorkflowExecutionFromResource(
+          LARGE_BOOK_TRIP_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+    } finally {
       AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = origTripTicks;
     }
   }
@@ -789,6 +840,123 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
     Files.createDirectories(MTM_DEFER_FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(MTM_DEFER_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  /**
+   * PLAN-2026-10-05: ONE-SHOT, PRE-CHANGE ONLY. Records the v2 large-book immediate-trip history by
+   * running the PRODUCTION {@link AccountKillSwitchWorkflowImpl} as it was BEFORE the large-book
+   * debounce (same mock wiring as {@code AccountKillSwitchWorkflowImplTest#setUp}): a 3-position
+   * book, 2 of 3 quotes UNAVAILABLE, unexpired OCCs. Captures the first tick (immediate trip) plus
+   * one tripped tick while the workflow is still running. Every marker sits at its real recorded
+   * value, the shape of prod_real's in-flight history. Regenerating AFTER the change fails the
+   * asserts below (the first tick would defer, and the marker would record 3), so the committed
+   * fixture must never be regenerated.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateLargeBookTripV2Fixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      DailyPnlExecActivity execPnl = Mockito.mock(DailyPnlExecActivity.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+      AccountSnapshotActivity accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
+
+      when(calendar.isMarketOpen()).thenReturn(true);
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+      when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn("alpaca-paper");
+      when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+          .thenReturn(List.of(new TenantStrategyBrokerTarget("s1", "alpaca-paper")));
+      when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+      when(cascade.cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString()))
+          .thenReturn(0L);
+      AccountSnapshotResult snap = new AccountSnapshotResult();
+      snap.setSchemaVersion(1L);
+      snap.setEquity(new BigDecimal("5000"));
+      when(accountSnapshot.accountSnapshot(any())).thenReturn(snap);
+      // A LARGE (3-position) book, unexpired contracts, 2 of 3 unpriceable (66% > 50%).
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(
+              new AccountOpenBook(
+                  List.of(
+                      new OpenPositionValuation(
+                          "NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                      new OpenPositionValuation(
+                          "AAPL  261218C00200000", new BigDecimal("5.00"), 5L),
+                      new OpenPositionValuation(
+                          "TSLA  261218C00300000", new BigDecimal("4.00"), 5L)),
+                  3,
+                  0));
+      when(optionQuote.getOptionQuote(any()))
+          .thenAnswer(
+              inv -> {
+                String occ = inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol();
+                return occ.startsWith("TSLA")
+                    ? okQuote(occ, new BigDecimal("3.90"))
+                    : unavailableQuote(occ);
+              });
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.newWorker(MARKET_DATA_QUEUE).registerActivitiesImplementations(optionQuote);
+      env.newWorker("broker-alpaca-paper")
+          .registerActivitiesImplementations(accountSnapshot, execPnl);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(LARGE_BOOK_TRIP_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+
+      // Tick 1: the pre-change impl fail-closes IMMEDIATELY on a large book.
+      env.sleep(Duration.ofSeconds(75));
+      KillSwitchState s = wf.killswitchState();
+      assertThat(s.getTripped()).as("pre-change impl must trip on the first tick").isTrue();
+      assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+      // Tick 2: one tripped tick (the re-page path).
+      env.sleep(Duration.ofSeconds(60));
+      json = client.fetchHistory(LARGE_BOOK_TRIP_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    WorkflowExecutionHistory history = WorkflowExecutionHistory.fromJson(json);
+    assertThat(mtmDebounceMarkerVersions(history))
+        .as("fixture must record account-mtm-debounce-v1 at 2 (pre-change)")
+        .containsExactly(2);
+    Files.createDirectories(LARGE_BOOK_TRIP_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(LARGE_BOOK_TRIP_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  /** Recorded versions of every {@code account-mtm-debounce-v1} marker in {@code history}. */
+  private static List<Integer> mtmDebounceMarkerVersions(WorkflowExecutionHistory history) {
+    DataConverter dc = DefaultDataConverter.STANDARD_INSTANCE;
+    return history.getEvents().stream()
+        .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+        .map(e -> e.getMarkerRecordedEventAttributes().getDetailsMap())
+        .filter(
+            d ->
+                d.containsKey("changeId")
+                    && AccountKillSwitchWorkflowImpl.VERSION_ACCOUNT_MTM_DEBOUNCE.equals(
+                        dc.fromPayloads(
+                            0, Optional.of(d.get("changeId")), String.class, String.class)))
+        .map(d -> dc.fromPayloads(0, Optional.of(d.get("version")), Integer.class, Integer.class))
+        .toList();
   }
 
   private static OptionQuoteResult okQuote(String contractSymbol, BigDecimal bid) {
