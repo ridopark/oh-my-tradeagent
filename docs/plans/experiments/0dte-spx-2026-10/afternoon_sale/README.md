@@ -40,3 +40,10 @@ A paper fill-cost test of the S2 condor on XSP/SPX, entered around 13:00-14:00 a
 | T5 FOMC 13:00 long straddle (exploratory, n=21 + 1-week-before controls) | **Dead.** −8/−10% at the 14:35 exit, win 14%, no better than control Wednesdays — the event is priced. |
 | T1 quote collector | `scripts/data/option_quote_collector.py` — forward NBBO for SPY/QQQ/XSP 0DTE chains (quotes can't be backfilled). Smoke-tested 2026-10-05 pre-market: 303/321/549 rows/cycle. **Operator: deploy on homelab (crontab @reboot / k8s), NOT a session cron.** |
 | T3 mid-walk executor | Added as Phase 6 (6a telemetry, 6b ladder) to `PLAN-2026-10-04-orb30-paper-sniper.md`. |
+
+**Review note (2026-10-05):** `t2_overnight.py`'s morning-buyback cells model the long-wing exit
+cost roughly (a no-op line and a flat charge when the wing has no morning print). Materiality nil —
+the settle cells, computed independently, fail on their own (best t 0.46) — but don't reuse the
+morn-cell cost code without cleaning it. Also: the committed `fomc-dates.txt` initially ended at
+2026-10-02 (backtest artifact); future statement days through 2027 were appended at review so the
+skip-FOMC gate can actually fire.
