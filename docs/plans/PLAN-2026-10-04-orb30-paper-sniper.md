@@ -165,6 +165,28 @@ minute with the recorded tick path exits at the same minute ± 1 bar as the Pyth
 anchor, exit reason, slippage vs the tick-anchored theoretical fill) + the criteria check below.
 **Verify:** run against staging data; unit test the criteria math on synthetic rows.
 
+## Phase 6 — Fill-quality telemetry, then mid-walk entries (exec; paper-gated)
+**Goal:** measure, then minimize, the cost that decides every 0DTE verdict (~60% of retail losses
+are spread; the research record shows fills are the open variable for every surviving strategy).
+**6a — telemetry first (pure instrumentation, ships alone):**
+- `services/exec/.../broker/OptionsBroker.java` / `AlpacaPaperBroker.java` — at placeOrder, also
+  fetch the live NBBO for the OCC (data API; read-only) and journal `{bid, ask, mid, limit}`
+  alongside the intent in `JooqOrderIntentJournal`; on terminal fill, journal
+  `slippage_vs_mid = fill − mid_at_submit` (sign by side). New journal columns via a V-migration;
+  no workflow changes, no new audit kinds.
+**6b — mid-walk ladder (behind a per-strategy config flag, paper tenants only at first):**
+- New `MidWalkExecutor` in `services/exec/.../broker/`: submit limit at mid rounded to tick; if
+  unfilled after N seconds, cancel/replace one tick toward the far side; stop at a marketable cap
+  (cross the spread) or the existing entry TTL. Branch on `cancelOrder == CANCELLED` exactly
+  (`reference_exec_order_state_hides_failures`: SUBMITTED can mean cancel-REJECTED = possibly
+  filled) and re-read `getOrderStatus` before each replace so a fill during the race is never
+  double-sent.
+**Tests (TDD):** ladder unit tests with a stubbed broker (fill at step k; cancel-rejected-because-
+filled race; TTL exhaustion); journal migration round-trip.
+**Verify:** `mvn -pl services/exec -am spotless:apply` + module tests. Success criterion for the
+forward test: median |slippage_vs_mid| reported per leg; the pre-registered kill bound (1.5% of
+premium) now comes from measured data instead of assumption.
+
 ## Pre-registered kill / continue criteria (frozen now)
 Evaluation at the LATER of 25 filled trades or 60 trading days, pooled SPY+QQQ, A7-filtered only:
 - **Kill** if mean net return/trade ≤ 0, OR >30% of fired signals failed to fill within the entry

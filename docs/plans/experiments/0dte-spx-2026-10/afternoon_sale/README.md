@@ -31,3 +31,12 @@ Win rate is 67-77%. SPY and QQQ are positive in both halves.
 
 ## Next valid test
 A paper fill-cost test of the S2 condor on XSP/SPX, entered around 13:00-14:00 and held to cash settlement. Log the fill vs mid on every leg.
+
+## Round 5 (2026-10-05): five additions, pre-registered
+| Test | Verdict |
+|---|---|
+| **T4 IV-richness gate** on the 14:00 S2 condor (trade only when ATM straddle ≥ fair value from morning realized vol; trailing-60d median, one gate, no grid) | **PASS — first pass of the program.** Gated stress: SPY +10.6%/day of risk (t 3.8), QQQ +15.5% (t 4.2), both halves +, OOS; SPX (in-sample) +9.2% t 3.1 now both halves +. Anti-gate ≈ 0/negative — clean monotone mechanism. Caveats: trade-print entry fills; SPY/QQQ physical settlement still blocks direct trading (vehicle = XSP/SPX); structure chosen after step-1 results, so forward confirmation still required. |
+| T2 1DTE overnight short (4 structures × morn/settle × 2 fills, 645 overnights) | **FAIL all 16 cells** (best t 0.46; H1 with crash days negative). The peer-reviewed overnight seller edge does not survive costs on 1DTE SPXW 2024-26. |
+| T5 FOMC 13:00 long straddle (exploratory, n=21 + 1-week-before controls) | **Dead.** −8/−10% at the 14:35 exit, win 14%, no better than control Wednesdays — the event is priced. |
+| T1 quote collector | `scripts/data/option_quote_collector.py` — forward NBBO for SPY/QQQ/XSP 0DTE chains (quotes can't be backfilled). Smoke-tested 2026-10-05 pre-market: 303/321/549 rows/cycle. **Operator: deploy on homelab (crontab @reboot / k8s), NOT a session cron.** |
+| T3 mid-walk executor | Added as Phase 6 (6a telemetry, 6b ladder) to `PLAN-2026-10-04-orb30-paper-sniper.md`. |
