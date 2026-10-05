@@ -210,12 +210,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * fail-close bound). At {@code v>=1} the fail-close condition ({@code book.listed() > 0 &&
    * failsClosed(...)}) on a SMALL book ({@code listed <= }{@link #SMALL_BOOK_MAX_POSITIONS}) must
    * hold for {@link #MTM_UNAVAILABLE_TRIP_TICKS} CONSECUTIVE heartbeats before the trip fires;
-   * below the threshold the tick DEFERS (no trip), exactly like the can't-price path. A LARGE
-   * book's relative {@code >50%} failure still fail-CLOSES immediately (unchanged). At {@link
-   * Workflow#DEFAULT_VERSION} the cap fail-closes on the FIRST miss (byte-identical pre-change
-   * command stream) — required because the trip now emits its {@code doTrip} commands on a LATER
-   * tick (changed command ordering). The consecutive-tick counter is pure workflow state (no
-   * command). Pinned by {@code AccountKillSwitchWorkflowImplLegacyReplayTest}.
+   * below the threshold the tick DEFERS (no trip), exactly like the can't-price path. At {@code
+   * v>=3} (PLAN-2026-10-05) a LARGE book's relative {@code >50%} failure is debounced the same way;
+   * the in-tick re-fetch remains small-book only. At {@code v<3} a large book still fail-CLOSES
+   * immediately. At {@link Workflow#DEFAULT_VERSION} the cap fail-closes on the FIRST miss
+   * (byte-identical pre-change command stream) — required because the trip now emits its {@code
+   * doTrip} commands on a LATER tick (changed command ordering). The consecutive-tick counter is
+   * pure workflow state (no command). Pinned by {@code
+   * AccountKillSwitchWorkflowImplLegacyReplayTest}.
    */
   static final String VERSION_ACCOUNT_MTM_DEBOUNCE = "account-mtm-debounce-v1";
 
@@ -348,9 +350,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * #SMALL_BOOK_MAX_POSITIONS}) must stay unpriceable before the cap fail-CLOSES on {@code
    * auto:account_mtm_unavailable}. Default 2: a single/transient option-quote miss on a 1–2
    * position book must NOT trip (the 2026-07-21 spurious trip on a PROFITABLE day); two consecutive
-   * unpriceable ticks still do (fail-closed posture preserved). A LARGE book's relative {@code
-   * >50%} failure is unaffected — it still fail-closes immediately. Package-private for test
-   * override.
+   * unpriceable ticks still do (fail-closed posture preserved). At {@link
+   * #VERSION_ACCOUNT_MTM_DEBOUNCE} {@code v>=3} (PLAN-2026-10-05) a LARGE book's relative {@code
+   * >50%} failure is debounced by the same count; in-tick re-fetch remains small-book only.
+   * Package-private for test override.
    */
   static int MTM_UNAVAILABLE_TRIP_TICKS = 2;
 
@@ -502,13 +505,14 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private int stillHoldingRepageTicks;
 
   /**
-   * PLAN-2026-07-22 small-book MTM-unavailable debounce counter (deterministic workflow state, no
-   * commands). Counts CONSECUTIVE heartbeats on which a SMALL book stayed unpriceable (the
-   * fail-close condition held) AFTER the bounded in-tick re-fetch. Reset to 0 on ANY tick that
-   * prices the book cleanly (so non-consecutive misses can never accumulate), on a new trading day,
-   * and on reset/untrip. Strictly gated behind {@link #VERSION_ACCOUNT_MTM_DEBOUNCE} v&gt;=1; at
-   * {@link Workflow#DEFAULT_VERSION} it stays 0 (never consulted) and the cap fail-closes on the
-   * first miss (byte-identical legacy command stream).
+   * PLAN-2026-07-22 MTM-unavailable debounce counter (deterministic workflow state, no commands).
+   * Counts CONSECUTIVE heartbeats on which a SMALL book stayed unpriceable (the fail-close
+   * condition held) AFTER the bounded in-tick re-fetch — and, at {@code v>=3} (PLAN-2026-10-05), on
+   * which a LARGE book stayed unpriceable (no in-tick re-fetch). Reset to 0 on ANY tick that prices
+   * the book cleanly (so non-consecutive misses can never accumulate), on a new trading day, and on
+   * reset/untrip. Strictly gated behind {@link #VERSION_ACCOUNT_MTM_DEBOUNCE} v&gt;=1; at {@link
+   * Workflow#DEFAULT_VERSION} it stays 0 (never consulted) and the cap fail-closes on the first
+   * miss (byte-identical legacy command stream).
    *
    * <p>UNLIKE {@link #consecutiveInactiveTicks} / {@link #stillHoldingRepageTicks}, this IS carried
    * across continue-as-new: {@code buildCarryForwardInput} threads it via the {@link
@@ -848,8 +852,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // in-flight history that recorded this marker at value 1 (a #606 defer) replays as 1 — no new
     // emit — so the widen is byte-identical for it. Widening the existing change-id (not a second
     // marker) is the correct pattern; pinned by AccountKillSwitchWorkflowImplLegacyReplayTest.
+    //
+    // PLAN-2026-10-05: WIDENED to maxSupported=3 — at v>=3 a LARGE book's fail-close is debounced
+    // too (it defers + emits the deferred audit instead of tripping on the first failing tick). A
+    // history recorded at 1 or 2 replays as such and keeps the immediate large-book trip.
     int mtmDebounceVersion =
-        Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 2);
+        Workflow.getVersion(VERSION_ACCOUNT_MTM_DEBOUNCE, Workflow.DEFAULT_VERSION, 3);
     // PLAN-2026-07-23 Phase 1: resolve the expired-worth-zero gate at this same stable scope,
     // BEFORE the book is valued, and stash it for valueOpenBook (see the field's javadoc).
     this.expiredWorthZeroVersion =
@@ -1034,23 +1042,27 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (book.listed() > 0 && failsClosed(book.listed(), combinedFailures)) {
       // PLAN-2026-07-22: a SMALL book (listed <= SMALL_BOOK_MAX_POSITIONS) is over-sensitive — a
       // single 1-of-1 / 2-of-2 quote miss trivially satisfies the fail-close bound and spuriously
-      // tripped prod_real on a PROFITABLE day (2026-07-21). A LARGE book's relative >50% failure is
-      // a correlated market-data degradation and STILL fail-closes immediately (unchanged). At
-      // DEFAULT_VERSION the whole block below is skipped and the cap fail-closes on the first miss
-      // (byte-identical pre-change command stream).
-      if (mtmDebounceVersion >= 1 && book.listed() <= SMALL_BOOK_MAX_POSITIONS) {
-        // (1) PRIMARY defense: shake off a momentary quote blip within THIS heartbeat before
-        // deferring (a blip that clears mid-tick never widens the blind window at all).
-        valued = refetchSmallBookQuotes(book, valued);
-        combinedFailures = book.valueFailures() + valued.quoteFailures();
-        // PLAN-2026-07-22 (#591, freshness fix): re-cache the exposure with the REFETCHED
-        // valuation.
-        // The top-of-tick cacheOpenBookExposure ran on the pre-refetch (blipped) valuation, so its
-        // MTM was left null; a blip that cleared here now caches the fresh signed MTM, while one
-        // that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when the
-        // whole book priced — valueFailures()==0 AND quoteFailures()==0). Pure field write (no
-        // command) — replay-safe.
-        cacheOpenBookExposure(book, valued);
+      // tripped prod_real on a PROFITABLE day (2026-07-21). PLAN-2026-10-05: at v>=3 a LARGE book's
+      // relative >50% failure is debounced the same way (a 60-90s DNS blip tripped prod_real's
+      // 3-position book on 2026-10-05); the in-tick re-fetch remains small-book only. At v<3 a
+      // large book still fail-closes immediately. At DEFAULT_VERSION the whole block below is
+      // skipped and the cap fail-closes on the first miss (byte-identical pre-change stream).
+      boolean smallBook = book.listed() <= SMALL_BOOK_MAX_POSITIONS;
+      if (mtmDebounceVersion >= 1 && (smallBook || mtmDebounceVersion >= 3)) {
+        if (smallBook) {
+          // (1) PRIMARY defense: shake off a momentary quote blip within THIS heartbeat before
+          // deferring (a blip that clears mid-tick never widens the blind window at all).
+          valued = refetchSmallBookQuotes(book, valued);
+          combinedFailures = book.valueFailures() + valued.quoteFailures();
+          // PLAN-2026-07-22 (#591, freshness fix): re-cache the exposure with the REFETCHED
+          // valuation.
+          // The top-of-tick cacheOpenBookExposure ran on the pre-refetch (blipped) valuation, so
+          // its MTM was left null; a blip that cleared here now caches the fresh signed MTM, while
+          // one that stays unpriceable leaves the MTM null (cacheOpenBookExposure only sets it when
+          // the whole book priced — valueFailures()==0 AND quoteFailures()==0). Pure field write
+          // (no command) — replay-safe.
+          cacheOpenBookExposure(book, valued);
+        }
         // (2) BACKSTOP: still unpriceable after the in-tick re-fetch => cross-tick debounce. Defer
         // this tick LOUDLY (WARN so an operator can eyeball the book / a chronic every-other-tick
         // miss surfaces) and only fail-close after MTM_UNAVAILABLE_TRIP_TICKS CONSECUTIVE
@@ -1091,10 +1103,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
                     "scope",
                     "account"));
           }
-          return false; // momentarily-unpriceable small book — defer (not armed), do not trip yet.
+          return false; // momentarily-unpriceable book — defer (not armed), do not trip yet.
         }
       }
-      // Fail-closed trip (v0 / large book / debounce satisfied at N) IF still unpriceable: the book
+      // Fail-closed trip (v0 / large book at v<3 / debounce satisfied at N) IF still unpriceable:
+      // the book
       // is (partly) unpriceable so the MTM is unreliable — carry the full listed open-position
       // count
       // for the page (the number the operator must flatten by hand) but no MTM. listed() is the

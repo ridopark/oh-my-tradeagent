@@ -418,8 +418,27 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
    * replay throws {@code NonDeterministicException} (the tick would defer + emit the deferred audit
    * instead of tripping).
    *
-   * <p>Trip ticks pinned to 2; the in-tick re-fetch is left at its default, so a re-fetch leaking
-   * into large books would also schedule quote/timer commands the fixture does not carry.
+   * <p>Trip ticks pinned to 2; the in-tick re-fetch is left at its default, so a re-fetch that
+   * leaked into large books BELOW v3 would also schedule quote/timer commands the fixture does not
+   * carry. A leak only at {@code v>=3} is invisible here (this history never reaches v3); {@code
+   * heartbeat_largeBookAllQuotesFail_debouncesThenFailsClosedOnSecondTick} pins that case via its
+   * exact quote-call count.
+   *
+   * <p><b>Teeth verified 2026-10-05 (observed).</b> With the gate mutated to {@code
+   * mtmDebounceVersion >= 1 && (smallBook || mtmDebounceVersion >= 1)} this replay throws:
+   *
+   * <pre>
+   * io.temporal.worker.NonDeterministicException: [TMPRL1100] Failure handling event 109 of type
+   * 'EVENT_TYPE_TIMER_STARTED' during replay. [TMPRL1100] Event 109 of type
+   * EVENT_TYPE_TIMER_STARTED does not match command type COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK.
+   * </pre>
+   *
+   * <p>The divergence is caught on the SECOND (tripped) tick, not the first: on tick 1 the mutant's
+   * deferred {@code audit.log} lines up with the recorded trip's {@code audit.log} (same activity
+   * type; inputs are not compared) and the unread {@code account-trip-no-auto-flatten-v1} marker is
+   * skipped. On tick 2 the un-tripped mutant runs the full heartbeat ({@code
+   * accountDailyLossThreshold}) where the history holds the tripped tick's next heartbeat timer.
+   * The second tick in the fixture is therefore load-bearing.
    */
   @Test
   void legacyLargeBookImmediateTripV2HistoryReplaysCleanly() throws Exception {
