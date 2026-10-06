@@ -1,7 +1,10 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
+import com.ohmytradeagent.contract.AccountSnapshotRequest;
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.CondorExecActivity;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorEntryRequest;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorEntryResult;
@@ -15,7 +18,9 @@ import com.ohmytradeagent.orchestrator.activities.CondorDayActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.RiskActivities;
 import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
+import com.ohmytradeagent.orchestrator.domain.CondorSizing;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.domain.StrategyConfigs;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
@@ -54,8 +59,18 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
   /** The frozen rule's vehicle: cash-settled XSP. */
   static final String UNDERLYING = "XSP";
 
-  /** One condor per gated day for the paper test (XSP: $0 exchange fee under 10 contracts). */
-  static final long QTY = 1L;
+  /**
+   * Pre-{@link #VERSION_CONDOR_SIZING} fixed size: an in-flight session that started before
+   * config-driven sizing shipped replays (and keeps) one contract.
+   */
+  static final long LEGACY_QTY = 1L;
+
+  /**
+   * Config-driven sizing ({@link CondorSizing}): gates the capital-base read it adds (a {@code
+   * capitalForStrategy} or account-snapshot activity), so a session in flight across the deploy
+   * replays its pre-change command stream. Sessions run daily ~13:50-14:05 ET.
+   */
+  static final String VERSION_CONDOR_SIZING = "condor-config-sizing-v1";
 
   /** Alpaca's mleg limit-price increment. */
   static final BigDecimal TICK = new BigDecimal("0.01");
@@ -235,6 +250,19 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
       return "late_entry";
     }
 
+    // Size from config (capital base × capital_weight ÷ max risk per contract, clamped to
+    // [min_contracts, max_contracts]); see CondorSizing for the degenerate cases and the XSP
+    // 10-contract fee cliff.
+    int sizingVersion = Workflow.getVersion(VERSION_CONDOR_SIZING, Workflow.DEFAULT_VERSION, 1);
+    long qty = LEGACY_QTY;
+    CondorSizing.Result sizing = null;
+    if (sizingVersion >= 1) {
+      sizing =
+          CondorSizing.size(
+              config, capitalBase(config, brokerTarget), legs.legs(), legs.netCreditMid());
+      qty = sizing.contracts();
+    }
+
     String attemptId = today.toString();
     CondorEntryResult entry;
     try {
@@ -246,7 +274,7 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
                       in.getStrategyId(),
                       brokerTarget,
                       attemptId,
-                      QTY,
+                      qty,
                       legs.legs(),
                       legs.netCreditMid(),
                       TICK,
@@ -289,6 +317,9 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
                 "slippage_vs_mid", entry.slippageVsMid(),
                 "filled_qty", entry.filledQty(),
                 "rungs", entry.rungs(),
+                "ordered_qty", qty,
+                "max_risk_per_contract", sizing == null ? null : sizing.maxRiskPerContract(),
+                "allocation", sizing == null ? null : sizing.allocation(),
                 "spot", legs.spot(),
                 "legs", legOccs(legs),
                 "hold_workflow_id", holdId));
@@ -378,6 +409,43 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
 
   private static List<String> legOccs(CondorLegsResult legs) {
     return legs.legs().stream().map(CondorMarketActivity.CondorLeg::occSymbol).toList();
+  }
+
+  /**
+   * The capital base exactly as the BTO paths select it by {@code capital_source}: {@code static}
+   * (default) is the pod's per-strategy base ({@code capitalForStrategy}); {@code account_cash} /
+   * {@code account_equity} read the broker snapshot. An unavailable account value returns null,
+   * which {@link CondorSizing} clamps to {@code min_contracts} — never a fallback to the static
+   * base.
+   */
+  private BigDecimal capitalBase(StrategyConfig config, String brokerTarget) {
+    boolean cash = StrategyConfigs.accountCashSizing(config);
+    if (!cash && !StrategyConfigs.accountEquitySizing(config)) {
+      return strategy.capitalForStrategy(input.getTenantId(), input.getStrategyId());
+    }
+    AccountSnapshotActivity account =
+        Workflow.newActivityStub(
+            AccountSnapshotActivity.class,
+            ActivityOptions.newBuilder()
+                .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
+                .setStartToCloseTimeout(Duration.ofSeconds(15))
+                .setScheduleToCloseTimeout(Duration.ofSeconds(60))
+                .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
+                .build());
+    AccountSnapshotRequest request = new AccountSnapshotRequest();
+    request.setSchemaVersion(1L);
+    request.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.fromValue(brokerTarget));
+    request.setTenantId(input.getTenantId());
+    request.setCorrelationId(Workflow.getInfo().getWorkflowId());
+    try {
+      AccountSnapshotResult result = account.accountSnapshot(request);
+      if (result == null) {
+        return null;
+      }
+      return cash ? result.getCash() : result.getEquity();
+    } catch (ActivityFailure e) {
+      return null;
+    }
   }
 
   private static MarketCalendarActivity tradingCalendar(String brokerTarget) {
