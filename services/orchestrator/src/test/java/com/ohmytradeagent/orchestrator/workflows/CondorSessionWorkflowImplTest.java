@@ -353,6 +353,39 @@ class CondorSessionWorkflowImplTest {
   }
 
   @Test
+  void killSwitchHaltNull_meansAllowed_sessionProceedsToEntry() {
+    // RiskActivitiesImpl.checkKillSwitchHalt returns NULL for "no halt" (the watchlist caller's
+    // idiom). 2026-10-06 prod: the session dereferenced it, NPE'd on the HAPPY path and wedged.
+    when(risk.checkKillSwitchHalt("staging_paper", "gated_condor")).thenReturn(null);
+    when(condorExec.enterCondor(any())).thenReturn(abandoned());
+
+    assertThat(run()).isEqualTo("abandoned");
+
+    verify(market).resolveCondorLegs(anyString(), anyDouble(), anyDouble());
+    verify(condorExec).enterCondor(any());
+  }
+
+  @Test
+  void tradingDaysNull_isTreatedAsClosed_notAnNpe() {
+    when(tradingCalendar.tradingDays(TODAY, TODAY)).thenReturn(null);
+
+    assertThat(run()).isEqualTo("skip:market_closed");
+  }
+
+  @Test
+  void staleAtEntry_abandonsWithoutSending() {
+    // A session that only reaches the entry step long after condor_entry_et (a slow gate read, or a
+    // task resumed hours later by a fixed deploy) must not send a stale condor.
+    when(calendar.durationUntilEodCloseEt(java.time.LocalTime.of(14, 15)))
+        .thenReturn(Duration.ZERO);
+
+    assertThat(run()).isEqualTo("abandoned");
+    assertThat(onlyAudit("CondorEntryAbandoned").getSubject().get("reason").toString())
+        .startsWith("late_entry");
+    verify(condorExec, never()).enterCondor(any());
+  }
+
+  @Test
   void unresolvedLegs_abandon() {
     when(market.resolveCondorLegs(anyString(), anyDouble(), anyDouble()))
         .thenReturn(new CondorLegsResult(600.0, List.of(), null, "no quote for XSP"));

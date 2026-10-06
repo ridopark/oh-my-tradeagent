@@ -176,6 +176,15 @@ class CondorHoldWorkflowImplTest {
   }
 
   @Test
+  void nextOpenDurationNull_doesNotNpe_stillReconciles() {
+    when(calendar.durationUntilNextRthOpenEt()).thenReturn(null);
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+
+    assertThat(runToCompletion()).isEqualTo("settled");
+    verify(condorExec).heldCondorLegs(any(), any(), any());
+  }
+
+  @Test
   void legStillHeldAfterExpiry_pagesSettleMismatch() {
     when(market.settlementSpot("XSP")).thenReturn(600.0);
     when(condorExec.heldCondorLegs(any(), any(), any()))
