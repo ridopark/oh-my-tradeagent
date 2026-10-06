@@ -39,4 +39,35 @@ public final class CondorSettlement {
     BigDecimal pnl = credit.subtract(debit).multiply(MULTIPLIER).multiply(BigDecimal.valueOf(qty));
     return new Result(debit, pnl.setScale(2, RoundingMode.HALF_UP), itm);
   }
+
+  /**
+   * The condor's defined worst case, in dollars (never negative): {@code (wider wing − credit) ×
+   * 100 × qty} — the settlement loss at any spot beyond a long wing.
+   *
+   * @throws IllegalArgumentException unless {@code legs} holds exactly one short and one long of
+   *     each type, with each long strike outside its short
+   */
+  public static BigDecimal maxLoss(List<CondorLeg> legs, BigDecimal credit, long qty) {
+    int shortCall = strike(legs, "sell", "C");
+    int shortPut = strike(legs, "sell", "P");
+    int callWing = strike(legs, "buy", "C") - shortCall;
+    int putWing = shortPut - strike(legs, "buy", "P");
+    if (legs.size() != 4 || callWing <= 0 || putWing <= 0) {
+      throw new IllegalArgumentException("not an iron condor: " + legs);
+    }
+    BigDecimal perShare = BigDecimal.valueOf(Math.max(callWing, putWing)).subtract(credit);
+    return perShare.max(BigDecimal.ZERO).multiply(MULTIPLIER).multiply(BigDecimal.valueOf(qty));
+  }
+
+  private static int strike(List<CondorLeg> legs, String side, String type) {
+    return legs.stream()
+        .filter(l -> side.equalsIgnoreCase(l.side()) && type.equals(l.type()))
+        .mapToInt(CondorLeg::strike)
+        .reduce(
+            (a, b) -> {
+              throw new IllegalArgumentException(
+                  "duplicate " + side + " " + type + " leg: " + legs);
+            })
+        .orElseThrow(() -> new IllegalArgumentException("missing " + side + " " + type + " leg"));
+  }
 }

@@ -281,6 +281,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       "account-killswitch-clear-only-when-armable-v1";
 
   /**
+   * #899: charge {@link AccountOpenBook#condorMaxLoss()} (each Running condor's defined max loss)
+   * to the open MTM. Adds no command but alters the TRIP DECISION, so it is gated: a tick whose
+   * {@code accountOpenBook} was answered by a new activity worker while an old workflow worker
+   * ignored the field (mid-roll) must replay as the recorded no-trip. Read appended LAST (marker
+   * order preserved).
+   */
+  static final String VERSION_ACCOUNT_CONDOR_MAX_LOSS = "killswitch-condor-max-loss-v1";
+
+  /**
    * Issue #669: the daily still-tripped page, actor-agnostic. Same kind name as the per-strategy
    * switch's — the alerter renders workflow identity from the row.
    */
@@ -532,6 +541,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * the tick, so a field keeps the read deterministic and single).
    */
   private int expiredWorthZeroVersion;
+
+  /** #899 gate, resolved once per heartbeat like {@link #expiredWorthZeroVersion}. */
+  private int condorMaxLossVersion;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -874,6 +886,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // #670: appended last (see the change-id javadoc).
     int clearOnlyWhenArmable =
         Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
+    // #899: appended last (see the change-id javadoc).
+    this.condorMaxLossVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -1027,7 +1042,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       // DEFAULT_VERSION: legacy audit_log path — byte-identical to the pre-Phase-2 replay stream.
       realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
     }
-    AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
+    AccountOpenBook book = foldCondorReadFailures(accountPnl.accountOpenBook(input.getTenantId()));
 
     OpenBookMtm valued = valueOpenBook(book);
     // PLAN-2026-07-22 (#591): cache the pre-trip exposure so a later reset banner can surface it.
@@ -1188,7 +1203,31 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
                   .multiply(BigDecimal.valueOf(pos.remainingQty()))
                   .multiply(CONTRACT_MULTIPLIER));
     }
+    if (condorMaxLossVersion >= 1) {
+      openMtm = openMtm.subtract(book.condorMaxLoss());
+    }
     return new OpenBookMtm(openMtm, quoteFailures);
+  }
+
+  /**
+   * #899 (v&gt;=1): folds each condor hold the activity could not value — a counted read failure,
+   * or the whole condor charge when {@code condorMaxLoss} is null (an OLD pod answered mid-roll) —
+   * into the book as a listed position that failed to value. The existing fail-close bound and MTM
+   * debounce then handle it (deferred page, then {@code auto:account_mtm_unavailable}) instead of
+   * the cap silently under-charging or the heartbeat throwing and disarming. Pure; no command. At
+   * DEFAULT_VERSION the book is returned unchanged.
+   */
+  private AccountOpenBook foldCondorReadFailures(AccountOpenBook book) {
+    if (condorMaxLossVersion < 1) {
+      return book;
+    }
+    BigDecimal maxLoss = book.condorMaxLoss() == null ? BigDecimal.ZERO : book.condorMaxLoss();
+    int failures = book.condorMaxLoss() == null ? 1 : book.condorReadFailures();
+    if (failures == 0) {
+      return book;
+    }
+    return new AccountOpenBook(
+        book.positions(), book.listed() + failures, book.valueFailures() + failures, maxLoss, 0);
   }
 
   /**
@@ -1281,7 +1320,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     stillHoldingRepageTicks = 0;
     AccountOpenBook book;
     try {
-      book = accountPnl.accountOpenBook(input.getTenantId());
+      book = foldCondorReadFailures(accountPnl.accountOpenBook(input.getTenantId()));
     } catch (RuntimeException e) {
       return; // book read failed — degrade quietly, retry next window.
     }

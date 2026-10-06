@@ -3,16 +3,21 @@ package com.ohmytradeagent.orchestrator.activities;
 import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
+import com.ohmytradeagent.orchestrator.domain.CondorSettlement;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.workflows.CondorHoldWorkflowInput;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
+import io.temporal.api.common.v1.Payloads;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.converter.DataConverter;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
@@ -153,7 +158,68 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
         }
       }
     }
-    return new AccountOpenBook(positions, listed, valueFailures);
+    CondorCharge condors = condorMaxLoss(tenantId, strategyIds);
+    return new AccountOpenBook(
+        positions, listed, valueFailures, condors.maxLoss(), condors.readFailures());
+  }
+
+  private record CondorCharge(BigDecimal maxLoss, int readFailures) {}
+
+  /**
+   * #899: sums the defined max loss of every Running {@code CondorHoldWorkflow} on the tenant's
+   * strategies, read from each hold's recorded start input (legs, credit, qty) — version-agnostic,
+   * so it works against holds started by any worker build and needs no query handler. A hold is
+   * charged for as long as it runs, including its post-settlement wait for the next open
+   * (conservative). A hold whose history cannot be read or whose input is not a valid condor is
+   * COUNTED, not thrown: a throw here would disarm the whole shared cap every heartbeat, while a
+   * count lets the workflow fail-close it through the existing MTM debounce. A Visibility error
+   * still propagates.
+   */
+  private CondorCharge condorMaxLoss(String tenantId, Set<String> strategyIds) {
+    DataConverter converter = client.getOptions().getDataConverter();
+    BigDecimal total = BigDecimal.ZERO;
+    int readFailures = 0;
+    Set<String> seen = new LinkedHashSet<>();
+    for (String sid : strategyIds) {
+      String query =
+          "WorkflowType='CondorHoldWorkflow' AND TenantStrategy='"
+              + WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, sid))
+              + "' AND ExecutionStatus='Running'";
+      try (Stream<WorkflowExecutionMetadata> stream = client.listExecutions(query)) {
+        var it = stream.iterator();
+        while (it.hasNext()) {
+          String wfId = it.next().getExecution().getWorkflowId();
+          if (!seen.add(wfId)) {
+            continue;
+          }
+          try {
+            Payloads startInput =
+                client
+                    .fetchHistory(wfId)
+                    .getEvents()
+                    .get(0)
+                    .getWorkflowExecutionStartedEventAttributes()
+                    .getInput();
+            CondorHoldWorkflowInput in =
+                converter.fromPayloads(
+                    0,
+                    Optional.of(startInput),
+                    CondorHoldWorkflowInput.class,
+                    CondorHoldWorkflowInput.class);
+            total = total.add(CondorSettlement.maxLoss(in.getLegs(), in.getCredit(), in.getQty()));
+          } catch (RuntimeException e) {
+            readFailures++;
+            log.warn(
+                "condor hold max-loss read failed wf={} tenant={} strategy={} err={}",
+                wfId,
+                tenantId,
+                sid,
+                e.getMessage());
+          }
+        }
+      }
+    }
+    return new CondorCharge(total, readFailures);
   }
 
   /**

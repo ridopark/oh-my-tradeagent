@@ -5,6 +5,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
@@ -48,6 +51,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -481,6 +485,66 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
 
     WorkflowReplayer.replayWorkflowExecutionFromResource(
         OPEN_POS_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+  }
+
+  @Test
+  void versionAccountCondorMaxLossConstantNameIsStable() throws Exception {
+    Field marker =
+        AccountKillSwitchWorkflowImpl.class.getDeclaredField("VERSION_ACCOUNT_CONDOR_MAX_LOSS");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("killswitch-condor-max-loss-v1");
+  }
+
+  /**
+   * #899 SENTINEL. The dense pre-change open-positions history, with every recorded {@code
+   * accountOpenBook} result rewritten to carry a condor max loss far beyond the threshold — the
+   * shape a tick takes when a NEW activity worker answers an OLD workflow worker mid-roll (the old
+   * code ignores the field and records no trip). Replayed under the new impl the {@code
+   * killswitch-condor-max-loss-v1} marker is absent, so the charge stays off and the recorded
+   * no-trip stream replays byte-for-byte. Charge the condor without the gate and the replay trips
+   * on the first tick and throws {@code NonDeterministicException}.
+   *
+   * <p><b>Teeth verified 2026-10-06 (observed).</b> With the gate mutated to {@code if
+   * (book.condorMaxLoss() != null)} this replay throws {@code [TMPRL1100] Failure handling event 52
+   * of type 'EVENT_TYPE_TIMER_STARTED' ... does not match command type
+   * COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK}.
+   */
+  @Test
+  void legacyHistoryWithCondorMaxLossInBookResult_replaysWithoutCharging() throws Exception {
+    String json =
+        new String(
+            getClass()
+                .getClassLoader()
+                .getResourceAsStream(OPEN_POS_FIXTURE_RESOURCE)
+                .readAllBytes(),
+            StandardCharsets.UTF_8);
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode history = mapper.readTree(json);
+    Map<String, String> activityTypeByScheduledId = new LinkedHashMap<>();
+    int rewritten = 0;
+    for (JsonNode event : history.get("events")) {
+      JsonNode scheduled = event.get("activityTaskScheduledEventAttributes");
+      if (scheduled != null) {
+        activityTypeByScheduledId.put(
+            event.get("eventId").asText(), scheduled.get("activityType").get("name").asText());
+      }
+      JsonNode completed = event.get("activityTaskCompletedEventAttributes");
+      if (completed != null
+          && "AccountOpenBook"
+              .equals(activityTypeByScheduledId.get(completed.get("scheduledEventId").asText()))) {
+        ObjectNode payload = (ObjectNode) completed.get("result").get("payloads").get(0);
+        ObjectNode book =
+            (ObjectNode) mapper.readTree(Base64.getDecoder().decode(payload.get("data").asText()));
+        book.put("condorMaxLoss", new BigDecimal("1000000000"));
+        payload.put("data", Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(book)));
+        rewritten++;
+      }
+    }
+    assertThat(rewritten).as("fixture must record accountOpenBook results").isPositive();
+
+    WorkflowReplayer.replayWorkflowExecution(
+        WorkflowExecutionHistory.fromJson(mapper.writeValueAsString(history)),
+        AccountKillSwitchWorkflowImpl.class);
   }
 
   /**
