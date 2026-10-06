@@ -297,3 +297,33 @@ class StrategyConfig(BaseModel):
     """
     Opt-in gate for STC close-intent enforcement (PLAN-2026-07-25-stc-intent-classifier). When true, a later phase consults copytrade-signal-payload.close_intent to arbitrate full-vs-partial STC sizing, with the keyword matcher as fallback. Null/absent = disabled (behavior-neutral). Spec-only field in this PR; runtime wiring lands separately, gated per-tenant.
     """
+    condor_entry_et: Annotated[
+        str | None, Field(pattern="^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    ] = None
+    """
+    PLAN-2026-10-05 gated-condor: wall-clock time (HH:MM in US/Eastern) at which the gated-condor strategy evaluates the IV-richness gate and, if it passes, sells one XSP 0DTE iron condor. Frozen value 14:00. Null/absent = the strategy is fully dark (no condor is ever evaluated or placed). Spec-only field in this PR; the condor workflow lands in a later phase.
+    """
+    condor_short_offset_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
+    """
+    PLAN-2026-10-05 gated-condor: distance of the two SHORT strikes from spot, as a FRACTION of spot (0.0015 = ±0.15%, the frozen value), rounded to the nearest $1 XSP strike. Must be smaller than condor_wing_offset_pct. Null/absent = the strategy is dark. Spec-only field in this PR.
+    """
+    condor_wing_offset_pct: Annotated[float | None, Field(gt=0.0, le=1.0)] = None
+    """
+    PLAN-2026-10-05 gated-condor: distance of the two LONG wing strikes from spot, as a FRACTION of spot (0.006 = ±0.60%, the frozen value), rounded to the nearest $1 XSP strike. Must be larger than condor_short_offset_pct; max risk per trade = wing width − net credit, known at entry. Null/absent = the strategy is dark. Spec-only field in this PR.
+    """
+    richness_gate_lookback_days: Annotated[int | None, Field(ge=1)] = None
+    """
+    PLAN-2026-10-05 gated-condor: trailing window, in trading days, of daily ATM-straddle richness readings (richness = straddle ÷ (0.7979 · σ1min(09:30→entry) · √(minutes to close) · spot)) that today's reading is ranked against. Frozen value 60. Null/absent = the strategy is dark. Spec-only field in this PR.
+    """
+    richness_gate_min_quantile: Annotated[float | None, Field(ge=0.0, le=1.0)] = None
+    """
+    PLAN-2026-10-05 gated-condor: the condor is placed only when today's richness is ≥ this quantile of the trailing richness_gate_lookback_days window. 0.5 = the pre-registered median gate (frozen value). Null/absent = the strategy is dark. Spec-only field in this PR.
+    """
+    condor_skip_event_days: bool | None = None
+    """
+    PLAN-2026-10-05 gated-condor: skip the condor on scheduled event days (FOMC statement days — the U3 risk edge: gated FOMC afternoons were +22% mean but a −100% worst). Default true: null/absent is treated as true (skip); only an explicit false trades event days. Spec-only field in this PR.
+    """
+    condor_hold_to_settle: bool | None = None
+    """
+    PLAN-2026-10-05 gated-condor: hold the condor to cash settlement — no stops, no targets, no premium exits. Null/absent is treated as true (the frozen rule has no other exit mode). The condor's own workflow (not PositionWorkflow) owns its lifecycle, so PositionWorkflow exit fields such as force_close_0dte_et, force_close_eod_et, eod_force_flatten, sl_pct and tp_ratio do NOT apply to it. Spec-only field in this PR; the condor workflow lands in a later phase.
+    """

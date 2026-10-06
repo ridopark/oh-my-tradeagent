@@ -398,6 +398,60 @@ class RoundTripTest {
   }
 
   @Test
+  void strategyConfig_condorFields_roundTrip() throws Exception {
+    // PLAN-2026-10-05 gated-condor Phase 1: the seven optional condor fields.
+    String json =
+        "{\"schema_version\":1,\"tenant_id\":\"staging_paper\",\"strategy_id\":\"gated_condor\","
+            + "\"broker_target\":\"alpaca-paper\","
+            + "\"max_signal_age_bto_secs\":30,\"max_signal_age_stc_secs\":60,\"max_positions\":1,"
+            + "\"capital_weight\":1000,\"min_contracts\":1,\"max_contracts\":1,"
+            + "\"condor_entry_et\":\"14:00\",\"condor_short_offset_pct\":0.0015,"
+            + "\"condor_wing_offset_pct\":0.006,\"richness_gate_lookback_days\":60,"
+            + "\"richness_gate_min_quantile\":0.5,\"condor_skip_event_days\":true,"
+            + "\"condor_hold_to_settle\":true}";
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+    assertThat(deserialized.getCondorEntryEt()).isEqualTo("14:00");
+    assertThat(deserialized.getCondorShortOffsetPct()).isEqualByComparingTo("0.0015");
+    assertThat(deserialized.getCondorWingOffsetPct()).isEqualByComparingTo("0.006");
+    assertThat(deserialized.getRichnessGateLookbackDays()).isEqualTo(60L);
+    assertThat(deserialized.getRichnessGateMinQuantile()).isEqualByComparingTo("0.5");
+    assertThat(deserialized.getCondorSkipEventDays()).isTrue();
+    assertThat(deserialized.getCondorHoldToSettle()).isTrue();
+
+    String reserialized = mapper.writeValueAsString(deserialized);
+    JsonNode reread = mapper.readTree(reserialized);
+    for (String field :
+        new String[] {
+          "condor_entry_et",
+          "condor_short_offset_pct",
+          "condor_wing_offset_pct",
+          "richness_gate_lookback_days",
+          "richness_gate_min_quantile",
+          "condor_skip_event_days",
+          "condor_hold_to_settle"
+        }) {
+      assertThat(reread.get(field)).as(field).isEqualTo(mapper.readTree(json).get(field));
+    }
+  }
+
+  @Test
+  void strategyConfig_condorFieldsAbsent_areNull() throws Exception {
+    // Absent = fully dark: every existing strategy row deserializes with all condor fields null.
+    String json = Files.readString(FIXTURES.resolve("strategy-config-copytrade-v1.json"));
+
+    StrategyConfig deserialized = mapper.readValue(json, StrategyConfig.class);
+
+    assertThat(deserialized.getCondorEntryEt()).isNull();
+    assertThat(deserialized.getCondorShortOffsetPct()).isNull();
+    assertThat(deserialized.getCondorWingOffsetPct()).isNull();
+    assertThat(deserialized.getRichnessGateLookbackDays()).isNull();
+    assertThat(deserialized.getRichnessGateMinQuantile()).isNull();
+    assertThat(deserialized.getCondorSkipEventDays()).isNull();
+    assertThat(deserialized.getCondorHoldToSettle()).isNull();
+  }
+
+  @Test
   void copytradeSignalPayload_manualEntryFields_roundTrip() throws Exception {
     // PLAN-2026-08-10-live-manual-bto: the /live manual BTO is a synthetic CopytradeSignalPayload,
     // distinguished from a sidecar-emitted one by source=manual + an operator qty_override.
