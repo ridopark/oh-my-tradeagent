@@ -1,0 +1,27 @@
+  U   fill    gate   n  mean     t    H1    H2
+SPX   base ungated 627  4.44  2.57  7.74  1.02
+SPX   base   GATED 254 11.26  3.55 18.02  5.50
+SPX   base    anti 373 -0.21 -0.11  1.79 -2.57
+SPX stress ungated 627  2.88  1.75  5.68 -0.01
+SPX stress   GATED 254  9.20  3.09 14.99  4.25
+SPX stress    anti 373 -1.41 -0.76  0.28 -3.42
+SPY   base ungated 635  7.42  4.68 11.39  3.31
+SPY   base   GATED 260 12.71  4.42 18.37  7.86
+SPY   base    anti 375  3.75  2.11  7.27 -0.40
+SPY stress ungated 635  5.51  3.58  9.09  1.80
+SPY stress   GATED 260 10.61  3.82 15.76  6.20
+SPY stress    anti 375  1.97  1.14  5.15 -1.78
+QQQ   base ungated 629 10.08  4.89 14.75  5.17
+QQQ   base   GATED 254 18.61  4.79 25.63 11.81
+QQQ   base    anti 375  4.29  1.95  7.85  0.36
+QQQ stress ungated 629  7.54  3.82 11.51  3.37
+QQQ stress   GATED 254 15.51  4.19 21.56  9.64
+QQQ stress    anti 375  2.14  1.01  5.14 -1.18
+IWM   base ungated 564  4.92  2.08 11.39 -1.54
+IWM   base   GATED 240  8.47  1.99 19.46 -1.30
+IWM   base    anti 324  2.29  0.86  5.99 -1.73
+IWM stress ungated 564 -0.31 -0.16  4.86 -5.48
+IWM stress   GATED 240  2.58  0.72 11.58 -5.43
+IWM stress    anti 324 -2.46 -1.08  0.36 -5.53
+
+PASS check: gated-stress SPY/QQQ means {'SPY': 10.61, 'QQQ': 15.51} vs ungated {'SPY': 5.51, 'QQQ': 7.54}

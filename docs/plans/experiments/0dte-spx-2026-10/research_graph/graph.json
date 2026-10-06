@@ -1,0 +1,267 @@
+{
+ "_doc": "0DTE research graph. Nodes: mechanism|rule|dataset|verdict-edge carrier. Edges carry evidence. Discipline: (1) a new rule node MUST link to a mechanism node with a sign prediction BEFORE testing; (2) every test edge increments its dataset's variant ledger; (3) any neighborhood mined wholesale needs a shuffled-data placebo run.",
+ "nodes": {
+  "M1-afternoon-vrp": {
+   "type": "mechanism",
+   "claim": "0DTE premium is overpriced in the afternoon; seller gross edge rises ~0% (open) to +12% of premium (14:00)",
+   "sign": "sell-premium-pm"
+  },
+  "M2-iv-richness": {
+   "type": "mechanism",
+   "claim": "implied >> morning realized => selling is +EV; implied <= realized => no edge (insurance pricing)",
+   "sign": "sell-when-rich"
+  },
+  "M3-defined-risk": {
+   "type": "mechanism",
+   "claim": "wings cap tails structurally (math, not prediction)",
+   "sign": "structural"
+  },
+  "M4-floor-50": {
+   "type": "mechanism",
+   "claim": "entry-anchored -50% premium floor; tight stops whipsaw (E-series + prod stop_loss 0% win)",
+   "sign": "loose-floor-only"
+  },
+  "M5-equal-notional": {
+   "type": "mechanism",
+   "claim": "sizing uncorrelated with returns; equal-notional cuts worst loss 37% (#780)",
+   "sign": "structural"
+  },
+  "M6-settle-exit": {
+   "type": "mechanism",
+   "claim": "hold-to-cash-settlement pays the spread once; close1555 exits flip sign of afternoon condors",
+   "sign": "structural"
+  },
+  "M7-execution-cost": {
+   "type": "mechanism",
+   "claim": "~60% of retail 0DTE losses are spread; surviving sellers' edge ~= $0.04/leg",
+   "sign": "minimize-cost"
+  },
+  "D1-momentum-direction": {
+   "type": "dead",
+   "claim": "mechanical directional entries (ORB 15/30/60m, momentum, pullback, confluence scores) - died OOS every form; E7 t 20.5->0.7",
+   "killed_by": [
+    "E5",
+    "E7",
+    "A1-A7",
+    "round1"
+   ]
+  },
+  "D2-flow-confirmation": {
+   "type": "dead",
+   "claim": "CVD / dark-pool / macro-day / entry filters add nothing or flip sign",
+   "killed_by": [
+    "H1H2",
+    "E10",
+    "round1-cvd"
+   ]
+  },
+  "D3-intraday-loss-detect": {
+   "type": "dead",
+   "claim": "big losers not separable from winners at entry OR in-trade (paths overlap: 47-67% of stops were green first)",
+   "killed_by": [
+    "E10",
+    "A9"
+   ]
+  },
+  "D4-overnight-1dte": {
+   "type": "dead",
+   "claim": "1DTE SPXW overnight short premium <= costs 2024-26 (16/16 cells, best t 0.46)",
+   "killed_by": [
+    "T2"
+   ]
+  },
+  "D5-event-straddle": {
+   "type": "dead",
+   "claim": "FOMC 13:00 long straddle: event fully priced (-8%, = controls)",
+   "killed_by": [
+    "T5"
+   ]
+  },
+  "D6-gex-direction": {
+   "type": "dead",
+   "claim": "GEX/VVIX as direction signal: no evidence anywhere; OI-GEX blind to 0DTE (lit)",
+   "killed_by": [
+    "lit-review"
+   ]
+  },
+  "D7-atm-fly-always": {
+   "type": "dead",
+   "claim": "unconditional ATM short vol at 10:00: -22%/day of risk",
+   "killed_by": [
+    "C7"
+   ]
+  },
+  "D8-premium-exits": {
+   "type": "dead",
+   "claim": "premium-mark exits whipsaw; underlying-anchored exits required for A7-class rules",
+   "killed_by": [
+    "A8"
+   ]
+  },
+  "R-T4-gated-condor": {
+   "type": "rule",
+   "mechanisms": [
+    "M1-afternoon-vrp",
+    "M2-iv-richness",
+    "M3-defined-risk",
+    "M6-settle-exit"
+   ],
+   "spec": "14:00 condor shorts +-0.15% wings +-0.6%, hold to settle, ONLY when richness >= trailing-60d median",
+   "status": "PASS-OOS (SPY t3.8, QQQ t4.2 stress; SPX t3.1); needs fill confirmation; vehicle XSP/SPX"
+  },
+  "R-A7-orb-sniper": {
+   "type": "rule",
+   "mechanisms": [],
+   "spec": "ORB30 score==2 long ITM 0DTE, underlying exits T15/S30/120m",
+   "status": "dev-pass, holdout -2.7%, QQQ/IWM transfer fail -> mechanism-less, likely overfit"
+  },
+  "R-MEIC": {
+   "type": "rule",
+   "mechanisms": [
+    "M1-afternoon-vrp",
+    "M3-defined-risk"
+   ],
+   "spec": "6 ICs 12:00-14:30, per-side stop = total credit",
+   "status": "gross+ (t3.5 frictionless), 1 tick/leg erases; execution-bound"
+  },
+  "R-METF": {
+   "type": "rule",
+   "mechanisms": [
+    "M1-afternoon-vrp",
+    "M3-defined-risk"
+   ],
+   "spec": "afternoon trend-side credit spreads, 2x stop",
+   "status": "gross+ (t3.1 frictionless), execution-bound"
+  },
+  "DS-spxw-0dte": {
+   "type": "dataset",
+   "span": "2024-03..2026-10",
+   "variants_charged": 230,
+   "note": "all SPXW intraday claims; heavily mined - demand t >= ~3.5 or OOS transfer"
+  },
+  "DS-spy-10y": {
+   "type": "dataset",
+   "span": "2016-01..2026-03",
+   "variants_charged": 90,
+   "note": "underlying-only claims"
+  },
+  "DS-holdout-2026Q2Q3": {
+   "type": "dataset",
+   "span": "2026-04..2026-10",
+   "variants_charged": 3,
+   "note": "SPENT for ORB30/A7 family"
+  },
+  "DS-quotes-forward": {
+   "type": "dataset",
+   "span": "2026-10-05..",
+   "variants_charged": 0,
+   "note": "collector NBBO; the ONLY unmined data; reserve for fill-model + confirmations"
+  },
+  "I-SPX": {
+   "type": "instrument",
+   "settle": "cash",
+   "fees": "high",
+   "tradeable_vehicle": true
+  },
+  "I-XSP": {
+   "type": "instrument",
+   "settle": "cash",
+   "fees": "none<10",
+   "tradeable_vehicle": true,
+   "note": "1/10 SPX; no index data on Alpaca - SPY-proxy spot"
+  },
+  "I-SPY": {
+   "type": "instrument",
+   "settle": "physical",
+   "tradeable_vehicle": false,
+   "note": "15:30 expiry handling blocks hold-to-settle; fine for exits<14:00"
+  },
+  "I-QQQ": {
+   "type": "instrument",
+   "settle": "physical",
+   "tradeable_vehicle": false
+  },
+  "I-IWM": {
+   "type": "instrument",
+   "settle": "physical",
+   "tradeable_vehicle": false,
+   "note": "weaker on everything tested; use as 3rd transfer check only"
+  }
+ },
+ "edges": [
+  {
+   "from": "R-T4-gated-condor",
+   "to": "I-SPY",
+   "rel": "tested-on",
+   "verdict": "PASS stress +10.6% t3.8"
+  },
+  {
+   "from": "R-T4-gated-condor",
+   "to": "I-QQQ",
+   "rel": "tested-on",
+   "verdict": "PASS stress +15.5% t4.2"
+  },
+  {
+   "from": "R-T4-gated-condor",
+   "to": "I-SPX",
+   "rel": "tested-on",
+   "verdict": "pass in-sample +9.2% t3.1"
+  },
+  {
+   "from": "R-T4-gated-condor",
+   "to": "I-IWM",
+   "rel": "tested-on",
+   "verdict": "weak +2.6% t0.7"
+  },
+  {
+   "from": "R-A7-orb-sniper",
+   "to": "I-QQQ",
+   "rel": "transfer",
+   "verdict": "FAIL - filter adds nothing"
+  },
+  {
+   "from": "M2-iv-richness",
+   "to": "M1-afternoon-vrp",
+   "rel": "amplifies",
+   "verdict": "doubles EV everywhere tested"
+  },
+  {
+   "from": "M2-iv-richness",
+   "to": "M1-afternoon-vrp",
+   "rel": "confirmed-across-time",
+   "verdict": "U2: gated>ungated 9/9 cells (13/14/15:00 x SPY/QQQ/SPX); peak at 14:00 matches M1 curve"
+  },
+  {
+   "from": "M2-iv-richness",
+   "to": "DS-spxw-0dte",
+   "rel": "dose-response",
+   "verdict": "U4: richness terciles cheap -2.0 / mid +4.3 / rich +17.3 (t 5.7) - monotone; EVIDENCE for M2, NOT a new threshold knob (traded rule stays at pre-registered median gate)"
+  },
+  {
+   "from": "R-T4-gated-condor",
+   "to": "D5-event-straddle",
+   "rel": "risk-edge",
+   "verdict": "U3: prediction falsified - gated FOMC mean HIGHER (+22.2%) but win 58% vs 77% and worst -100%: pre-FOMC premium is rich-for-a-reason, binary. OPERATOR DECISION: skip FOMC days (tail doctrine) or accept the binary profile"
+  },
+  {
+   "from": "M2-iv-richness",
+   "to": "R-MEIC",
+   "rel": "composition-falsified",
+   "verdict": "U1: gate moves MEIC frictionless 0.26->0.46%/day only; base stays -0.29% (t -1.9). Cause: R-MEIC lacks M6-settle-exit - per-side stop churn pays the spread repeatedly; no entry gate can offset exit costs. MEIC shelved."
+  }
+ ],
+ "untested_compositions": [
+  {
+   "id": "U5",
+   "edge": "R-T4 x DS-quotes-forward",
+   "prediction": "mid-fillable credit within 1 tick of print-model",
+   "cost": "wait for collector data"
+  },
+  {
+   "id": "U6",
+   "edge": "M2-iv-richness x I-XSP direct",
+   "prediction": "gate computed from XSP chain itself (not SPY proxy) agrees",
+   "cost": "collector data, 2-4 wks"
+  }
+ ]
+}
