@@ -208,6 +208,50 @@ class CondorHoldWorkflowImplTest {
   }
 
   @Test
+  void settlementSpotActivityFailing_pagesMismatch_workflowDoesNotFail() {
+    when(market.settlementSpot("XSP"))
+        .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("md down", "X"));
+
+    assertThat(runToCompletion()).isEqualTo("settle_unresolved");
+    assertThat(onlyAudit("CondorSettleMismatch").getSubject())
+        .containsEntry("reason", "settlement_spot_unavailable");
+    verify(condorExec).heldCondorLegs(any(), any(), any());
+  }
+
+  @Test
+  void finalHeldLegsReadFailing_pagesMismatch_workflowDoesNotFail() {
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+    when(condorExec.heldCondorLegs(any(), any(), any()))
+        .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("exec down", "X"));
+
+    assertThat(runToCompletion()).isEqualTo("settle_mismatch");
+    assertThat(onlyAudit("CondorSettleMismatch").getSubject())
+        .containsEntry("reason", "held_legs_read_failed");
+  }
+
+  @Test
+  void partialBranchHeldLegsReadFailing_pricesAllLegs_andPages() {
+    when(condorExec.flattenCondor(any()))
+        .thenReturn(new CondorFlattenResult(false, false, "short cover not confirmed filled"));
+    when(condorExec.heldCondorLegs(any(), any(), any()))
+        .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("exec down", "X"))
+        .thenReturn(List.of());
+    when(market.settlementSpot("XSP")).thenReturn(610.0);
+    CondorHoldWorkflow wf = stub();
+    WorkflowClient.start(wf::run, input());
+    wf.forceClose("operator:alice");
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    assertThat(onlyAudit("CondorSettleMismatch").getSubject())
+        .containsEntry("reason", "held_legs_read_failed");
+    Map<String, Object> s = onlyAudit("CondorSettled").getSubject();
+    // Conservative: all four legs priced (610 → debit 3, capped at the wing), no credit.
+    assertThat(s.get("legs_priced").toString()).contains("601000", "599000", "604000", "596000");
+    assertThat(new BigDecimal(s.get("expected_pnl").toString())).isEqualByComparingTo("-300.00");
+  }
+
+  @Test
   void forceClose_flattensAllFourLegs_beforeSettlement() {
     CondorHoldWorkflow wf = stub();
     WorkflowClient.start(wf::run, input());

@@ -185,14 +185,22 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     List<CondorLeg> priced = input.getLegs();
     java.math.BigDecimal credit = input.getCredit();
     if (afterPartialFlatten) {
-      List<String> held =
-          condorExec().heldCondorLegs(input.getTenantId(), input.getBrokerTarget(), occs()).stream()
-              .map(HeldLeg::occSymbol)
-              .toList();
-      priced = input.getLegs().stream().filter(l -> held.contains(l.occSymbol())).toList();
       credit = java.math.BigDecimal.ZERO;
+      List<HeldLeg> heldNow = readHeldLegs();
+      if (heldNow != null) {
+        List<String> held = heldNow.stream().map(HeldLeg::occSymbol).toList();
+        priced = input.getLegs().stream().filter(l -> held.contains(l.occSymbol())).toList();
+      }
+      // On a failed read (already paged) keep ALL legs priced — the conservative remainder.
     }
-    Double spot = market.settlementSpot(input.getUnderlying());
+    Double spot;
+    try {
+      spot = market.settlementSpot(input.getUnderlying());
+    } catch (ActivityFailure e) {
+      // Same path as a missing spot: page and leave the settlement unresolved, never fail the
+      // hold (the post-expiry broker check below must still run).
+      spot = null;
+    }
     // A missing (no bars) or stale (no strip within the bar-staleness window) settlement spot is
     // NEVER priced as zero: page and mark this settlement unresolved for the operator.
     boolean unresolved = spot == null || !Double.isFinite(spot) || spot <= 0;
@@ -225,8 +233,10 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
 
     Duration untilOpen = calendar.durationUntilNextRthOpenEt();
     Workflow.sleep(untilOpen.plus(RECONCILE_AFTER_OPEN));
-    List<HeldLeg> held =
-        condorExec().heldCondorLegs(input.getTenantId(), input.getBrokerTarget(), occs());
+    List<HeldLeg> held = readHeldLegs();
+    if (held == null) {
+      return "settle_mismatch";
+    }
     if (!held.isEmpty()) {
       Map<String, Object> heldQty = new LinkedHashMap<>();
       held.forEach(h -> heldQty.put(h.occSymbol(), h.qty()));
@@ -235,6 +245,22 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
       return "settle_mismatch";
     }
     return unresolved ? "settle_unresolved" : "settled";
+  }
+
+  /**
+   * The broker's holdings of this condor's legs, or null after paging {@value
+   * #KIND_SETTLE_MISMATCH} ({@code held_legs_read_failed}) when the exec read keeps failing — the
+   * hold must page, never fail, when the exec worker is down.
+   */
+  private List<HeldLeg> readHeldLegs() {
+    try {
+      return condorExec().heldCondorLegs(input.getTenantId(), input.getBrokerTarget(), occs());
+    } catch (ActivityFailure e) {
+      logAudit(
+          KIND_SETTLE_MISMATCH,
+          subject("reason", "held_legs_read_failed", "error", String.valueOf(e.getMessage())));
+      return null;
+    }
   }
 
   private List<String> occs() {
