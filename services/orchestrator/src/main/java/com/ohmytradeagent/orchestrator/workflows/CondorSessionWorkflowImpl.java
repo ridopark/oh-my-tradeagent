@@ -22,6 +22,7 @@ import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.common.RetryOptions;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.failure.TemporalFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.Workflow;
@@ -77,6 +78,10 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
   static final String KIND_ENTRY_ABANDONED = "CondorEntryAbandoned";
   static final String KIND_ENTRY_HALTED = "CondorEntryHalted";
   static final String KIND_ENTRY_FILLED = "CondorEntryFilled";
+  static final String KIND_HOLD_START_FAILED = "CondorHoldStartFailed";
+
+  static final int HOLD_START_ATTEMPTS = 3;
+  static final Duration HOLD_START_RETRY_BACKOFF = Duration.ofSeconds(5);
 
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
@@ -228,18 +233,22 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
     switch (entry.outcome()) {
       case "FILLED", "PARTIAL" -> {
         String holdId = WorkflowIds.condorHold(in.getTenantId(), in.getStrategyId(), attemptId);
-        startHold(
-            holdId,
-            new CondorHoldWorkflowInput(
-                in.getTenantId(),
-                in.getStrategyId(),
-                brokerTarget,
-                attemptId,
-                attemptId,
-                UNDERLYING,
-                entry.filledQty(),
-                entry.avgFillCredit(),
-                legs.legs()));
+        boolean holdStarted =
+            startHoldWithRetry(
+                holdId,
+                new CondorHoldWorkflowInput(
+                    in.getTenantId(),
+                    in.getStrategyId(),
+                    brokerTarget,
+                    attemptId,
+                    attemptId,
+                    UNDERLYING,
+                    entry.filledQty(),
+                    entry.avgFillCredit(),
+                    legs.legs()));
+        if (!holdStarted) {
+          return "hold_start_failed";
+        }
         logAudit(
             KIND_ENTRY_FILLED,
             subject(
@@ -265,6 +274,39 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
       }
       default -> {
         return abandon(entry.reason(), entry);
+      }
+    }
+  }
+
+  /**
+   * Starts the hold, retrying a failed child start {@value #HOLD_START_ATTEMPTS} times. A filled
+   * condor with no hold is live at the broker with NO owner (no flatten path, no settlement
+   * reconciliation), so a persistent failure pages ({@value #KIND_HOLD_START_FAILED}) rather than
+   * being swallowed. Returns true iff the hold is started.
+   */
+  private boolean startHoldWithRetry(String holdId, CondorHoldWorkflowInput holdInput) {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        startHold(holdId, holdInput);
+        return true;
+      } catch (TemporalFailure e) {
+        if (attempt >= HOLD_START_ATTEMPTS) {
+          logAudit(
+              KIND_HOLD_START_FAILED,
+              subject(
+                  "hold_workflow_id",
+                  holdId,
+                  "attempts",
+                  attempt,
+                  "error",
+                  String.valueOf(e.getMessage()),
+                  "legs",
+                  holdInput.getLegs().stream()
+                      .map(CondorMarketActivity.CondorLeg::occSymbol)
+                      .toList()));
+          return false;
+        }
+        Workflow.sleep(HOLD_START_RETRY_BACKOFF);
       }
     }
   }

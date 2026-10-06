@@ -48,6 +48,16 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
   /** Past the open so the broker's overnight expiry/settlement processing has posted. */
   static final Duration RECONCILE_AFTER_OPEN = Duration.ofMinutes(5);
 
+  /**
+   * Explicit flatten/read retry policy: each exec call is attempted at most this many times. The
+   * flatten is idempotent per leg (every close is journaled under its own condor- key and a re-run
+   * reuses a SUBMITTED/FILLED leg), so this is effectively 3 attempts per leg, shorts covered
+   * first. Legs still open after the last attempt → {@value #KIND_FLATTEN_INCOMPLETE} (pages) and
+   * the hold stays alive holding the remainder through settlement reconciliation — it never gives
+   * up silently and never loops.
+   */
+  static final int EXEC_MAX_ATTEMPTS = 3;
+
   static final String EXIT_OPERATOR = "operator_force_close";
   static final String EXIT_KILLSWITCH = "killswitch_flatten";
 
@@ -183,8 +193,13 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
       credit = java.math.BigDecimal.ZERO;
     }
     Double spot = market.settlementSpot(input.getUnderlying());
-    if (spot == null) {
-      logAudit(KIND_SETTLE_MISMATCH, subject("reason", "settlement_spot_unavailable"));
+    // A missing (no bars) or stale (no strip within the bar-staleness window) settlement spot is
+    // NEVER priced as zero: page and mark this settlement unresolved for the operator.
+    boolean unresolved = spot == null || !Double.isFinite(spot) || spot <= 0;
+    if (unresolved) {
+      logAudit(
+          KIND_SETTLE_MISMATCH,
+          subject("reason", "settlement_spot_unavailable", "settlement_spot", spot));
     } else {
       CondorSettlement.Result s = CondorSettlement.settle(priced, credit, input.getQty(), spot);
       logAudit(
@@ -219,7 +234,7 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
           KIND_SETTLE_MISMATCH, subject("reason", "legs_still_held_after_expiry", "held", heldQty));
       return "settle_mismatch";
     }
-    return "settled";
+    return unresolved ? "settle_unresolved" : "settled";
   }
 
   private List<String> occs() {
@@ -233,7 +248,8 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
             .setTaskQueue(ExecActivitiesFactory.taskQueueFor(input.getBrokerTarget()))
             .setStartToCloseTimeout(Duration.ofMinutes(1))
             .setHeartbeatTimeout(Duration.ofSeconds(30))
-            .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(5).build())
+            .setRetryOptions(
+                RetryOptions.newBuilder().setMaximumAttempts(EXEC_MAX_ATTEMPTS).build())
             .build());
   }
 

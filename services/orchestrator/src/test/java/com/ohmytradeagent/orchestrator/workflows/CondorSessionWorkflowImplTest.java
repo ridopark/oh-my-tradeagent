@@ -267,6 +267,40 @@ class CondorSessionWorkflowImplTest {
   }
 
   @Test
+  void holdStartFailure_isRetriedThenPaged_neverSwallowed() {
+    // A filled condor whose hold cannot start is live at the broker with no owner. Force the child
+    // start to fail by occupying its id (REJECT_DUPLICATE) and expect retries then a page.
+    when(condorExec.enterCondor(any())).thenReturn(filled());
+    CondorHoldWorkflow squatter =
+        env.getWorkflowClient()
+            .newWorkflowStub(
+                CondorHoldWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setTaskQueue(CORE_QUEUE)
+                    .setWorkflowId("t-staging_paper/s-gated_condor/condor/2026-10-05")
+                    .build());
+    io.temporal.client.WorkflowClient.start(
+        squatter::run,
+        new CondorHoldWorkflowInput(
+            "staging_paper",
+            "gated_condor",
+            "alpaca-paper",
+            "x",
+            "2026-10-05",
+            "XSP",
+            1L,
+            bd("1.10"),
+            condorLegs()));
+
+    assertThat(run()).isEqualTo("hold_start_failed");
+
+    assertThat(onlyAudit("CondorHoldStartFailed").getSubject())
+        .containsEntry("attempts", CondorSessionWorkflowImpl.HOLD_START_ATTEMPTS)
+        .containsEntry("hold_workflow_id", "t-staging_paper/s-gated_condor/condor/2026-10-05");
+    assertThat(audits()).noneMatch(e -> "CondorEntryFilled".equals(e.getKind()));
+  }
+
+  @Test
   void abandonedWalk_endsTheSessionCleanly_withoutAHold() {
     when(condorExec.enterCondor(any())).thenReturn(abandoned());
 

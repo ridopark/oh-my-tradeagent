@@ -184,11 +184,25 @@ class CondorHoldWorkflowImplTest {
   }
 
   @Test
-  void noSettlementSpot_pagesSettleMismatch() {
+  void noSettlementSpot_pagesSettleMismatch_andIsUnresolved() {
     when(market.settlementSpot("XSP")).thenReturn(null);
 
-    runToCompletion();
+    // Never silently "settled" with no priced P&L.
+    assertThat(runToCompletion()).isEqualTo("settle_unresolved");
+    assertThat(
+            org.mockito.Mockito.mockingDetails(audit).getInvocations().stream()
+                .map(i -> ((AuditEvent) i.getArgument(0)).getKind()))
+        .doesNotContain("CondorSettled");
 
+    assertThat(onlyAudit("CondorSettleMismatch").getSubject())
+        .containsEntry("reason", "settlement_spot_unavailable");
+  }
+
+  @Test
+  void nonFiniteSettlementSpot_isNeverPriced() {
+    when(market.settlementSpot("XSP")).thenReturn(Double.NaN);
+
+    assertThat(runToCompletion()).isEqualTo("settle_unresolved");
     assertThat(onlyAudit("CondorSettleMismatch").getSubject())
         .containsEntry("reason", "settlement_spot_unavailable");
   }

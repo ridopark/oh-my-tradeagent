@@ -138,7 +138,7 @@ public class OrderFailureAlerter {
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
-          + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch";
+          + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 

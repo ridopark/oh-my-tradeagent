@@ -413,6 +413,7 @@ public final class AuditEventKinds {
           "CondorEntryAbandoned",
           "CondorEntryHalted",
           "CondorEntryFilled",
+          "CondorHoldStartFailed",
           "CondorFlattened",
           "CondorFlattenIncomplete",
           "CondorSettled",
