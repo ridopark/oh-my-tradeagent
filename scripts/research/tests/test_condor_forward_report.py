@@ -320,6 +320,28 @@ class MismatchAndNullsTest(unittest.TestCase):
         self.assertIn("VERDICT:", text)
 
 
+class MissingGateEventTest(unittest.TestCase):
+    """#903: an entry with no CondorGateEvaluated must be flagged, never hidden as gated_out."""
+
+    def test_fill_without_gate_event_is_counted_and_quarantined(self):
+        d1 = D0 + dt.timedelta(days=1)
+        b = book([filled(D0), settled(D0, 40), abandoned(d1)])
+        a = b.attempts[D0]
+        self.assertIn("missing_gate_event", {r for _, r in a.mismatches})
+        m = cfr.evaluate(b, d1).metrics
+        self.assertEqual((m["gated"], m["fills"], m["abandoned"]), (2, 1, 1))
+        self.assertEqual((m["priced"], m["quarantined"]), (0, 1))
+        text = cfr.render(b, cfr.evaluate(b, d1), T, S, d1)
+        self.assertNotIn("gated_out", text)
+        self.assertIn("MISMATCH:missing_gate_event", text)
+
+    def test_missing_gate_event_runs_the_kill_clock(self):
+        b = book([filled(D0), settled(D0, 40)])
+        self.assertEqual(cfr.evaluate(b, D0 + dt.timedelta(days=1)).kills, [])
+        self.assertTrue(cfr.evaluate(b, D0 + dt.timedelta(days=2)).kills)
+        self.assertEqual(cfr.evaluate(b, D0 + dt.timedelta(days=2), {D0}).kills, [])
+
+
 class OfflineCliTest(unittest.TestCase):
     def test_offline_jsonl_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
