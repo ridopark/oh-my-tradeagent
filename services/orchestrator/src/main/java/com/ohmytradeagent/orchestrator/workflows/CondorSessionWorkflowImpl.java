@@ -60,15 +60,18 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
   static final String UNDERLYING = "XSP";
 
   /**
-   * Pre-{@link #VERSION_CONDOR_SIZING} fixed size: an in-flight session that started before
-   * config-driven sizing shipped replays (and keeps) one contract.
+   * Pre-{@link #VERSION_CONDOR_SIZING} fixed size. Kept ONLY by a session whose history already
+   * passed the sizing point (it holds EnterCondor and no marker → DEFAULT_VERSION). A session still
+   * sleeping toward entry at deploy reaches getVersion with no marker in its history, records v1,
+   * and sizes under the new config-driven logic.
    */
   static final long LEGACY_QTY = 1L;
 
   /**
    * Config-driven sizing ({@link CondorSizing}): gates the capital-base read it adds (a {@code
-   * capitalForStrategy} or account-snapshot activity), so a session in flight across the deploy
-   * replays its pre-change command stream. Sessions run daily ~13:50-14:05 ET.
+   * capitalForStrategy} or account-snapshot activity), so a session whose history already passed
+   * the sizing point replays its pre-change command stream (and keeps {@link #LEGACY_QTY}); one not
+   * yet there sizes under the new logic. Sessions run daily ~13:50-14:05 ET.
    */
   static final String VERSION_CONDOR_SIZING = "condor-config-sizing-v1";
 
@@ -259,7 +262,7 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
     if (sizingVersion >= 1) {
       sizing =
           CondorSizing.size(
-              config, capitalBase(config, brokerTarget), legs.legs(), legs.netCreditMid());
+              config, capitalBase(config, brokerTarget), legs.legs(), legs.netCreditMid(), TICK);
       qty = sizing.contracts();
     }
 

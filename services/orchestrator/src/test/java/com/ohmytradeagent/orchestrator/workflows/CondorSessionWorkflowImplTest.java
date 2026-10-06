@@ -326,7 +326,7 @@ class CondorSessionWorkflowImplTest {
 
   @Test
   void raisedMaxContracts_sizesFromCapitalWeightOverMaxRisk() {
-    // 100k static × 0.05 = 5000; max risk (3 − 1.11) × 100 = 189 → 26 contracts.
+    // 100k static × 0.05 = 5000; worst-case credit 1.11 − 0.02 = 1.09 → max risk 191 → 26.
     when(strategy.get("staging_paper", "gated_condor"))
         .thenReturn(condorConfig().withMaxContracts(50L));
     when(condorExec.enterCondor(any())).thenReturn(filled());
@@ -353,7 +353,7 @@ class CondorSessionWorkflowImplTest {
 
     run();
 
-    // 20000 × 0.05 = 1000 / 189 → 5.
+    // 20000 × 0.05 = 1000 / 191 → 5.
     ArgumentCaptor<CondorEntryRequest> req = ArgumentCaptor.forClass(CondorEntryRequest.class);
     verify(condorExec).enterCondor(req.capture());
     assertThat(req.getValue().qty()).isEqualTo(5L);

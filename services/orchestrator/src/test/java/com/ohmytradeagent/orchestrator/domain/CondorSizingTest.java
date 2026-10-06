@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 class CondorSizingTest {
 
   private static final BigDecimal STATIC_BASE = new BigDecimal("100000");
+  private static final BigDecimal TICK = new BigDecimal("0.01");
 
   /** 601/604 calls, 599/596 puts: both wings 3 wide. */
   private static List<CondorLeg> legs() {
@@ -33,26 +34,45 @@ class CondorSizingTest {
   void deployedStagingPaperConfig_staysOneLot() {
     // staging_paper/gated_condor as deployed: weight 0.05, static, min 1, max 1.
     assertThat(
-            CondorSizing.size(config("0.05", 1, 1), STATIC_BASE, legs(), new BigDecimal("1.11"))
+            CondorSizing.size(
+                    config("0.05", 1, 1), STATIC_BASE, legs(), new BigDecimal("1.11"), TICK)
                 .contracts())
         .isEqualTo(1L);
   }
 
   @Test
   void raisedMaxContracts_sizesByMaxRisk() {
-    // 100k × 0.05 = 5000; max risk (3 − 1.11) × 100 = 189 → floor(26.45) = 26.
+    // 100k × 0.05 = 5000; worst-case credit 1.11 − 2×0.01 = 1.09 → max risk (3 − 1.09) × 100 =
+    // 191 → floor(26.18) = 26.
     CondorSizing.Result r =
-        CondorSizing.size(config("0.05", 1, 50), STATIC_BASE, legs(), new BigDecimal("1.11"));
+        CondorSizing.size(config("0.05", 1, 50), STATIC_BASE, legs(), new BigDecimal("1.11"), TICK);
 
     assertThat(r.contracts()).isEqualTo(26L);
-    assertThat(r.maxRiskPerContract()).isEqualByComparingTo("189");
+    assertThat(r.maxRiskPerContract()).isEqualByComparingTo("191");
     assertThat(r.allocation()).isEqualByComparingTo("5000");
+  }
+
+  @Test
+  void sizesAgainstTheWalkFloorCredit_notTheMid() {
+    // 102060 × 0.05 = 5103 = 27 × 189: at the MID (risk 189) this would be 27, but the walk can
+    // fill down to 1.09 (risk 191) → floor(26.72) = 26, so realized max risk never exceeds the
+    // allocation.
+    assertThat(
+            CondorSizing.size(
+                    config("0.05", 1, 50),
+                    new BigDecimal("102060"),
+                    legs(),
+                    new BigDecimal("1.11"),
+                    TICK)
+                .contracts())
+        .isEqualTo(26L);
   }
 
   @Test
   void clampsToMaxContracts() {
     assertThat(
-            CondorSizing.size(config("0.05", 1, 9), STATIC_BASE, legs(), new BigDecimal("1.11"))
+            CondorSizing.size(
+                    config("0.05", 1, 9), STATIC_BASE, legs(), new BigDecimal("1.11"), TICK)
                 .contracts())
         .isEqualTo(9L);
   }
@@ -71,7 +91,8 @@ class CondorSizingTest {
   @Test
   void creditAtOrAboveWidth_clampsToMin() {
     assertThat(
-            CondorSizing.size(config("0.05", 2, 50), STATIC_BASE, legs(), new BigDecimal("3.00"))
+            CondorSizing.size(
+                    config("0.05", 2, 50), STATIC_BASE, legs(), new BigDecimal("3.00"), TICK)
                 .contracts())
         .isEqualTo(2L);
   }
@@ -81,7 +102,11 @@ class CondorSizingTest {
     // 1000 × 0.05 = 50 < 189.
     assertThat(
             CondorSizing.size(
-                    config("0.05", 1, 50), new BigDecimal("1000"), legs(), new BigDecimal("1.11"))
+                    config("0.05", 1, 50),
+                    new BigDecimal("1000"),
+                    legs(),
+                    new BigDecimal("1.11"),
+                    TICK)
                 .contracts())
         .isEqualTo(1L);
   }
@@ -89,12 +114,12 @@ class CondorSizingTest {
   @Test
   void noCapitalBase_clampsToMin() {
     assertThat(
-            CondorSizing.size(config("0.05", 1, 50), null, legs(), new BigDecimal("1.11"))
+            CondorSizing.size(config("0.05", 1, 50), null, legs(), new BigDecimal("1.11"), TICK)
                 .contracts())
         .isEqualTo(1L);
     assertThat(
             CondorSizing.size(
-                    config("0.05", 1, 50), BigDecimal.ZERO, legs(), new BigDecimal("1.11"))
+                    config("0.05", 1, 50), BigDecimal.ZERO, legs(), new BigDecimal("1.11"), TICK)
                 .contracts())
         .isEqualTo(1L);
   }
