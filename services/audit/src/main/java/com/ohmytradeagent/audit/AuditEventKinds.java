@@ -405,7 +405,8 @@ public final class AuditEventKinds {
           // Gated-condor (PLAN-2026-10-05 Phase 4) CondorSessionWorkflowImpl /
           // CondorHoldWorkflowImpl. The condor owns its own lifecycle outside PositionWorkflow, so
           // none of these opens or closes a ledger lifecycle — observability in ALL_KINDS only.
-          // CondorEntryHalted (order possibly live), CondorFlattenIncomplete (a short not
+          // CondorEntryHalted (order possibly live — or entry refused as late: reason late_entry,
+          // no order sent), CondorFlattenIncomplete (a short not
           // confirmed covered) and CondorSettleMismatch (legs still held after expiry / no
           // settlement spot) page via OrderFailureAlerter's failure-kinds allowlist.
           "CondorEventSkip",
