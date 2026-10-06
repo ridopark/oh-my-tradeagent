@@ -258,7 +258,7 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     // A forceClose/riskBreach arriving during this overnight wait is recorded but intentionally
     // not acted on: the legs expired at 16:00 and only settlement remains to reconcile.
     Duration untilOpen = calendar.durationUntilNextRthOpenEt();
-    Workflow.sleep(untilOpen.plus(RECONCILE_AFTER_OPEN));
+    Workflow.sleep((untilOpen == null ? Duration.ZERO : untilOpen).plus(RECONCILE_AFTER_OPEN));
     List<HeldLeg> held = readHeldLegs();
     if (held == null) {
       return "settle_mismatch";

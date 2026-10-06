@@ -353,6 +353,51 @@ class CondorSessionWorkflowImplTest {
   }
 
   @Test
+  void killSwitchHaltNull_meansAllowed_sessionProceedsToEntry() {
+    // RiskActivitiesImpl.checkKillSwitchHalt returns NULL for "no halt" (the watchlist caller's
+    // idiom). 2026-10-06 prod: the session dereferenced it, NPE'd on the HAPPY path and wedged.
+    when(risk.checkKillSwitchHalt("staging_paper", "gated_condor")).thenReturn(null);
+    when(condorExec.enterCondor(any())).thenReturn(abandoned());
+
+    assertThat(run()).isEqualTo("abandoned");
+
+    verify(market).resolveCondorLegs(anyString(), anyDouble(), anyDouble());
+    verify(condorExec).enterCondor(any());
+  }
+
+  @Test
+  void tradingDaysNull_isTreatedAsClosed_notAnNpe() {
+    when(tradingCalendar.tradingDays(TODAY, TODAY)).thenReturn(null);
+
+    assertThat(run()).isEqualTo("skip:market_closed");
+  }
+
+  @Test
+  void staleAtEntry_pagesAndNeverSends() {
+    // Workflow time passes entry + MAX_LATE_ENTRY before the order step (a slow gate read, or a
+    // wedged task resumed late). Modelled on the workflow clock: the late-start read says the
+    // 14:05 cutoff is 1m away (→ send-deadline = now + 1m + 15m − 5m = now + 11m), but the
+    // session then sleeps 12m before evaluating. No order; a paging audit.
+    when(calendar.durationUntilEodCloseEt(java.time.LocalTime.of(14, 5)))
+        .thenReturn(Duration.ofMinutes(1));
+    when(calendar.durationUntilEodCloseEt(java.time.LocalTime.of(14, 0, 30)))
+        .thenReturn(Duration.ofMinutes(12));
+
+    assertThat(run()).isEqualTo("late_entry");
+    assertThat(onlyAudit("CondorEntryHalted").getSubject().get("reason").toString())
+        .startsWith("late_entry");
+    verify(condorExec, never()).enterCondor(any());
+  }
+
+  @Test
+  void normalEntry_isNotFlaggedLate() {
+    when(condorExec.enterCondor(any())).thenReturn(abandoned());
+
+    assertThat(run()).isEqualTo("abandoned");
+    verify(condorExec).enterCondor(any());
+  }
+
+  @Test
   void unresolvedLegs_abandon() {
     when(market.resolveCondorLegs(anyString(), anyDouble(), anyDouble()))
         .thenReturn(new CondorLegsResult(600.0, List.of(), null, "no quote for XSP"));

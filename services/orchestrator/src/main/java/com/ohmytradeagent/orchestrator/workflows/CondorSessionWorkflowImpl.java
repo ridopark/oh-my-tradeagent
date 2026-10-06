@@ -70,6 +70,12 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
   /** How far past {@code condor_entry_et} a session may still evaluate and enter. */
   static final Duration MAX_LATE_START = Duration.ofMinutes(5);
 
+  /**
+   * How far past {@code condor_entry_et} the ORDER may still be sent (checked right before the
+   * entry). Wider than {@link #MAX_LATE_START} because the richness read itself can take minutes.
+   */
+  static final Duration MAX_LATE_ENTRY = Duration.ofMinutes(15);
+
   /** The ladder sends no rung after this long; 10s rungs → a handful of ticks at most. */
   static final Duration WALK_WINDOW = Duration.ofMinutes(2);
 
@@ -143,7 +149,8 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
     }
 
     LocalDate today = calendar.todayEt();
-    if (tradingCalendar(brokerTarget).tradingDays(today, today).isEmpty()) {
+    List<LocalDate> tradingToday = tradingCalendar(brokerTarget).tradingDays(today, today);
+    if (tradingToday == null || tradingToday.isEmpty()) {
       return skip("market_closed");
     }
     // condor_skip_event_days: null/absent = true (skip); only an explicit false trades FOMC days.
@@ -161,6 +168,11 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
     if (untilLateCutoff == null || untilLateCutoff.compareTo(Duration.ZERO) <= 0) {
       return skip("late_start");
     }
+    // Absolute (workflow-clock) deadline for SENDING the order, derived from the duration already
+    // read above — entry + MAX_LATE_ENTRY — so the pre-entry freshness guard adds no command.
+    long lateEntryCutoffMs =
+        Workflow.currentTimeMillis()
+            + untilLateCutoff.plus(MAX_LATE_ENTRY).minus(MAX_LATE_START).toMillis();
     Duration untilEntry =
         calendar.durationUntilEodCloseEt(LocalTime.parse(entryEt).plus(BAR_SETTLE_DELAY));
     if (untilEntry != null && untilEntry.compareTo(Duration.ZERO) > 0) {
@@ -189,8 +201,10 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
       return "gated_out";
     }
 
+    // checkKillSwitchHalt returns NULL for "no halt" (RiskActivitiesImpl; the watchlist caller's
+    // idiom). Dereferencing it NPE'd the 2026-10-06 session on the happy path and wedged it.
     RiskDecision halt = risk.checkKillSwitchHalt(in.getTenantId(), in.getStrategyId());
-    if (!halt.allowed()) {
+    if (halt != null && !halt.allowed()) {
       return abandon("kill_switch: " + halt.reason() + " " + halt.detail(), null);
     }
 
@@ -203,6 +217,22 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
             config.getCondorWingOffsetPct().doubleValue() * 100);
     if (legs.reason() != null || legs.legs() == null || legs.legs().size() != 4) {
       return abandon("legs_unresolved: " + legs.reason(), null);
+    }
+
+    // Freshness at the point of no return: the gate read can be slow, and a task wedged earlier
+    // and resumed (e.g. by a fixed deploy hours later) would otherwise send a stale condor.
+    // Command-free: compared against the workflow clock only, so it adds nothing to replay.
+    // Pages (CondorEntryHalted, failure-class): a late entry means the session was wedged or the
+    // gate read was abnormally slow — a repeat must be visible, not just audited.
+    if (Workflow.currentTimeMillis() >= lateEntryCutoffMs) {
+      logAudit(
+          KIND_ENTRY_HALTED,
+          subject(
+              "reason",
+              "late_entry: past " + entryEt + " + " + MAX_LATE_ENTRY,
+              "legs",
+              legOccs(legs)));
+      return "late_entry";
     }
 
     String attemptId = today.toString();
