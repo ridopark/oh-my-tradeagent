@@ -22,7 +22,7 @@ NBBO at submit, settlement P&L), then the plan's PRE-REGISTERED criteria:
 Expectation anchor (reported, never decisive): +6.5% of max risk per gated
 trade — the 10-pt XSP grid backtest. Not checked here (operator review): a
 condor-attributed account-cap trip flattening the copytrade mirror, and the
-secondary U5 (collector NBBO, not deployed yet) / U6 comparisons.
+secondary U5 (collector NBBO) / U6 comparisons.
 
 ATTRIBUTION. staging_paper shares its order_intent_journal with the copytrade
 mirror. A journal row counts ONLY if its intent_key starts with "condor-" AND
@@ -56,7 +56,9 @@ MISMATCH vs BOOKED P&L (conservative, per the plan's two settlement rules):
     the "> 1 trading day unresolved" KILL clock.
   - A missing / null payload field on a fill (outcome, credit, model_credit,
     filled_qty, legs, expected_pnl, a closing fill's side or price) is
-    recorded as a "missing_field:" mismatch and treated the same way.
+    recorded as a "missing_field:" mismatch and treated the same way, as is an
+    entry with no CondorGateEvaluated event ("missing_gate_event") — it still
+    counts as a gated attempt in the fill / abandon denominators.
 
 Exit status: 0 = ACCRUING/CONTINUE, 1 = KILL, 2 = HARD KILL.
 """
@@ -330,6 +332,12 @@ def build(inputs: Inputs, strategy: str) -> Book:
         elif kind == "CondorSettleMismatch":
             at(hold_day).mismatches.append((session_day, str(s.get("reason"))))
 
+    # An entry implies the gate passed; a missing gate event is a telemetry gap, so the attempt
+    # stays in the KILL denominators and is flagged (quarantined, kill clock) rather than hidden.
+    for a in attempts.values():
+        if a.gate is None and a.outcome is not None:
+            a.flag(a.date, "missing_gate_event")
+
     condor_rows, excluded = [], []
     for r in inputs.journal:
         (condor_rows if attributed(r, strategy) else excluded).append(r)
@@ -381,7 +389,7 @@ class Verdict:
 def evaluate(book: Book, as_of: dt.date, resolved: set[dt.date] | None = None) -> Verdict:
     resolved = resolved or set()
     attempts = list(book.attempts.values())
-    gated = [a for a in attempts if a.gate]
+    gated = [a for a in attempts if a.gate or (a.gate is None and a.outcome is not None)]
     fills = [a for a in gated if a.filled]
     abandoned = [a for a in gated if a.outcome in ("ABANDONED", "HALTED")]
     quarantined = [a for a in fills if a.mismatches and a.date not in resolved]
@@ -491,9 +499,9 @@ def render(book: Book, v: Verdict, tenant: str, strategy: str, as_of: dt.date) -
         if a.mismatches:
             settle += " MISMATCH:" + ",".join(r for _, r in a.mismatches)
         lines.append(
-            f"{a.date!s:10} {fmt(a.gate and 'Y' or 'n'):4} {fmt(a.richness, '6.3f')} "
+            f"{a.date!s:10} {'?' if a.gate is None else 'Y' if a.gate else 'n':4} {fmt(a.richness, '6.3f')} "
             f"{fmt(a.trailing_median, '6.3f')} {fmt(a.quantile, '5.2f')} "
-            f"{fmt(a.outcome if a.gate else 'gated_out'):9} {fmt(a.rungs, '>2')} "
+            f"{fmt(a.outcome if a.gate is not False else 'gated_out'):9} {fmt(a.rungs, '>2')} "
             f"{fmt(a.model_credit, '6.2f')} {fmt(a.net_mid, '6.2f')} {fmt(a.credit, '6.2f')} "
             f"{fmt(a.credit_delta, '+7.2f')} {fmt(a.slippage_vs_mid, '6.2f')} "
             f"{fmt(a.max_risk, '8.0f')} {fmt(a.pnl, '+8.2f')} {fmt(a.ret, '+7.1%')}  {settle}"
@@ -529,7 +537,7 @@ def render(book: Book, v: Verdict, tenant: str, strategy: str, as_of: dt.date) -
         lines.append("live-journal hard-kill probe: NOT RUN (offline, no --live-journal-jsonl)")
     lines.append(
         "not machine-checked: condor-attributed account-cap trip flattening the mirror; "
-        "U5 collector NBBO (not deployed); U6"
+        "U5 collector NBBO vs print model; U6"
     )
     lines.append("")
     for h in v.hard_kills:
