@@ -754,7 +754,7 @@ def test_strategy_config_condor_fields_round_trip() -> None:
         assert parsed.condor_skip_event_days is True
         assert parsed.condor_hold_to_settle is True
 
-    # Absent case (the existing copytrade-v1 fixture) validates cleanly: every field None.
+    # Absent case (the base config) validates cleanly: every field None.
     absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
     for field in _CONDOR_FIELDS:
         assert getattr(absent, field) is None, field
@@ -765,11 +765,14 @@ def test_strategy_config_condor_fields_round_trip() -> None:
     [
         ("condor_entry_et", "2:00"),
         ("condor_entry_et", "24:00"),
+        ("condor_entry_et", "14:60"),
+        ("condor_entry_et", "14:000"),
         ("condor_short_offset_pct", 0),
         ("condor_short_offset_pct", 1.5),
         ("condor_wing_offset_pct", 0),
         ("condor_wing_offset_pct", 1.5),
         ("richness_gate_lookback_days", 0),
+        ("richness_gate_lookback_days", 60.5),
         ("richness_gate_min_quantile", -0.1),
         ("richness_gate_min_quantile", 1.1),
     ],
@@ -782,3 +785,18 @@ def test_strategy_config_condor_fields_reject_out_of_range(field: str, bad: obje
     [err] = exc.value.errors()
     assert err["loc"] == (field,)
     assert err["type"] != "extra_forbidden"
+
+
+@pytest.mark.parametrize(
+    ("field", "edge"),
+    [
+        ("condor_short_offset_pct", 1),
+        ("condor_wing_offset_pct", 1),
+        ("richness_gate_lookback_days", 1),
+        ("richness_gate_min_quantile", 0),
+        ("richness_gate_min_quantile", 1),
+    ],
+)
+def test_strategy_config_condor_fields_accept_inclusive_bounds(field: str, edge: object) -> None:
+    model = StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, field: edge})
+    assert getattr(model, field) == edge
