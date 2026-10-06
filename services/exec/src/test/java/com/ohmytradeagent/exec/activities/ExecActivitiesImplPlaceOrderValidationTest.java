@@ -10,6 +10,7 @@ import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
+import com.ohmytradeagent.exec.journal.ComboIntent;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import io.temporal.failure.ApplicationFailure;
@@ -198,6 +199,21 @@ class ExecActivitiesImplPlaceOrderValidationTest {
 
     @Override
     public Optional<JournaledOrder> findByIntentKey(String intentKey) {
+      throw fail();
+    }
+
+    @Override
+    public boolean recordComboIntent(ComboIntent combo) {
+      throw fail();
+    }
+
+    @Override
+    public List<ComboIntent.Leg> findComboLegs(String intentKey) {
+      throw fail();
+    }
+
+    @Override
+    public void recordSlippageVsMid(String intentKey, BigDecimal slippageVsMid) {
       throw fail();
     }
 

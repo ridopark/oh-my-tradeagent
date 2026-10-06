@@ -23,6 +23,22 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findByIntentKey(String intentKey);
 
   /**
+   * Gated-condor Phase 3: idempotent combo record — the combo row and its leg rows in ONE
+   * transaction, {@code ON CONFLICT (intent_key) DO NOTHING} on the combo. Returns true iff this
+   * call inserted (false: the combo was already journaled and its legs are left untouched).
+   */
+  boolean recordComboIntent(ComboIntent combo);
+
+  /** Gated-condor Phase 3: the combo's legs ordered by leg index; empty for a non-combo row. */
+  List<ComboIntent.Leg> findComboLegs(String intentKey);
+
+  /**
+   * Gated-condor Phase 3: write the combo row's {@code slippage_vs_mid} (submit-time net mid minus
+   * achieved credit; positive = credit given up). Telemetry only — no state change.
+   */
+  void recordSlippageVsMid(String intentKey, BigDecimal slippageVsMid);
+
+  /**
    * Issue #295: resolve a row by its broker-facing {@code client_order_id} (the bounded, hashed
    * value derived from {@code intent_key}, persisted in the {@code client_order_id} column and
    * echoed by the broker). Powers the fill-dispatcher's WS submit/fill-race fallback: the broker
