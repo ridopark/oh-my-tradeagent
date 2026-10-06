@@ -45,6 +45,19 @@ Usage:
 
 Abandon rate counts gated attempts that ended ABANDONED or HALTED (no fill).
 
+MISMATCH vs BOOKED P&L (conservative, per the plan's two settlement rules):
+  - Only a CondorSettled or CondorFlattened event (or an operator
+    --resolved-mismatch) books a fill. A CondorSettleMismatch alone is NOT a
+    booking: a fill with nothing else by the next ET date is the hard kill
+    "position past expiry without settlement booked".
+  - A round carrying any unresolved mismatch is QUARANTINED: its P&L is shown
+    but kept out of the mean / total until --resolved-mismatch, because a
+    mismatch means the booked number is not trusted. Its mismatch still runs
+    the "> 1 trading day unresolved" KILL clock.
+  - A missing / null payload field on a fill (outcome, credit, model_credit,
+    filled_qty, legs, expected_pnl, a closing fill's side or price) is
+    recorded as a "missing_field:" mismatch and treated the same way.
+
 Exit status: 0 = ACCRUING/CONTINUE, 1 = KILL, 2 = HARD KILL.
 """
 from __future__ import annotations
@@ -188,6 +201,9 @@ class Attempt:
     def filled(self) -> bool:
         return self.outcome in ("FILLED", "PARTIAL")
 
+    def flag(self, day: dt.date, reason: str) -> None:
+        self.mismatches.append((day, reason))
+
     @property
     def credit_delta(self) -> Decimal | None:
         if self.credit is None or self.model_credit is None:
@@ -206,7 +222,7 @@ class Attempt:
         for r in self.close_rows:
             if r.get("filled_qty") and r.get("avg_fill_price") is not None:
                 leg = dec(r["avg_fill_price"]).copy_abs() * MULTIPLIER * int(r["filled_qty"])
-                cash += leg if r["side"] == "SELL" else -leg
+                cash += leg if r.get("side") == "SELL" else -leg
         return cash
 
     @property
@@ -217,6 +233,10 @@ class Attempt:
         entry = self.credit * MULTIPLIER * (self.qty or 1)
         if self.settled is not None:
             settle = dec(self.settled.get("expected_pnl"))
+            if settle is None:
+                return None
+            # The hold prices a PARTIAL settle with credit 0 over the legs still held, so only
+            # a non-partial expected_pnl carries the entry credit (CondorHoldWorkflowImpl.settle).
             if not self.settled.get("partial"):
                 return settle  # already includes the entry credit
             return entry + self.close_cash() + settle
@@ -279,6 +299,7 @@ def build(inputs: Inputs, strategy: str) -> Book:
             )
         elif kind == "CondorEntryFilled":
             a = at(session_day)
+            # The kind itself proves a fill; a missing outcome only flags the round.
             a.outcome = s.get("outcome") or "FILLED"
             a.credit = dec(s.get("credit"))
             a.model_credit = dec(s.get("model_credit"))
@@ -287,6 +308,11 @@ def build(inputs: Inputs, strategy: str) -> Book:
             a.qty = int(s.get("filled_qty") or 1)
             a.rungs = s.get("rungs")
             a.legs = list(s.get("legs") or [])
+            for k in ("outcome", "credit", "model_credit", "filled_qty"):
+                if s.get(k) is None:
+                    a.flag(session_day, f"missing_field:{k}")
+            if len(a.legs) != 4 or not all(a.legs):
+                a.flag(session_day, "missing_field:legs")
         elif kind in ("CondorEntryAbandoned", "CondorEntryHalted"):
             a = at(session_day)
             a.outcome = "ABANDONED" if kind == "CondorEntryAbandoned" else "HALTED"
@@ -295,6 +321,8 @@ def build(inputs: Inputs, strategy: str) -> Book:
             a.net_mid = dec(s.get("net_mid"))
         elif kind == "CondorSettled":
             at(hold_day).settled = s
+            if s.get("expected_pnl") is None:
+                at(hold_day).flag(session_day, "missing_field:expected_pnl")
         elif kind == "CondorFlattened":
             at(hold_day).flattened = s
         elif kind == "CondorFlattenIncomplete":
@@ -312,6 +340,10 @@ def build(inputs: Inputs, strategy: str) -> Book:
         key = r["intent_key"]
         if re.search(r"-x\d+$", key):
             attempts[d].close_rows.append(r)
+            if r.get("side") not in ("BUY", "SELL") or (
+                r.get("filled_qty") and r.get("avg_fill_price") is None
+            ):
+                attempts[d].flag(d, f"missing_field:close_fill {key}")
         elif r.get("state") == "FILLED" or (r.get("filled_qty") or 0) > 0:
             attempts[d].leg_nbbo = list(r.get("legs") or [])
 
@@ -352,12 +384,15 @@ def evaluate(book: Book, as_of: dt.date, resolved: set[dt.date] | None = None) -
     gated = [a for a in attempts if a.gate]
     fills = [a for a in gated if a.filled]
     abandoned = [a for a in gated if a.outcome in ("ABANDONED", "HALTED")]
-    rets = [a.ret for a in fills if a.ret is not None]
+    quarantined = [a for a in fills if a.mismatches and a.date not in resolved]
+    priced = [a for a in fills if a.ret is not None and a not in quarantined]
+    rets = [a.ret for a in priced]
     deltas = [a.credit_delta for a in fills if a.credit_delta is not None]
 
     hard: list[str] = []
     if book.live_rows:
-        hard.append(f"{len(book.live_rows)} condor order(s) in the LIVE exec journal")
+        keys = ", ".join(str(r.get("intent_key")) for r in book.live_rows[:5])
+        hard.append(f"{len(book.live_rows)} condor order(s) in the LIVE exec journal: {keys}")
     non_paper = [r for r in book.condor_rows if r.get("broker_target") != "paper"]
     if non_paper:
         hard.append(f"{len(non_paper)} condor journal row(s) with broker_target != paper")
@@ -366,7 +401,8 @@ def evaluate(book: Book, as_of: dt.date, resolved: set[dt.date] | None = None) -
             hard.append(f"{a.date}: legs still held after expiry")
         if a.flatten_incomplete and not a.flatten_incomplete.get("shorts_covered"):
             hard.append(f"{a.date}: flatten left shorts uncovered (possible naked leg)")
-        booked = a.settled or a.flattened or a.mismatches
+        # A mismatch alone is not a booking (see MISMATCH vs BOOKED in the module doc).
+        booked = a.settled or a.flattened or a.date in resolved
         if a.filled and not booked and as_of > a.date:
             hard.append(f"{a.date}: filled condor with no settlement booked")
 
@@ -409,12 +445,13 @@ def evaluate(book: Book, as_of: dt.date, resolved: set[dt.date] | None = None) -
         "fills": len(fills),
         "abandoned": len(abandoned),
         "priced": len(rets),
+        "quarantined": len(quarantined),
         "days_since_start": days,
         "mean_ret": mean,
         "t": t,
         "median_credit_delta": median_delta,
         "abandon_rate": abandon_rate,
-        "total_pnl": sum((a.pnl for a in fills if a.pnl is not None), Decimal(0)),
+        "total_pnl": sum((a.pnl for a in priced), Decimal(0)),
     }
     return Verdict(verdict, hard, kills, metrics, at_eval)
 
@@ -467,18 +504,20 @@ def render(book: Book, v: Verdict, tenant: str, strategy: str, as_of: dt.date) -
             bid, ask = dec(leg.get("nbbo_bid")), dec(leg.get("nbbo_ask"))
             spread = ask - bid if bid is not None and ask is not None else None
             lines.append(
-                f"{'':10}   leg{leg.get('leg_index')} {leg.get('side'):4} "
-                f"{leg.get('option_symbol'):22} bid {fmt(bid, '.2f')} ask {fmt(ask, '.2f')} "
+                f"{'':10}   leg{fmt(leg.get('leg_index'))} {fmt(leg.get('side'), '4')} "
+                f"{fmt(leg.get('option_symbol'), '22')} bid {fmt(bid, '.2f')} ask {fmt(ask, '.2f')} "
                 f"mid {fmt(dec(leg.get('nbbo_mid')), '.3f')} spread {fmt(spread, '.2f')}"
             )
     lines += [
         "",
         f"mean P&L/max-risk {fmt(m['mean_ret'], '+.2%')} (t {fmt(m['t'], '.2f')}, "
-        f"n priced {m['priced']}) vs expectation +{EXPECTATION_PCT}% · "
+        f"n priced {m['priced']}, quarantined {m['quarantined']}) vs expectation +{EXPECTATION_PCT}% · "
         f"total P&L ${m['total_pnl']:+.2f}",
         f"median credit vs model {fmt(m['median_credit_delta'], '+.4f')} "
         f"(kill < {CREDIT_SHORTFALL_LIMIT}) · abandon rate {fmt(m['abandon_rate'], '.0%')} "
         f"({m['abandoned']}/{m['gated']}, kill > {ABANDON_RATE_LIMIT:.0%})",
+        "quarantined = fill with an unresolved mismatch / missing field: shown, kept out of "
+        "the mean and total until --resolved-mismatch",
         "per-leg fill prices are not journaled for an mleg combo: slippage_vs_mid is per leg-set",
     ]
     if book.excluded_rows:
