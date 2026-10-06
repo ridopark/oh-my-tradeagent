@@ -3,6 +3,7 @@ package com.ohmytradeagent.marketdata.provider.alpaca;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
+import com.ohmytradeagent.marketdata.provider.Bar;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.OptionGreeks;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
@@ -17,8 +18,11 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -324,6 +328,157 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   private static BigDecimal numberOrNull(JsonNode node) {
     return node.isNumber() ? node.decimalValue() : null;
+  }
+
+  // Gated condor (PLAN-2026-10-05 Phase 2): richness σ + trailing distribution read historical
+  // bars; the session's straddle/legs read the 0DTE chain. Same research-proven endpoints as
+  // docs/plans/experiments/0dte-spx-2026-10/fetch_spy.py / fetch_spxw.py. Failure -> empty, so the
+  // condor activity reports "could not evaluate" and the session skips the day.
+
+  @Override
+  public List<Bar> stockBars1Min(String ticker, Instant start, Instant end) {
+    List<Bar> out = new ArrayList<>();
+    String token = null;
+    try {
+      do {
+        String pageToken = token;
+        JsonNode body =
+            rest.get()
+                .uri(
+                    u ->
+                        u.path("/v2/stocks/{s}/bars")
+                            .queryParam("timeframe", "1Min")
+                            .queryParam("start", start.toString())
+                            .queryParam("end", end.toString())
+                            .queryParam("feed", "sip")
+                            .queryParam("adjustment", "raw")
+                            .queryParam("limit", 10000)
+                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                            .build(ticker))
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null) {
+          break;
+        }
+        addBars(body.path("bars"), end, out);
+        token = nextPageToken(body);
+      } while (token != null);
+      return out;
+    } catch (RuntimeException e) {
+      log.warn("Alpaca stockBars1Min failed for {}: {}", ticker, e.getMessage());
+      return List.of();
+    }
+  }
+
+  @Override
+  public Map<String, List<Bar>> optionBars1Min(
+      Collection<String> occSymbols, Instant start, Instant end) {
+    Map<String, String> callerByCompact = new LinkedHashMap<>();
+    occSymbols.forEach(s -> callerByCompact.put(s.replace(" ", ""), s));
+    Map<String, List<Bar>> out = new LinkedHashMap<>();
+    String token = null;
+    try {
+      do {
+        String pageToken = token;
+        JsonNode body =
+            rest.get()
+                .uri(
+                    u ->
+                        u.path("/v1beta1/options/bars")
+                            .queryParam("symbols", String.join(",", callerByCompact.keySet()))
+                            .queryParam("timeframe", "1Min")
+                            .queryParam("start", start.toString())
+                            .queryParam("end", end.toString())
+                            .queryParam("limit", 10000)
+                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                            .build())
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null) {
+          break;
+        }
+        body.path("bars")
+            .fields()
+            .forEachRemaining(
+                e -> {
+                  String caller = callerByCompact.getOrDefault(e.getKey(), e.getKey());
+                  addBars(e.getValue(), end, out.computeIfAbsent(caller, k -> new ArrayList<>()));
+                });
+        token = nextPageToken(body);
+      } while (token != null);
+      out.values().removeIf(List::isEmpty);
+      return out;
+    } catch (RuntimeException e) {
+      log.warn("Alpaca optionBars1Min failed for {}: {}", callerByCompact.keySet(), e.getMessage());
+      return Map.of();
+    }
+  }
+
+  @Override
+  public Map<String, Quote> optionChainQuotes(String underlying, LocalDate expiration) {
+    Map<String, Quote> out = new LinkedHashMap<>();
+    String token = null;
+    try {
+      do {
+        String pageToken = token;
+        JsonNode body =
+            rest.get()
+                .uri(
+                    u ->
+                        u.path("/v1beta1/options/snapshots/{u}")
+                            .queryParam("expiration_date", expiration.toString())
+                            .queryParam("limit", 1000)
+                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                            .build(underlying))
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null) {
+          break;
+        }
+        body.path("snapshots")
+            .fields()
+            .forEachRemaining(
+                e -> {
+                  JsonNode q = e.getValue().path("latestQuote");
+                  JsonNode bp = q.path("bp");
+                  JsonNode ap = q.path("ap");
+                  // Two-sided = a positive ask; a 0-bid far wing is still quotable.
+                  if (bp.isNumber() && ap.isNumber() && ap.decimalValue().signum() > 0) {
+                    BigDecimal bid = bp.decimalValue();
+                    BigDecimal ask = ap.decimalValue();
+                    out.put(
+                        e.getKey(),
+                        new Quote(
+                            e.getKey(),
+                            bid,
+                            midPrice(bid, ask),
+                            ask,
+                            parseTimestamp(q.path("t").asText(""))));
+                  }
+                });
+        token = nextPageToken(body);
+      } while (token != null);
+      return out;
+    } catch (RuntimeException e) {
+      log.warn(
+          "Alpaca optionChainQuotes failed for {} {}: {}", underlying, expiration, e.getMessage());
+      return Map.of();
+    }
+  }
+
+  /** Appends bars starting strictly before {@code end} (Alpaca's end bound is inclusive). */
+  private static void addBars(JsonNode bars, Instant end, List<Bar> out) {
+    for (JsonNode b : bars) {
+      Instant t = Instant.parse(b.path("t").asText());
+      if (t.isBefore(end) && b.path("c").isNumber()) {
+        out.add(new Bar(t, b.path("c").doubleValue()));
+      }
+    }
+  }
+
+  private static String nextPageToken(JsonNode body) {
+    JsonNode t = body.path("next_page_token");
+    return t.isTextual() && !t.asText().isEmpty() ? t.asText() : null;
   }
 
   @Override
