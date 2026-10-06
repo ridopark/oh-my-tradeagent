@@ -361,6 +361,21 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // confirmed-RUNNING sibling owners on the account; if they fully cover the broker lot, this
         // is not an orphan. Partial coverage still pages (the uncovered qty is a genuine orphan).
         String occPadded = OccSymbol.padded(p.getOptionSymbol());
+        // Gated-condor Phase 4: a condor leg never has an OCC journal row (the combo is journaled
+        // as one 'MLEG' row), so it always lands here. Its running CondorHoldWorkflow owns it —
+        // never page it, and above all never auto-adopt one wing of a live defined-risk combo
+        // (adoption would hand a lone leg to a PositionWorkflow that may flatten it and leave the
+        // paired short naked). Short legs never reach recon at all: listOpenPositions is
+        // long-only by contract. No getVersion marker: recon runs are short-lived per schedule.
+        if (positionLookup.hasRunningCondorOwnerForOcc(in.getTenantId(), occPadded)) {
+          auditLog(
+              KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
+              subject(
+                  "option_symbol", occPadded,
+                  "broker_target", brokerTarget,
+                  "owner_source", "condor"));
+          continue;
+        }
         long coveredQty =
             positionLookup.sumRunningOwnerRemainingQtyForOcc(in.getTenantId(), occPadded);
         long brokerQty = p.getQty() == null ? 0L : p.getQty();

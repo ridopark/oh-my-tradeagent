@@ -433,6 +433,31 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void run_condorLegOwnedByRunningCondorHold_isNeverPagedOrAdopted() {
+    // Gated-condor Phase 4: a condor long wing has no OCC journal row (the combo is one 'MLEG'
+    // row), so it lands in the missing branch — even on a sweep that would otherwise page. Its
+    // running CondorHoldWorkflow owns it: suppress, never page, never auto-adopt one wing.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
+        .thenReturn(1L);
+    when(positionLookup.hasRunningCondorOwnerForOcc("dev", PADDED_OCC)).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    assertThat(captureKind("PositionOrphanSuppressedSiblingOwner").getSubject())
+        .containsEntry("owner_source", "condor");
+    verify(positionLookup, never()).sumRunningOwnerRemainingQtyForOcc(anyString(), anyString());
+  }
+
+  @Test
   void positionOrphan_priorDetectionWithinWindow_isDebounced() {
     // Issue #206: the same broker position has already been detected as a PositionOrphan within
     // the 1h debounce window. The workflow must suppress the per-cycle PositionOrphan audit

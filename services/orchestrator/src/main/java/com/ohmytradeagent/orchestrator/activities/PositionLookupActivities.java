@@ -103,6 +103,15 @@ public interface PositionLookupActivities {
   boolean hasRunningOwnerForOcc(String tenantId, String occPadded);
 
   /**
+   * Gated-condor Phase 4: true iff a RUNNING {@code CondorHoldWorkflow} of {@code tenantId} owns
+   * {@code occPadded} as one of its legs — the hold seeds each leg's {@code pos:*} key with its own
+   * workflow id on start. A condor leg has no OCC journal row (the combo is journaled as 'MLEG'),
+   * so without this probe recon would page it as a missing-journal orphan and could auto-adopt (and
+   * then flatten) one wing of a live defined-risk combo. BEST-EFFORT: any error returns false.
+   */
+  boolean hasRunningCondorOwnerForOcc(String tenantId, String occPadded);
+
+  /**
    * Phase F2b: ACCOUNT-scoped (cross-TENANT) sibling-owner probe. {@link #hasRunningOwnerForOcc}
    * above is TENANT-scoped, so a broker-held OCC managed by a running {@code PositionWorkflow}
    * under a DIFFERENT tenant that shares the SAME broker account (e.g. dev + prod_real both pointed

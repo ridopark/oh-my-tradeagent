@@ -402,6 +402,21 @@ public final class AuditEventKinds {
           // the daily-loss cap could not read P&L this tick (it DEFERS, never trips on a missing
           // number). Observability-only — in ALL_KINDS only, not in any *_KINDS lifecycle group.
           "KillSwitchRealizedReadUnavailable",
+          // Gated-condor (PLAN-2026-10-05 Phase 4) CondorSessionWorkflowImpl /
+          // CondorHoldWorkflowImpl. The condor owns its own lifecycle outside PositionWorkflow, so
+          // none of these opens or closes a ledger lifecycle — observability in ALL_KINDS only.
+          // CondorEntryHalted (order possibly live), CondorFlattenIncomplete (a short not
+          // confirmed covered) and CondorSettleMismatch (legs still held after expiry / no
+          // settlement spot) page via OrderFailureAlerter's failure-kinds allowlist.
+          "CondorEventSkip",
+          "CondorGateEvaluated",
+          "CondorEntryAbandoned",
+          "CondorEntryHalted",
+          "CondorEntryFilled",
+          "CondorFlattened",
+          "CondorFlattenIncomplete",
+          "CondorSettled",
+          "CondorSettleMismatch",
           // ReconciliationWorkflowImpl
           "ReconciliationStarted",
           "ReconciliationCompleted",

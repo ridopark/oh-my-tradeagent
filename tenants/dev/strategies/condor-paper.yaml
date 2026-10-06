@@ -1,0 +1,27 @@
+schema_version: 1
+tenant_id: dev
+strategy_id: condor-paper
+# Gated-condor paper test (docs/plans/PLAN-2026-10-05-gated-condor-paper-test.md). DEV ONLY: live
+# tenants are DB-only (the staging_paper `gated_condor` row is an operator P0 step). The condor
+# workflows refuse any non-paper broker_target outright.
+broker_target: alpaca-paper
+
+# Required by the schema but unused by the condor — CondorSessionWorkflow sizes 1 contract and
+# never reads signals; it owns its lifecycle outside PositionWorkflow.
+max_signal_age_bto_secs: 30
+max_signal_age_stc_secs: 60
+max_positions: 1
+capital_weight: 0.01
+min_contracts: 1
+max_contracts: 1
+
+# The frozen rule: at 14:00 ET, if ATM-straddle richness >= the trailing-60-day median, sell one
+# XSP iron condor (shorts ±0.15%, wings ±0.60% of spot, as FRACTIONS) and hold it to settlement.
+# FOMC statement days are skipped (condor_skip_event_days defaults to true).
+condor_entry_et: "14:00"
+condor_short_offset_pct: 0.0015
+condor_wing_offset_pct: 0.006
+richness_gate_lookback_days: 60
+richness_gate_min_quantile: 0.5
+condor_skip_event_days: true
+condor_hold_to_settle: true

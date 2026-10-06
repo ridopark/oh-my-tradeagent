@@ -207,6 +207,27 @@ public final class WorkflowIds {
     return signalId.isBlank() ? null : signalId;
   }
 
+  /** Gated-condor: the segment that marks a {@code CondorHoldWorkflow} id. */
+  public static final String CONDOR_HOLD_SEGMENT = "/condor/";
+
+  /**
+   * Workflow ID of the gated-condor {@code CondorHoldWorkflow} for one trading day — at most one
+   * condor per (tenant, strategy, et_date). {@code etDate} is the ISO ET trading date.
+   */
+  public static String condorHold(String tenantId, String strategyId, String etDate) {
+    return tenantStrategy(tenantId, strategyId) + CONDOR_HOLD_SEGMENT + etDate;
+  }
+
+  /** True iff {@code workflowId} names a {@code CondorHoldWorkflow} (see {@link #condorHold}). */
+  public static boolean isCondorHold(String workflowId) {
+    return workflowId != null && workflowId.contains(CONDOR_HOLD_SEGMENT);
+  }
+
+  /** Workflow ID prefix for scheduled {@code CondorSessionWorkflow} runs. */
+  public static String condorSessionPrefix(String tenantId, String strategyId) {
+    return tenantStrategy(tenantId, strategyId) + "/condor-session/";
+  }
+
   /** Workflow ID prefix for {@code ReconciliationWorkflow} runs. The scheduler appends a run-id. */
   public static String reconciliationPrefix(
       String tenantId, String strategyId, String brokerTarget) {

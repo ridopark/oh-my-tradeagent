@@ -44,6 +44,15 @@ public interface OptionsBroker {
   }
 
   /**
+   * Gated-condor Phase 4: place a CLOSING single-leg order — {@code BUY} covers a short ({@code
+   * buy_to_close}), {@code SELL} closes a long ({@code sell_to_close}); a null {@code limitPrice}
+   * is a market order. Same idempotency contract as {@link #placeOrder}. Default: unsupported.
+   */
+  default PlaceOrderResponse placeClosingOrder(PlaceOrderRequest request) {
+    throw new UnsupportedOperationException("placeClosingOrder not supported by this broker");
+  }
+
+  /**
    * Attempt to cancel the order at the broker. Returns a 3-state outcome:
    *
    * <ul>
@@ -102,6 +111,16 @@ public interface OptionsBroker {
    */
   default List<BrokerPosition> listOpenPositions() {
     return List.of();
+  }
+
+  /**
+   * Gated-condor Phase 4: every option position at the broker keyed by its broker-native (unpadded)
+   * OCC, with a SIGNED quantity — negative for a short. Unlike {@link #listOpenPositions()}
+   * (long-only by contract) this sees a condor's short legs, which the settlement reconciliation
+   * must account for. Default: unsupported.
+   */
+  default java.util.Map<String, Long> signedOptionPositions() {
+    throw new UnsupportedOperationException("signedOptionPositions not supported by this broker");
   }
 
   /**

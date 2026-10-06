@@ -7,8 +7,8 @@ import java.util.List;
 /**
  * Gated-condor (PLAN-2026-10-05 Phase 2) cross-service contract. Implementation lives in {@code
  * services/market-data}; the condor session workflow declares a stub against this interface on the
- * {@code market-data} task queue. Everything non-deterministic the session needs (live chain
- * quotes, historical bars) is behind these two reads.
+ * {@code market-data} task queue. Everything non-deterministic the condor workflows need (live
+ * chain quotes, historical bars) is behind these reads.
  *
  * <p>Neither method throws on missing data: a result with a non-null {@code reason} means "could
  * not evaluate" and the caller skips the day (fail-closed, {@code gate=false} / no legs).
@@ -30,6 +30,14 @@ public interface CondorMarketActivity {
    */
   CondorLegsResult resolveCondorLegs(
       String underlying, double shortOffsetPct, double wingOffsetPct);
+
+  /**
+   * Today's settlement-proxy spot: the put-call-parity spot of {@code underlying}'s 0DTE strip from
+   * the last option BARS before 16:00 ET (the same parity method and bar basis as the richness
+   * gate). Null when no strip is available. The condor hold workflow prices intrinsic-at-close from
+   * it to reconcile against the broker's settlement.
+   */
+  Double settlementSpot(String underlying);
 
   /**
    * @param trailingQuantile fraction of the trailing values ≤ today's richness

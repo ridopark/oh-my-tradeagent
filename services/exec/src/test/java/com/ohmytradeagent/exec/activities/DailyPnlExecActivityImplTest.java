@@ -105,6 +105,66 @@ class DailyPnlExecActivityImplTest {
         .isEqualByComparingTo(new BigDecimal("194.01")); // (3.00-2.3533)*3*100
   }
 
+  private static JournaledOrder condorRow(
+      String intentKey, String side, String occ, long qty, String price) {
+    JournaledOrder r = filled(side, occ, qty, price);
+    return new JournaledOrder(
+        intentKey,
+        r.signalId(),
+        r.tenantId(),
+        r.strategyId(),
+        r.brokerTarget(),
+        r.clientOrderId(),
+        r.optionSymbol(),
+        r.side(),
+        r.qty(),
+        r.limitPrice(),
+        r.state(),
+        r.brokerOrderId(),
+        r.recordedAt(),
+        r.submittedAt(),
+        r.lastStateAt(),
+        r.cancelAttemptedAt(),
+        r.lastError(),
+        r.filledQty(),
+        r.avgFillPrice(),
+        r.filledAt(),
+        r.version());
+  }
+
+  // #897 blocker 3 (the BLOCKING cap-mark verify): a filled condor — one SELL 'MLEG' combo row in
+  // Alpaca's negative-is-credit notation with no BUY basis, plus its four condor- closing legs —
+  // is excluded from the realized figure the daily-loss / account-cap kill switches read. Without
+  // the exclusion the combo credits -0.85 x 100 of "raw proceeds", a phantom LOSS that could trip
+  // the cap the copytrade mirror shares and flatten its positions. The copytrade lot still counts.
+  @Test
+  void computeRealizedPnl_excludesCondorRows_noPhantomCapLoss() {
+    String k = "condor-staging_paper-gated_condor-2026-10-05";
+    stub(
+        "BUY",
+        filled("BUY", OCC, 3, "2.3533"),
+        condorRow(k + "-x0", "BUY", "XSP   261005C00601000", 1, "2.40"),
+        condorRow(k + "-x1", "BUY", "XSP   261005P00599000", 1, "0.01"));
+    stub(
+        "SELL",
+        filled("SELL", OCC, 3, "3.00"),
+        condorRow(k + "-r0", "SELL", "MLEG", 1, "-0.85"),
+        condorRow(k + "-x2", "SELL", "XSP   261005C00604000", 1, "0.30"),
+        condorRow(k + "-x3", "SELL", "XSP   261005P00596000", 1, "0.01"));
+
+    assertThat(activity.computeRealizedPnl("dev", "copytrade-v1", DAY))
+        .isEqualByComparingTo(new BigDecimal("194.01")); // the copytrade lot alone
+  }
+
+  @Test
+  void computeRealizedPnl_mlegSymbolExcludedEvenWithoutCondorPrefix() {
+    stub("BUY");
+    stub("SELL", filled("SELL", "MLEG", 1, "-0.85"));
+
+    assertThat(activity.computeRealizedPnl("dev", "copytrade-v1", DAY))
+        .isEqualByComparingTo(BigDecimal.ZERO);
+  }
+
   // Grouped per option_symbol: an exit only nets against its OWN symbol's entry basis.
   @Test
   void computeRealizedPnl_groupsPerOptionSymbol() {

@@ -1065,6 +1065,61 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void placeClosingOrder_buyCoversAShort_marketBuyToClose() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"alp-9\",\"client_order_id\":\"c-x0\",\"status\":\"accepted\"}"));
+
+    PlaceOrderResponse r =
+        broker.placeClosingOrder(
+            new PlaceOrderRequest("t-dev", "c-x0", "XSP   261005C00601000", "BUY", 1L, null));
+
+    assertThat(r.brokerOrderId()).isEqualTo("alp-9");
+    JsonNode body = mapper.readTree(server.takeRequest().getBody().readUtf8());
+    assertThat(body.get("symbol").asText()).isEqualTo("XSP261005C00601000");
+    assertThat(body.get("side").asText()).isEqualTo("buy");
+    assertThat(body.get("position_intent").asText()).isEqualTo("buy_to_close");
+    assertThat(body.get("type").asText()).isEqualTo("market");
+  }
+
+  @Test
+  void placeClosingOrder_sellClosesALong_sellToClose() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"alp-10\",\"client_order_id\":\"c-x2\",\"status\":\"accepted\"}"));
+
+    broker.placeClosingOrder(
+        new PlaceOrderRequest("t-dev", "c-x2", "XSP   261005C00604000", "SELL", 1L, null));
+
+    JsonNode body = mapper.readTree(server.takeRequest().getBody().readUtf8());
+    assertThat(body.get("position_intent").asText()).isEqualTo("sell_to_close");
+  }
+
+  @Test
+  void signedOptionPositions_signsShortsNegative_skipsEquity() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"symbol\":\"AAPL\",\"asset_class\":\"us_equity\",\"qty\":\"100\","
+                    + "\"side\":\"long\"},"
+                    + "{\"symbol\":\"XSP261005C00604000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"1\",\"side\":\"long\"},"
+                    + "{\"symbol\":\"XSP261005C00601000\",\"asset_class\":\"us_option\","
+                    + "\"qty\":\"-1\",\"side\":\"short\"}]"));
+
+    assertThat(broker.signedOptionPositions())
+        .containsExactly(
+            java.util.Map.entry("XSP261005C00604000", 1L),
+            java.util.Map.entry("XSP261005C00601000", -1L));
+  }
+
+  @Test
   void listOpenPositions_absentMarks_leavesMarkFieldsNull() throws Exception {
     // A marks-free positions row (older Alpaca shape / a broker that omits them) must leave the
     // mark fields null rather than defaulting to a misleading zero — the BFF then simply omits

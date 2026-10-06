@@ -56,7 +56,7 @@ class RealizedPnlCalculatorIT {
             + "  id BIGSERIAL PRIMARY KEY,"
             + "  tenant_id VARCHAR(64) NOT NULL,"
             + "  strategy_id VARCHAR(64) NOT NULL,"
-            + "  intent_key UUID NOT NULL UNIQUE,"
+            + "  intent_key VARCHAR(192) NOT NULL UNIQUE,"
             + "  option_symbol VARCHAR(64),"
             + "  side VARCHAR(8) NOT NULL,"
             + "  qty INTEGER,"
@@ -138,6 +138,40 @@ class RealizedPnlCalculatorIT {
   }
 
   @Test
+  void condorRows_areExcluded_noRawProceedsPhantom() {
+    // #897 blocker 3: a filled gated-condor combo (one SELL 'MLEG' row in Alpaca's negative-is-
+    // credit notation, no BUY basis) and its condor- closing legs never reach the FIFO realized
+    // figure — the combo would otherwise read as -0.85 x 100 of raw proceeds. A NULL-symbol legacy
+    // row still counts (the exclusion must not drop it via SQL NULL semantics).
+    String k = "condor-" + TENANT + "-" + STRATEGY + "-2026-10-05";
+    insertKeyed(k + "-r0", "SELL", "MLEG", 1, "-0.85", "2026-10-05T18:01:00Z");
+    insertKeyed(k + "-x2", "SELL", "XSP   261005C00604000", 1, "0.30", "2026-10-05T19:00:00Z");
+    insertKeyed(k + "-x0", "BUY", "XSP   261005C00601000", 1, "2.40", "2026-10-05T19:00:00Z");
+    insert("BUY", null, 1, "FILLED", 1, "1.00", "2026-10-05T14:00:00Z");
+    insert("SELL", null, 1, "FILLED", 1, "1.50", "2026-10-05T15:00:00Z");
+
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 10, 5)))
+        .isEqualByComparingTo("50.00");
+  }
+
+  private void insertKeyed(
+      String intentKey, String side, String optionSymbol, int qty, String price, String filledAt) {
+    dsl.execute(
+        "INSERT INTO order_intent_journal (tenant_id, strategy_id, intent_key, option_symbol,"
+            + " side, qty, state, filled_qty, avg_fill_price, filled_at) VALUES (?, ?, ?, ?, ?, ?,"
+            + " 'FILLED', ?, ?::numeric, ?::timestamptz)",
+        TENANT,
+        STRATEGY,
+        intentKey,
+        optionSymbol,
+        side,
+        qty,
+        qty,
+        price,
+        filledAt);
+  }
+
+  @Test
   void nullBrokerTarget_returnsZero_noThrow() {
     DbStrategyConfigReader registry = mock(DbStrategyConfigReader.class);
     when(registry.brokerTarget(TENANT, STRATEGY)).thenReturn(null);
@@ -163,7 +197,7 @@ class RealizedPnlCalculatorIT {
             + " ?, ?, ?::numeric, ?::timestamptz)",
         TENANT,
         STRATEGY,
-        UUID.randomUUID(),
+        UUID.randomUUID().toString(),
         optionSymbol,
         side,
         qty,

@@ -118,6 +118,10 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
       if (price == null || qty == null || qty <= 0 || filledAt == null) {
         continue;
       }
+      if (r.isCondor()) {
+        // Gated-condor rows never enter the kill-switch realized figure (JournaledOrder#isCondor).
+        continue;
+      }
       LocalDate day = filledAt.atZoneSameInstant(ET).toLocalDate();
       String bucket = r.optionSymbol() == null ? NO_SYMBOL_BUCKET : r.optionSymbol();
       lotsBySymbol.computeIfAbsent(bucket, k -> new ArrayDeque<>()).add(new Lot(price, qty, day));

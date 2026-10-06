@@ -100,14 +100,18 @@ class CondorMarketActivityImplTest {
     // Same spot (parity 600) and σ every day, so richness ranks exactly as the straddle does.
     // Trailing straddles 1.0 / 1.5 / 3.0 -> median is the 1.5 day; today 2.0 is above it.
     MarketDataProvider provider = mock(MarketDataProvider.class);
-    stubTodayChain(provider, 1.0, 1.0);
     stubProxyBars(provider, Map.of());
     stubTrailingOptionBars(
         provider,
         Map.of(
-            LocalDate.of(2026, 10, 2), 1.0,
-            LocalDate.of(2026, 10, 1), 1.5,
-            LocalDate.of(2026, 9, 30), 3.0));
+            TODAY,
+            2.0,
+            LocalDate.of(2026, 10, 2),
+            1.0,
+            LocalDate.of(2026, 10, 1),
+            1.5,
+            LocalDate.of(2026, 9, 30),
+            3.0));
 
     RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
 
@@ -125,14 +129,18 @@ class CondorMarketActivityImplTest {
   @Test
   void evaluateRichness_belowMedian_doesNotGate() {
     MarketDataProvider provider = mock(MarketDataProvider.class);
-    stubTodayChain(provider, 0.6, 0.6); // straddle 1.2
     stubProxyBars(provider, Map.of());
     stubTrailingOptionBars(
         provider,
         Map.of(
-            LocalDate.of(2026, 10, 2), 1.0,
-            LocalDate.of(2026, 10, 1), 1.5,
-            LocalDate.of(2026, 9, 30), 3.0));
+            TODAY,
+            1.2,
+            LocalDate.of(2026, 10, 2),
+            1.0,
+            LocalDate.of(2026, 10, 1),
+            1.5,
+            LocalDate.of(2026, 9, 30),
+            3.0));
 
     RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
 
@@ -145,14 +153,18 @@ class CondorMarketActivityImplTest {
   void evaluateRichness_skipsDaysWithoutBars_andWalksFurtherBack() {
     // 10-01 is a "holiday" (no proxy bars): the walk skips it and the weekend, landing on 09-29.
     MarketDataProvider provider = mock(MarketDataProvider.class);
-    stubTodayChain(provider, 1.0, 1.0);
     stubProxyBars(provider, Map.of(LocalDate.of(2026, 10, 1), List.of()));
     stubTrailingOptionBars(
         provider,
         Map.of(
-            LocalDate.of(2026, 10, 2), 1.0,
-            LocalDate.of(2026, 9, 30), 3.0,
-            LocalDate.of(2026, 9, 29), 3.5));
+            TODAY,
+            2.0,
+            LocalDate.of(2026, 10, 2),
+            1.0,
+            LocalDate.of(2026, 9, 30),
+            3.0,
+            LocalDate.of(2026, 9, 29),
+            3.5));
 
     RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
 
@@ -163,9 +175,8 @@ class CondorMarketActivityImplTest {
   @Test
   void evaluateRichness_insufficientTrailingHistory_failsClosed() {
     MarketDataProvider provider = mock(MarketDataProvider.class);
-    stubTodayChain(provider, 1.0, 1.0);
     stubProxyBars(provider, Map.of());
-    stubTrailingOptionBars(provider, Map.of(LocalDate.of(2026, 10, 2), 1.0));
+    stubTrailingOptionBars(provider, Map.of(TODAY, 2.0, LocalDate.of(2026, 10, 2), 1.0));
 
     RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
 
@@ -176,9 +187,56 @@ class CondorMarketActivityImplTest {
   }
 
   @Test
-  void evaluateRichness_noTodayChain_failsClosed() {
+  void evaluateRichness_pricesTodaysStraddleFromBars_notChainNbbo() {
+    // #898: today's straddle must be on the SAME basis as the trailing window (option-trade bars),
+    // not the chain's NBBO mids — a buyer-heavy print vs a mid would bias the gate silently. The
+    // chain here quotes a 9.0 straddle; the bars say 2.0, and only the bars may be used.
     MarketDataProvider provider = mock(MarketDataProvider.class);
-    when(provider.optionChainQuotes("XSP", TODAY)).thenReturn(Map.of());
+    org.mockito.Mockito.lenient()
+        .when(provider.optionChainQuotes("XSP", TODAY))
+        .thenReturn(parityChain(4.5, 4.5));
+    stubProxyBars(provider, Map.of());
+    stubTrailingOptionBars(
+        provider,
+        Map.of(
+            TODAY,
+            2.0,
+            LocalDate.of(2026, 10, 2),
+            1.0,
+            LocalDate.of(2026, 10, 1),
+            1.5,
+            LocalDate.of(2026, 9, 30),
+            3.0));
+
+    RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
+
+    assertThat(r.richness())
+        .isCloseTo(
+            CondorMarketActivityImpl.richness(2.0, proxyCloses(), 120, 600.0), within(1e-12));
+  }
+
+  @Test
+  void settlementSpot_isParitySpotFromTheLastBarsBeforeTheClose() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    stubProxyBarsUntil(provider, LocalTime.of(16, 0));
+    stubOptionBarsAt(provider, LocalTime.of(15, 59), 1.0, 1.0);
+
+    assertThat(activity(provider).settlementSpot("XSP")).isCloseTo(600.0, within(1e-9));
+  }
+
+  @Test
+  void settlementSpot_noBars_isNull() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    when(provider.stockBars1Min(eq("SPY"), any(), any())).thenReturn(List.of());
+
+    assertThat(activity(provider).settlementSpot("XSP")).isNull();
+  }
+
+  @Test
+  void evaluateRichness_noTodayBars_failsClosed() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    stubProxyBars(provider, Map.of());
+    stubTrailingOptionBars(provider, Map.of(LocalDate.of(2026, 10, 2), 1.0));
 
     RichnessResult r = activity(provider).evaluateRichness("XSP", "14:00", 3);
 
@@ -268,10 +326,6 @@ class CondorMarketActivityImplTest {
     return chain;
   }
 
-  private static void stubTodayChain(MarketDataProvider provider, double atmCall, double atmPut) {
-    when(provider.optionChainQuotes("XSP", TODAY)).thenReturn(parityChain(atmCall, atmPut));
-  }
-
   /** 09:30..13:59 closes alternating 600.0 / 600.3 (identical every day). */
   private static double[] proxyCloses() {
     double[] c = new double[270];
@@ -279,6 +333,35 @@ class CondorMarketActivityImplTest {
       c[i] = i % 2 == 0 ? 600.0 : 600.3;
     }
     return c;
+  }
+
+  /** SPY 1-min bars from 09:30 up to (not including) {@code end} today, alternating closes. */
+  private static void stubProxyBarsUntil(MarketDataProvider provider, LocalTime end) {
+    when(provider.stockBars1Min(eq("SPY"), any(), any()))
+        .thenAnswer(
+            inv -> {
+              Instant start =
+                  ZonedDateTime.of(TODAY, LocalTime.of(9, 30), MarketHours.ET).toInstant();
+              Instant stop = ZonedDateTime.of(TODAY, end, MarketHours.ET).toInstant();
+              List<Bar> bars = new ArrayList<>();
+              for (int i = 0; start.plusSeconds(60L * i).isBefore(stop); i++) {
+                bars.add(new Bar(start.plusSeconds(60L * i), i % 2 == 0 ? 600.0 : 600.3));
+              }
+              return bars;
+            });
+  }
+
+  /** Today's 599/600/601 option-bar strip, one bar at {@code t}, ATM call/put as given. */
+  private static void stubOptionBarsAt(
+      MarketDataProvider provider, LocalTime t, double atmCall, double atmPut) {
+    Instant at = ZonedDateTime.of(TODAY, t, MarketHours.ET).toInstant();
+    Map<String, List<Bar>> out = new HashMap<>();
+    double[][] rows = {{599, 1.6, 0.6}, {600, atmCall, atmPut}, {601, 0.6, 1.6}};
+    for (double[] r : rows) {
+      out.put(compact('C', (int) r[0]), List.of(new Bar(at, r[1])));
+      out.put(compact('P', (int) r[0]), List.of(new Bar(at, r[2])));
+    }
+    when(provider.optionBars1Min(any(), any(), any())).thenReturn(out);
   }
 
   /** SPY bars for any day, except the overridden days. */

@@ -274,6 +274,30 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
   }
 
   @Override
+  public boolean hasRunningCondorOwnerForOcc(String tenantId, String occPadded) {
+    try {
+      ScanOptions opts =
+          ScanOptions.scanOptions().match("pos:" + tenantId + ":*:" + occPadded).count(256).build();
+      try (Cursor<String> cursor = redis.scan(opts)) {
+        while (cursor.hasNext()) {
+          String wfId = redis.opsForValue().get(cursor.next());
+          if (WorkflowIds.isCondorHold(wfId) && isPositionWorkflowRunning(wfId)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } catch (RuntimeException e) {
+      log.warn(
+          "hasRunningCondorOwnerForOcc best-effort probe failed tenant={} occ={} err={}",
+          tenantId,
+          occPadded,
+          e.getMessage());
+      return false;
+    }
+  }
+
+  @Override
   public boolean hasRunningOwnerForOcc(String tenantId, String occPadded) {
     // BEST-EFFORT / read-only: any Visibility outage returns false (no owner found → recon pages,
     // the safe degrade — a false page never masks a genuine orphan). Unlike the Redis SCAN this

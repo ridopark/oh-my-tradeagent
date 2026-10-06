@@ -23,6 +23,9 @@ WORKDIR /workspace
 COPY pom.xml ./
 COPY contract contract
 COPY services services
+# The orchestrator packages the FOMC calendar (gated-condor event-day skip) from here into its jar;
+# without it CondorDayActivitiesImpl fails closed at boot.
+COPY scripts/data/fomc-dates.txt scripts/data/fomc-dates.txt
 ARG SERVICE_MODULE
 RUN --mount=type=cache,target=/root/.m2 \
     mvn -B -ntp -pl services/${SERVICE_MODULE} -am package \

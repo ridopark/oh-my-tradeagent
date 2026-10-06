@@ -198,6 +198,10 @@ public class RealizedPnlCalculator {
             + "FROM order_intent_journal "
             + "WHERE tenant_id = ? AND strategy_id = ? AND state = 'FILLED' AND side = ? "
             + "AND filled_qty IS NOT NULL AND avg_fill_price IS NOT NULL "
+            // #897: gated-condor rows (the 'MLEG' combo and every condor- order) have no
+            // per-symbol FIFO basis; counting them would credit raw proceeds. IS DISTINCT FROM
+            // keeps legacy NULL-symbol rows, which a plain <> would silently drop.
+            + "AND intent_key NOT LIKE 'condor-%' AND option_symbol IS DISTINCT FROM 'MLEG' "
             + "ORDER BY filled_at ASC, recorded_at ASC";
     Result<Record> rows = dsl.fetch(sql, tenantId, strategyId, side);
     Map<String, Deque<Lot>> lotsBySymbol = new LinkedHashMap<>();

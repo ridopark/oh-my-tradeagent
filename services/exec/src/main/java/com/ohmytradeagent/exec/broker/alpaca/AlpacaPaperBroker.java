@@ -32,8 +32,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
@@ -204,11 +206,25 @@ public class AlpacaPaperBroker implements OptionsBroker {
 
   @Override
   public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
-    boolean buy = isBuy(request.side());
     // position_intent: copytrade-v1 only emits SELL signals as exits of an existing long
     // position, so SELL maps to "sell_to_close". A future strategy that opens short positions
     // (sell-to-open) would need this mapping extended; the caller is responsible for that
     // contract change.
+    return placeSingleLeg(request, isBuy(request.side()) ? "buy_to_open" : "sell_to_close");
+  }
+
+  /**
+   * Gated-condor Phase 4: a CLOSING single-leg order — BUY covers a short ({@code buy_to_close}),
+   * SELL closes a long ({@code sell_to_close}). Same wire shape, duplicate-cid and over-exit
+   * handling as {@link #placeOrder}; only the BUY position_intent differs.
+   */
+  @Override
+  public PlaceOrderResponse placeClosingOrder(PlaceOrderRequest request) {
+    return placeSingleLeg(request, isBuy(request.side()) ? "buy_to_close" : "sell_to_close");
+  }
+
+  private PlaceOrderResponse placeSingleLeg(PlaceOrderRequest request, String positionIntent) {
+    boolean buy = isBuy(request.side());
     //
     // Order type derives from limitPrice: null → market, present → limit. This keeps the adapter
     // honest about the wire shape — Alpaca rejects `type=limit` without a `limit_price`, so
@@ -226,7 +242,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
             buy ? "buy" : "sell",
             orderType,
             "day",
-            buy ? "buy_to_open" : "sell_to_close",
+            positionIntent,
             request.limitPrice(),
             request.clientOrderId());
 
@@ -589,6 +605,32 @@ public class AlpacaPaperBroker implements OptionsBroker {
       return "42210000".equals(code.asText());
     }
     return false;
+  }
+
+  @Override
+  public Map<String, Long> signedOptionPositions() {
+    List<AlpacaPositionResponse> raw;
+    try {
+      raw =
+          client
+              .get()
+              .uri("/v2/positions")
+              .retrieve()
+              .body(new ParameterizedTypeReference<List<AlpacaPositionResponse>>() {});
+    } catch (HttpStatusCodeException e) {
+      throw mapError(e);
+    }
+    Map<String, Long> out = new LinkedHashMap<>();
+    for (AlpacaPositionResponse pos : raw == null ? List.<AlpacaPositionResponse>of() : raw) {
+      if (!"us_option".equals(pos.assetClass()) || pos.qty() == null) {
+        continue;
+      }
+      // Alpaca signs qty for a short ("-1") and also reports side="short"; derive the sign from
+      // side so a paper-account unsigned qty can never read a short as long.
+      long qty = Math.abs(Long.parseLong(pos.qty()));
+      out.put(pos.symbol(), "short".equalsIgnoreCase(pos.side()) ? -qty : qty);
+    }
+    return out;
   }
 
   @Override
