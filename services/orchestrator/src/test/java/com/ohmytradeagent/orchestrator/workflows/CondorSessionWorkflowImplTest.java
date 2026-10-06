@@ -13,8 +13,10 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.ohmytradeagent.contract.AccountSnapshotResult;
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.CondorExecActivity;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorEntryRequest;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorEntryResult;
@@ -66,6 +68,7 @@ class CondorSessionWorkflowImplTest {
   private CondorMarketActivity market;
   private MarketCalendarActivity tradingCalendar;
   private CondorExecActivity condorExec;
+  private AccountSnapshotActivity accountSnapshot;
 
   @BeforeEach
   void setUp() {
@@ -80,6 +83,7 @@ class CondorSessionWorkflowImplTest {
     market = Mockito.mock(CondorMarketActivity.class);
     tradingCalendar = Mockito.mock(MarketCalendarActivity.class);
     condorExec = Mockito.mock(CondorExecActivity.class);
+    accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
 
     when(strategy.get("staging_paper", "gated_condor")).thenReturn(condorConfig());
     when(calendar.todayEt()).thenReturn(TODAY);
@@ -97,6 +101,9 @@ class CondorSessionWorkflowImplTest {
         .when(market.resolveCondorLegs(anyString(), anyDouble(), anyDouble()))
         .thenReturn(legs());
     lenient().when(condorExec.heldCondorLegs(any(), any(), any())).thenReturn(List.of());
+    lenient()
+        .when(strategy.capitalForStrategy("staging_paper", "gated_condor"))
+        .thenReturn(new BigDecimal("100000"));
 
     Worker core = env.newWorker(CORE_QUEUE);
     core.registerWorkflowImplementationTypes(
@@ -104,7 +111,8 @@ class CondorSessionWorkflowImplTest {
     core.registerActivitiesImplementations(
         audit, strategy, calendar, condorDay, risk, positionLookup);
     env.newWorker(MD_QUEUE).registerActivitiesImplementations(market);
-    env.newWorker(BROKER_QUEUE).registerActivitiesImplementations(tradingCalendar, condorExec);
+    env.newWorker(BROKER_QUEUE)
+        .registerActivitiesImplementations(tradingCalendar, condorExec, accountSnapshot);
     env.start();
   }
 
@@ -120,7 +128,12 @@ class CondorSessionWorkflowImplTest {
         .withCondorShortOffsetPct(new BigDecimal("0.0015"))
         .withCondorWingOffsetPct(new BigDecimal("0.006"))
         .withRichnessGateLookbackDays(60L)
-        .withRichnessGateMinQuantile(new BigDecimal("0.5"));
+        .withRichnessGateMinQuantile(new BigDecimal("0.5"))
+        // staging_paper/gated_condor as deployed.
+        .withCapitalWeight(new BigDecimal("0.05"))
+        .withCapitalSource(StrategyConfig.CapitalSource.STATIC)
+        .withMinContracts(1L)
+        .withMaxContracts(1L);
   }
 
   private static RichnessResult gate(boolean pass) {
@@ -298,6 +311,53 @@ class CondorSessionWorkflowImplTest {
         .containsEntry("attempts", CondorSessionWorkflowImpl.HOLD_START_ATTEMPTS)
         .containsEntry("hold_workflow_id", "t-staging_paper/s-gated_condor/condor/2026-10-05");
     assertThat(audits()).noneMatch(e -> "CondorEntryFilled".equals(e.getKind()));
+  }
+
+  @Test
+  void deployedConfig_stillOrdersOneContract() {
+    when(condorExec.enterCondor(any())).thenReturn(filled());
+
+    run();
+
+    ArgumentCaptor<CondorEntryRequest> req = ArgumentCaptor.forClass(CondorEntryRequest.class);
+    verify(condorExec).enterCondor(req.capture());
+    assertThat(req.getValue().qty()).isEqualTo(1L);
+  }
+
+  @Test
+  void raisedMaxContracts_sizesFromCapitalWeightOverMaxRisk() {
+    // 100k static × 0.05 = 5000; worst-case credit 1.11 − 0.02 = 1.09 → max risk 191 → 26.
+    when(strategy.get("staging_paper", "gated_condor"))
+        .thenReturn(condorConfig().withMaxContracts(50L));
+    when(condorExec.enterCondor(any())).thenReturn(filled());
+
+    run();
+
+    ArgumentCaptor<CondorEntryRequest> req = ArgumentCaptor.forClass(CondorEntryRequest.class);
+    verify(condorExec).enterCondor(req.capture());
+    assertThat(req.getValue().qty()).isEqualTo(26L);
+    assertThat(onlyAudit("CondorEntryFilled").getSubject().get("ordered_qty").toString())
+        .isEqualTo("26");
+  }
+
+  @Test
+  void accountCashSource_sizesFromBrokerCash_notTheStaticBase() {
+    when(strategy.get("staging_paper", "gated_condor"))
+        .thenReturn(
+            condorConfig()
+                .withCapitalSource(StrategyConfig.CapitalSource.ACCOUNT_CASH)
+                .withMaxContracts(50L));
+    when(accountSnapshot.accountSnapshot(any()))
+        .thenReturn(new AccountSnapshotResult().withCash(new BigDecimal("20000")));
+    when(condorExec.enterCondor(any())).thenReturn(filled());
+
+    run();
+
+    // 20000 × 0.05 = 1000 / 191 → 5.
+    ArgumentCaptor<CondorEntryRequest> req = ArgumentCaptor.forClass(CondorEntryRequest.class);
+    verify(condorExec).enterCondor(req.capture());
+    assertThat(req.getValue().qty()).isEqualTo(5L);
+    verify(strategy, never()).capitalForStrategy(anyString(), anyString());
   }
 
   @Test
