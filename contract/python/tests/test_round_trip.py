@@ -725,3 +725,60 @@ def test_copytrade_entry_status_round_trips() -> None:
     assert fill.state == EntryState.filled
     assert fill.avg_fill_price == Decimal("2.34")
     assert json.loads(fill.model_dump_json(by_alias=True, exclude_none=True)) == filled
+
+
+_CONDOR_FIELDS = {
+    "condor_entry_et": "14:00",
+    "condor_short_offset_pct": 0.0015,
+    "condor_wing_offset_pct": 0.006,
+    "richness_gate_lookback_days": 60,
+    "richness_gate_min_quantile": 0.5,
+    "condor_skip_event_days": True,
+    "condor_hold_to_settle": True,
+}
+
+
+def test_strategy_config_condor_fields_round_trip() -> None:
+    """PLAN-2026-10-05 gated-condor Phase 1: the seven optional condor fields parse and
+    round-trip; absent -> None (fully dark)."""
+    model = StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, **_CONDOR_FIELDS})
+    reloaded = StrategyConfig.model_validate_json(
+        model.model_dump_json(by_alias=True, exclude_none=True)
+    )
+    for parsed in (model, reloaded):
+        assert parsed.condor_entry_et == "14:00"
+        assert parsed.condor_short_offset_pct == 0.0015
+        assert parsed.condor_wing_offset_pct == 0.006
+        assert parsed.richness_gate_lookback_days == 60
+        assert parsed.richness_gate_min_quantile == 0.5
+        assert parsed.condor_skip_event_days is True
+        assert parsed.condor_hold_to_settle is True
+
+    # Absent case (the existing copytrade-v1 fixture) validates cleanly: every field None.
+    absent = StrategyConfig.model_validate(_STRATEGY_CONFIG_BASE)
+    for field in _CONDOR_FIELDS:
+        assert getattr(absent, field) is None, field
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("condor_entry_et", "2:00"),
+        ("condor_entry_et", "24:00"),
+        ("condor_short_offset_pct", 0),
+        ("condor_short_offset_pct", 1.5),
+        ("condor_wing_offset_pct", 0),
+        ("condor_wing_offset_pct", 1.5),
+        ("richness_gate_lookback_days", 0),
+        ("richness_gate_min_quantile", -0.1),
+        ("richness_gate_min_quantile", 1.1),
+    ],
+)
+def test_strategy_config_condor_fields_reject_out_of_range(field: str, bad: object) -> None:
+    with pytest.raises(ValidationError) as exc:
+        StrategyConfig.model_validate({**_STRATEGY_CONFIG_BASE, field: bad})
+    # The field must be KNOWN and rejected on its bound — not as an unknown key, which
+    # additionalProperties:false would reject regardless of the value.
+    [err] = exc.value.errors()
+    assert err["loc"] == (field,)
+    assert err["type"] != "extra_forbidden"
