@@ -9,11 +9,13 @@ import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.broker.PlaceMlegOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountActivity;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaCalendarDay;
+import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaMlegOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderRequest;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaOrderResponse;
 import com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaPortfolioHistoryResponse;
@@ -290,6 +292,67 @@ public class AlpacaPaperBroker implements OptionsBroker {
           return PlaceOrderResponse.closedAlreadyFlat();
         }
         // Broker still reports qty>0 for this OCC → the 422 was NOT a true over-exit. Fall through.
+      }
+      throw mapError(e);
+    }
+  }
+
+  /**
+   * Gated-condor Phase 3: one opening multi-leg net-credit limit order (tif=day). The port's
+   * positive {@code netCredit} goes on the wire NEGATED — Alpaca's mleg {@code limit_price}
+   * notation is positive = debit, negative = credit, so a positive value would ask to PAY. Every
+   * leg opens ({@code buy_to_open}/{@code sell_to_open}). Idempotency mirrors {@link #placeOrder}'s
+   * duplicate-{@code client_order_id} handling; the single-leg over-exit cross-check does not apply
+   * (nothing here closes a position).
+   */
+  @Override
+  public PlaceOrderResponse placeMlegOrder(PlaceMlegOrderRequest request) {
+    List<AlpacaMlegOrderRequest.Leg> legs =
+        request.legs().stream()
+            .map(
+                leg ->
+                    new AlpacaMlegOrderRequest.Leg(
+                        leg.optionSymbol().replace(" ", ""),
+                        leg.ratioQty(),
+                        isBuy(leg.side()) ? "buy" : "sell",
+                        isBuy(leg.side()) ? "buy_to_open" : "sell_to_open"))
+            .toList();
+    AlpacaMlegOrderRequest body =
+        new AlpacaMlegOrderRequest(
+            "mleg",
+            request.qty(),
+            "limit",
+            "day",
+            request.netCredit().negate(),
+            request.clientOrderId(),
+            legs);
+    try {
+      AlpacaOrderResponse resp =
+          client
+              .post()
+              .uri("/v2/orders")
+              .contentType(MediaType.APPLICATION_JSON)
+              .body(body)
+              .retrieve()
+              .body(AlpacaOrderResponse.class);
+      if (resp == null || resp.id() == null) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "Alpaca placeMlegOrder returned null/empty body", "BrokerProtocolError");
+      }
+      return PlaceOrderResponse.placed(resp.id());
+    } catch (HttpStatusCodeException e) {
+      String existingId = duplicateExistingOrderId(e);
+      if (existingId != null) {
+        return PlaceOrderResponse.alreadyExisted(existingId);
+      }
+      // Same retry-safety as placeOrder: a re-POSTed client_order_id is never non-retryable.
+      if (isClientOrderIdUniquenessConflict(e)) {
+        PlaceOrderResponse resolved = resolveDuplicateByClientOrderId(e, request.clientOrderId());
+        if (resolved != null) {
+          return resolved;
+        }
+        duplicateCidRethrowCounter.increment();
+        throw e;
       }
       throw mapError(e);
     }

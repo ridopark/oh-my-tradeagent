@@ -31,6 +31,19 @@ public interface OptionsBroker {
   PlaceOrderResponse placeOrder(PlaceOrderRequest request);
 
   /**
+   * Gated-condor Phase 3: place one opening multi-leg net-credit order. Same idempotency contract
+   * as {@link #placeOrder}: a repeated {@code client_order_id} resolves to the prior order with
+   * {@code alreadyExisted=true} instead of placing a duplicate. Cancel / status / fill reads use
+   * the combo's {@code brokerOrderId} through the existing methods.
+   *
+   * <p>Default throws {@link UnsupportedOperationException} so adapters without multi-leg support
+   * (and test fakes) are unaffected until they opt in.
+   */
+  default PlaceOrderResponse placeMlegOrder(PlaceMlegOrderRequest request) {
+    throw new UnsupportedOperationException("placeMlegOrder not supported by this broker");
+  }
+
+  /**
    * Attempt to cancel the order at the broker. Returns a 3-state outcome:
    *
    * <ul>

@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.sql.DriverManager;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.List;
 import org.flywaydb.core.Flyway;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -55,6 +56,64 @@ class JooqOrderIntentJournalIT {
   void truncate() {
     dsl.deleteFrom(table("order_intent_journal")).execute();
     journal = new JooqOrderIntentJournal(dsl);
+  }
+
+  @Test
+  void recordComboIntent_roundTripsComboRowAndLegNbbo_andIsIdempotent() {
+    ComboIntent combo = combo("condor-2026-10-05-r0");
+
+    assertThat(journal.recordComboIntent(combo)).isTrue();
+    assertThat(journal.recordComboIntent(combo)).isFalse();
+
+    JournaledOrder row = journal.findByIntentKey("condor-2026-10-05-r0").orElseThrow();
+    assertThat(row.state()).isEqualTo(OrderState.RECORDED);
+    assertThat(row.optionSymbol()).isEqualTo(JooqOrderIntentJournal.MLEG_COMBO_SYMBOL);
+    assertThat(row.side()).isEqualTo("SELL");
+    assertThat(row.limitPrice()).isEqualByComparingTo("0.45");
+    assertThat(row.clientOrderId()).startsWith("condor-");
+    List<ComboIntent.Leg> legs = journal.findComboLegs("condor-2026-10-05-r0");
+    assertThat(legs).containsExactlyElementsOf(combo.legs());
+  }
+
+  @Test
+  void recordSlippageVsMid_persistsOnComboRow() {
+    journal.recordComboIntent(combo("condor-2026-10-05-r0"));
+
+    journal.recordSlippageVsMid("condor-2026-10-05-r0", new BigDecimal("0.0200"));
+
+    BigDecimal stored =
+        dsl.select(org.jooq.impl.DSL.field("slippage_vs_mid", BigDecimal.class))
+            .from(table("order_intent_journal"))
+            .where(org.jooq.impl.DSL.field("intent_key").eq("condor-2026-10-05-r0"))
+            .fetchOne(0, BigDecimal.class);
+    assertThat(stored).isEqualByComparingTo("0.02");
+  }
+
+  private static ComboIntent combo(String intentKey) {
+    return new ComboIntent(
+        intentKey,
+        "sig-1",
+        "staging_paper",
+        "gated_condor",
+        "paper",
+        1L,
+        new BigDecimal("0.45"),
+        List.of(
+            new ComboIntent.Leg(
+                "XSP   261005P00570000",
+                "BUY",
+                1L,
+                new BigDecimal("0.2500"),
+                new BigDecimal("0.3500"),
+                new BigDecimal("0.3000")),
+            new ComboIntent.Leg(
+                "XSP   261005P00573000",
+                "SELL",
+                1L,
+                new BigDecimal("0.9500"),
+                new BigDecimal("1.0500"),
+                new BigDecimal("1.0000"))),
+        OffsetDateTime.parse("2026-10-05T18:00:00Z"));
   }
 
   @Test

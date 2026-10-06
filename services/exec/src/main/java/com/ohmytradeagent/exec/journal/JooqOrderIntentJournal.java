@@ -13,12 +13,20 @@ import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
 
 @Component
 public class JooqOrderIntentJournal implements OrderIntentJournal {
 
   static final Table<?> TABLE = table("order_intent_journal");
+  static final Table<?> LEG_TABLE = table("order_intent_journal_leg");
+
+  /**
+   * Gated-condor Phase 3: {@code option_symbol} of a multi-leg combo row (the real OCCs live on its
+   * leg rows). Never a valid OCC, so OCC-keyed recon lookups can never match a combo.
+   */
+  static final String MLEG_COMBO_SYMBOL = "MLEG";
 
   private final DSLContext dsl;
 
@@ -66,6 +74,98 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
             .onConflictDoNothing()
             .execute();
     return inserted == 1;
+  }
+
+  @Override
+  public boolean recordComboIntent(ComboIntent combo) {
+    OffsetDateTime now = OffsetDateTime.now();
+    return dsl.transactionResult(
+        cfg -> {
+          DSLContext tx = DSL.using(cfg);
+          int inserted =
+              tx.insertInto(TABLE)
+                  .columns(
+                      field("intent_key"),
+                      field("signal_id"),
+                      field("tenant_id"),
+                      field("strategy_id"),
+                      field("broker_target"),
+                      field("client_order_id"),
+                      field("option_symbol"),
+                      field("side"),
+                      field("qty"),
+                      field("limit_price"),
+                      field("state"),
+                      field("recorded_at"),
+                      field("last_state_at"))
+                  .values(
+                      combo.intentKey(),
+                      combo.signalId(),
+                      combo.tenantId(),
+                      combo.strategyId(),
+                      combo.brokerTarget(),
+                      ClientOrderId.forIntent(combo.intentKey()),
+                      MLEG_COMBO_SYMBOL,
+                      "SELL",
+                      combo.qty(),
+                      combo.netCredit(),
+                      OrderState.RECORDED.name(),
+                      combo.recordedAt(),
+                      now)
+                  .onConflictDoNothing()
+                  .execute();
+          if (inserted != 1) {
+            return false;
+          }
+          for (int i = 0; i < combo.legs().size(); i++) {
+            ComboIntent.Leg leg = combo.legs().get(i);
+            tx.insertInto(LEG_TABLE)
+                .columns(
+                    field("parent_intent_key"),
+                    field("leg_index"),
+                    field("option_symbol"),
+                    field("side"),
+                    field("ratio_qty"),
+                    field("nbbo_bid"),
+                    field("nbbo_ask"),
+                    field("nbbo_mid"))
+                .values(
+                    combo.intentKey(),
+                    (short) i,
+                    leg.optionSymbol(),
+                    leg.side(),
+                    leg.ratioQty(),
+                    leg.nbboBid(),
+                    leg.nbboAsk(),
+                    leg.nbboMid())
+                .execute();
+          }
+          return true;
+        });
+  }
+
+  @Override
+  public List<ComboIntent.Leg> findComboLegs(String intentKey) {
+    return dsl.selectFrom(LEG_TABLE)
+        .where(field("parent_intent_key", String.class).eq(intentKey))
+        .orderBy(field("leg_index").asc())
+        .fetch(
+            r ->
+                new ComboIntent.Leg(
+                    r.get("option_symbol", String.class),
+                    r.get("side", String.class),
+                    r.get("ratio_qty", Long.class),
+                    r.get("nbbo_bid", BigDecimal.class),
+                    r.get("nbbo_ask", BigDecimal.class),
+                    r.get("nbbo_mid", BigDecimal.class)));
+  }
+
+  @Override
+  public void recordSlippageVsMid(String intentKey, BigDecimal slippageVsMid) {
+    dsl.update(TABLE)
+        .set(field("slippage_vs_mid"), slippageVsMid)
+        .where(field("intent_key", String.class).eq(intentKey))
+        .execute();
   }
 
   @Override

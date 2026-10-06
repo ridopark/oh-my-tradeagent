@@ -5,10 +5,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
+import com.ohmytradeagent.exec.broker.PlaceMlegOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +107,53 @@ class StubBrokerTest {
   @Test
   void getOrderStatus_unknownId_returnsUnknown() {
     assertThat(broker.getOrderStatus("nope")).isEqualTo(BrokerOrderStatus.UNKNOWN);
+  }
+
+  @Test
+  void placeMlegOrder_sameClientOrderId_isIdempotent() {
+    PlaceOrderResponse first = broker.placeMlegOrder(mleg("condor-a1-r0"));
+    PlaceOrderResponse second = broker.placeMlegOrder(mleg("condor-a1-r0"));
+
+    assertThat(first.brokerOrderId()).isEqualTo("stub-condor-a1-r0");
+    assertThat(first.alreadyExisted()).isFalse();
+    assertThat(second.brokerOrderId()).isEqualTo("stub-condor-a1-r0");
+    assertThat(second.alreadyExisted()).isTrue();
+    // The duplicate never reaches the "venue": one recorded placement, not two.
+    assertThat(broker.placedMlegOrders()).hasSize(1);
+  }
+
+  @Test
+  void placeMlegOrderRequest_rejectsLegCountOutsideTwoToFour() {
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () ->
+                new PlaceMlegOrderRequest(
+                    "t",
+                    "condor-x",
+                    1L,
+                    new BigDecimal("0.40"),
+                    List.of(new PlaceMlegOrderRequest.Leg("XSP   261005P00570000", "BUY", 1L))))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void getPartialFillSnapshot_returnsSeededPartialElseZero() {
+    broker.placeMlegOrder(mleg("condor-a1-r0"));
+    assertThat(broker.getPartialFillSnapshot("stub-condor-a1-r0").filledQty()).isZero();
+
+    broker.setPartialFillForTest("stub-condor-a1-r0", 2L, new BigDecimal("-0.41"));
+
+    assertThat(broker.getPartialFillSnapshot("stub-condor-a1-r0").filledQty()).isEqualTo(2L);
+  }
+
+  private static PlaceMlegOrderRequest mleg(String clientOrderId) {
+    return new PlaceMlegOrderRequest(
+        "t-dev",
+        clientOrderId,
+        1L,
+        new BigDecimal("0.42"),
+        List.of(
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00570000", "BUY", 1L),
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00573000", "SELL", 1L)));
   }
 
   private PlaceOrderRequest request(String clientOrderId) {

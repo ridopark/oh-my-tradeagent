@@ -12,6 +12,7 @@ import com.ohmytradeagent.exec.broker.BrokerFillDetail;
 import com.ohmytradeagent.exec.broker.BrokerOrderStatus;
 import com.ohmytradeagent.exec.broker.CancelResponse;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.broker.PlaceMlegOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -1621,6 +1622,71 @@ class AlpacaPaperBrokerTest {
                 "{\"id\":\"alp-1\",\"client_order_id\":\"x\",\"status\":\""
                     + alpacaStatus
                     + "\"}"));
+  }
+
+  @Test
+  void placeMlegOrder_wireShape_mlegClassLegsAndNegativeCreditLimit() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"alp-ic-1\",\"status\":\"accepted\"}"));
+
+    PlaceOrderResponse r = broker.placeMlegOrder(condorRequest("condor-a1-r0"));
+
+    assertThat(r.brokerOrderId()).isEqualTo("alp-ic-1");
+    assertThat(r.alreadyExisted()).isFalse();
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getPath()).isEqualTo("/v2/orders");
+    JsonNode body = mapper.readTree(req.getBody().readUtf8());
+    assertThat(body.get("order_class").asText()).isEqualTo("mleg");
+    assertThat(body.get("type").asText()).isEqualTo("limit");
+    assertThat(body.get("time_in_force").asText()).isEqualTo("day");
+    assertThat(body.get("client_order_id").asText()).isEqualTo("condor-a1-r0");
+    assertThat(body.get("qty").asLong()).isEqualTo(1L);
+    // Alpaca mleg notation: a NEGATIVE limit_price is a net credit. The port carries the credit as
+    // a positive number; sending it positive would ask Alpaca to PAY a debit.
+    assertThat(body.get("limit_price").isNumber()).isTrue();
+    assertThat(body.get("limit_price").decimalValue()).isEqualByComparingTo("-0.42");
+    // Top-level single-leg fields must be absent on an mleg order.
+    assertThat(body.has("symbol")).isFalse();
+    assertThat(body.has("side")).isFalse();
+    JsonNode legs = body.get("legs");
+    assertThat(legs.size()).isEqualTo(4);
+    assertThat(legs.get(0).get("symbol").asText()).isEqualTo("XSP261005P00570000");
+    assertThat(legs.get(0).get("side").asText()).isEqualTo("buy");
+    assertThat(legs.get(0).get("position_intent").asText()).isEqualTo("buy_to_open");
+    assertThat(legs.get(0).get("ratio_qty").asLong()).isEqualTo(1L);
+    assertThat(legs.get(1).get("side").asText()).isEqualTo("sell");
+    assertThat(legs.get(1).get("position_intent").asText()).isEqualTo("sell_to_open");
+  }
+
+  @Test
+  void placeMlegOrder_duplicateClientOrderId_returnsExistingIdAndAlreadyExistedTrue() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(422)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"message\":\"client_order_id must be unique\",\"existing_order_id\":\"alp-ic-prior\"}"));
+
+    PlaceOrderResponse r = broker.placeMlegOrder(condorRequest("condor-a1-r0"));
+
+    assertThat(r.brokerOrderId()).isEqualTo("alp-ic-prior");
+    assertThat(r.alreadyExisted()).isTrue();
+  }
+
+  private static PlaceMlegOrderRequest condorRequest(String clientOrderId) {
+    return new PlaceMlegOrderRequest(
+        "t-dev",
+        clientOrderId,
+        1L,
+        new BigDecimal("0.42"),
+        List.of(
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00570000", "BUY", 1L),
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00573000", "SELL", 1L),
+            new PlaceMlegOrderRequest.Leg("XSP   261005C00575000", "SELL", 1L),
+            new PlaceMlegOrderRequest.Leg("XSP   261005C00578000", "BUY", 1L)));
   }
 
   private static PlaceOrderRequest request(String clientOrderId) {
