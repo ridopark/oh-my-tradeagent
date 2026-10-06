@@ -45,6 +45,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -574,36 +575,88 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
   }
 
-  // The relative >50% large-book threshold is UNCHANGED: a large book (3 positions) with 2 quotes
-  // UNAVAILABLE (>50% failures) fail-closes on the VERY FIRST tick — the debounce touches only the
-  // small-book floor, never the relative large-book bound.
+  // PLAN-2026-10-05 incident reproduction (prod_real, 60-90s DNS blip): a LARGE book (3 positions)
+  // with every quote UNAVAILABLE now DEFERS on the first tick (one YELLOW deferred page, no trip)
+  // and fail-closes only on the SECOND consecutive unpriceable tick — the same debounce small books
+  // get. The in-tick re-fetch stays small-book only: exactly 3 quote calls on tick 1. (Replaces
+  // heartbeat_largeBookRelativeFailure_failsClosedImmediately_unchanged, which asserted the
+  // first-tick trip being fixed.)
   @Test
-  void heartbeat_largeBookRelativeFailure_failsClosedImmediately_unchanged() {
+  void heartbeat_largeBookAllQuotesFail_debouncesThenFailsClosedOnSecondTick() throws Exception {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
     when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
-    when(accountPnl.accountOpenBook(anyString()))
-        .thenReturn(
-            new AccountOpenBook(
-                List.of(
-                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
-                    new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L),
-                    new OpenPositionValuation("TSLA  261218C00300000", new BigDecimal("4.00"), 5L)),
-                3,
-                0));
-    // Two of three unpriceable (66% > 50%), one priced.
-    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
-        .thenReturn(unavailableQuote("NVDA  261218C00140000"));
-    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
-        .thenReturn(unavailableQuote("AAPL  261218C00200000"));
-    when(optionQuote.getOptionQuote(quoteFor("TSLA  261218C00300000")))
-        .thenReturn(okQuote("TSLA  261218C00300000", new BigDecimal("3.90")));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(largeBook());
+    when(optionQuote.getOptionQuote(any()))
+        .thenAnswer(
+            inv -> unavailableQuote(inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol()));
 
-    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-largebook");
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-largebook-debounce");
     WorkflowStub.fromTyped(stub).start(input());
-    env.sleep(Duration.ofSeconds(75)); // ONE tick
 
+    // Tick 1: deferred + paged once, not tripped, and no in-tick re-fetch on a large book.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    waitForAuditKind("AccountKillSwitchMtmDeferred");
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+    assertThat(captureKind("AccountKillSwitchMtmDeferred").getSubject())
+        .containsEntry("listed", 3)
+        .containsEntry("failures", 3)
+        .containsEntry("consecutive_ticks", 1)
+        .containsEntry("trip_ticks", 2);
+    verify(optionQuote, times(3)).getOptionQuote(any());
+
+    // Tick 2: still unpriceable => fail-closes (sustained outage), no second deferred page.
+    env.sleep(Duration.ofSeconds(60));
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+    waitForAuditKind("KillSwitchTripped");
+    assertThat(captureKind("KillSwitchTripped").getSubject())
+        .containsEntry("flatten", "manual")
+        .containsEntry("open_positions", 3);
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+  }
+
+  // PLAN-2026-10-05 recovery counterfactual: one failing tick (2 of 3 unpriceable) followed by a
+  // fully priced tick does NOT trip and resets the counter, so a later failing tick only defers
+  // again. One deferred page per episode (2 total).
+  @Test
+  void heartbeat_largeBookOneFailingTickThenPriced_doesNotTrip() throws Exception {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(largeBook());
+    AtomicBoolean failing = new AtomicBoolean(true);
+    when(optionQuote.getOptionQuote(any()))
+        .thenAnswer(
+            inv -> {
+              String occ = inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol();
+              return failing.get() && !occ.startsWith("TSLA")
+                  ? unavailableQuote(occ)
+                  : okQuote(occ, new BigDecimal("4.00"));
+            });
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-largebook-recover");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    // Tick 1: 2 of 3 unpriceable => defer.
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    waitForAuditKind("AccountKillSwitchMtmDeferred");
+
+    // Tick 2: connectivity back, book priced => no trip, counter reset.
+    failing.set(false);
+    env.sleep(Duration.ofSeconds(60));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+
+    // Tick 3: fails again => only a fresh defer (proves the reset), still no trip.
+    failing.set(true);
+    env.sleep(Duration.ofSeconds(60));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    waitForKindCount("AccountKillSwitchMtmDeferred", 2L);
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(2L);
+    assertThat(countKind("KillSwitchTripped")).isEqualTo(0L);
   }
 
   // Real-loss separation (a): a genuine computed-loss breach on a FULLY PRICED book trips on the
@@ -1021,9 +1074,10 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
   }
 
-  // Regression guard: the fail-closed protection for a GENUINE market-data outage is untouched. The
+  // Regression guard: the fail-closed protection for a GENUINE market-data outage is kept. The
   // same 2-of-3 unpriceable shape as the incident, but on contracts that have NOT expired, still
-  // fail-closes immediately (listed=3 gets no small-book debounce).
+  // fail-closes once the outage persists for the debounce window (listed=3 now gets the same
+  // 2-tick debounce as a small book; PLAN-2026-10-05).
   @Test
   void heartbeat_unexpiredContractsUnpriceable_stillFailsClosed() {
     when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
@@ -1045,7 +1099,9 @@ class AccountKillSwitchWorkflowImplTest {
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-unexpired-failsclosed");
     WorkflowStub.fromTyped(stub).start(input());
-    env.sleep(Duration.ofSeconds(75)); // ONE tick
+    env.sleep(Duration.ofSeconds(75)); // tick 1: deferred
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    env.sleep(Duration.ofSeconds(60)); // tick 2: still unpriceable => fail-closed
 
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
@@ -2364,6 +2420,17 @@ class AccountKillSwitchWorkflowImplTest {
     return new AccountOpenBook(
         List.of(new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 1L)),
         1,
+        0);
+  }
+
+  /** A 3-position (large) book of unexpired contracts. */
+  private static AccountOpenBook largeBook() {
+    return new AccountOpenBook(
+        List.of(
+            new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+            new OpenPositionValuation("AAPL  261218C00200000", new BigDecimal("5.00"), 5L),
+            new OpenPositionValuation("TSLA  261218C00300000", new BigDecimal("4.00"), 5L)),
+        3,
         0);
   }
 
