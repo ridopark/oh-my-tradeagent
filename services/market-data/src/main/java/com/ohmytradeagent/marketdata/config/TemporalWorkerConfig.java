@@ -1,5 +1,6 @@
 package com.ohmytradeagent.marketdata.config;
 
+import com.ohmytradeagent.contract.activities.CondorMarketActivity;
 import com.ohmytradeagent.contract.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.contract.activities.SubscribeEquityActivity;
 import com.ohmytradeagent.contract.activities.SubscribePremiumActivity;
@@ -111,10 +112,14 @@ public class TemporalWorkerConfig {
       WorkerFactory factory,
       SubscribePremiumActivity subscribePremiumActivity,
       GetOptionQuoteActivity getOptionQuoteActivity,
-      SubscribeEquityActivity subscribeEquityActivity) {
+      SubscribeEquityActivity subscribeEquityActivity,
+      CondorMarketActivity condorMarketActivity) {
     Worker worker = factory.newWorker(taskQueue);
     worker.registerActivitiesImplementations(
-        subscribePremiumActivity, getOptionQuoteActivity, subscribeEquityActivity);
+        subscribePremiumActivity,
+        getOptionQuoteActivity,
+        subscribeEquityActivity,
+        condorMarketActivity);
     return worker;
   }
 }

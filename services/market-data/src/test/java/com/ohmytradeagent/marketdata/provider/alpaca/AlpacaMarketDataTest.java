@@ -1119,4 +1119,91 @@ class AlpacaMarketDataTest {
 
     assertThat(p.premiumFeedStatus()).doesNotContainKey(OCC);
   }
+
+  // --- gated condor (PLAN-2026-10-05 Phase 2): historical bars + 0DTE chain quotes ---
+
+  @Test
+  void stockBars1Min_followsPagination_andExcludesTheEndMinute() throws Exception {
+    server.enqueue(
+        json(
+            "{\"bars\":[{\"t\":\"2026-10-02T13:30:00Z\",\"o\":1,\"c\":600.10},"
+                + "{\"t\":\"2026-10-02T13:31:00Z\",\"o\":1,\"c\":600.20}],"
+                + "\"next_page_token\":\"tok1\"}"));
+    server.enqueue(
+        json(
+            "{\"bars\":[{\"t\":\"2026-10-02T13:32:00Z\",\"o\":1,\"c\":600.30}],"
+                + "\"next_page_token\":null}"));
+
+    java.util.List<com.ohmytradeagent.marketdata.provider.Bar> bars =
+        provider.stockBars1Min(
+            "SPY", Instant.parse("2026-10-02T13:30:00Z"), Instant.parse("2026-10-02T13:32:00Z"));
+
+    // Alpaca's end is inclusive; the port's is exclusive.
+    assertThat(bars)
+        .extracting(com.ohmytradeagent.marketdata.provider.Bar::close)
+        .containsExactly(600.10, 600.20);
+    RecordedRequest first = server.takeRequest();
+    assertThat(first.getPath())
+        .startsWith("/v2/stocks/SPY/bars?")
+        .contains("timeframe=1Min")
+        .contains("feed=sip")
+        .contains("start=2026-10-02T13:30:00Z")
+        .doesNotContain("page_token");
+    assertThat(server.takeRequest().getPath()).contains("page_token=tok1");
+  }
+
+  @Test
+  void optionBars1Min_requestsCompactSymbols_keysByCallerForm() throws Exception {
+    server.enqueue(
+        json(
+            "{\"bars\":{\"XSP261002C00600000\":[{\"t\":\"2026-10-02T17:59:00Z\",\"c\":1.25}]},"
+                + "\"next_page_token\":null}"));
+
+    java.util.Map<String, java.util.List<com.ohmytradeagent.marketdata.provider.Bar>> bars =
+        provider.optionBars1Min(
+            java.util.List.of("XSP   261002C00600000", "XSP   261002P00600000"),
+            Instant.parse("2026-10-02T13:30:00Z"),
+            Instant.parse("2026-10-02T18:00:00Z"));
+
+    assertThat(bars).containsOnlyKeys("XSP   261002C00600000");
+    assertThat(bars.get("XSP   261002C00600000").get(0).close()).isEqualTo(1.25);
+    String path = server.takeRequest().getPath();
+    assertThat(path)
+        .startsWith("/v1beta1/options/bars?")
+        .contains("XSP261002C00600000")
+        .contains("XSP261002P00600000")
+        .doesNotContain("%20");
+  }
+
+  @Test
+  void optionChainQuotes_keepsTwoSidedQuotes_forTheExpiration() throws Exception {
+    server.enqueue(
+        json(
+            "{\"snapshots\":{"
+                + "\"XSP261005C00600000\":{\"latestQuote\":{\"bp\":1.00,\"ap\":1.10}},"
+                + "\"XSP261005C00620000\":{\"latestQuote\":{\"bp\":0,\"ap\":0}},"
+                + "\"XSP261005P00600000\":{}},\"next_page_token\":null}"));
+
+    java.util.Map<String, Quote> chain =
+        provider.optionChainQuotes("XSP", java.time.LocalDate.of(2026, 10, 5));
+
+    assertThat(chain).containsOnlyKeys("XSP261005C00600000");
+    assertThat(chain.get("XSP261005C00600000").mid()).isEqualByComparingTo("1.05");
+    assertThat(server.takeRequest().getPath())
+        .startsWith("/v1beta1/options/snapshots/XSP?")
+        .contains("expiration_date=2026-10-05");
+  }
+
+  @Test
+  void optionChainQuotes_5xx_returnsEmpty() {
+    server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
+    assertThat(provider.optionChainQuotes("XSP", java.time.LocalDate.of(2026, 10, 5))).isEmpty();
+  }
+
+  private static MockResponse json(String body) {
+    return new MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody(body);
+  }
 }

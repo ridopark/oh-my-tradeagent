@@ -56,6 +56,34 @@ public interface MarketDataProvider {
   }
 
   /**
+   * Historical 1-minute bars for a stock {@code ticker} with start time in {@code [start, end)},
+   * oldest first (gated condor richness σ, PLAN-2026-10-05 Phase 2). Default empty.
+   */
+  default java.util.List<Bar> stockBars1Min(
+      String ticker, java.time.Instant start, java.time.Instant end) {
+    return java.util.List.of();
+  }
+
+  /**
+   * Historical 1-minute bars per OCC (compact or space-padded; result keyed by the caller's form)
+   * with start time in {@code [start, end)}, oldest first. Symbols with no bars are absent. Default
+   * empty.
+   */
+  default java.util.Map<String, java.util.List<Bar>> optionBars1Min(
+      java.util.Collection<String> occSymbols, java.time.Instant start, java.time.Instant end) {
+    return java.util.Map.of();
+  }
+
+  /**
+   * Live NBBO for every {@code underlying} option contract expiring on {@code expiration}, keyed by
+   * COMPACT OCC. Contracts with no two-sided quote are absent. Default empty.
+   */
+  default java.util.Map<String, Quote> optionChainQuotes(
+      String underlying, java.time.LocalDate expiration) {
+    return java.util.Map.of();
+  }
+
+  /**
    * Opens a push subscription for {@code occSymbol}. Each premium tick from the provider feed is
    * delivered to {@code onTick}. Subscriptions are independent: closing one does not affect other
    * subscribers on the same symbol.
