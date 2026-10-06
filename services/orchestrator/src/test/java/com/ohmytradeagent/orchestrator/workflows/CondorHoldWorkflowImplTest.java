@@ -65,6 +65,10 @@ class CondorHoldWorkflowImplTest {
     when(calendar.durationUntilEodCloseEt(CondorHoldWorkflowImpl.SETTLE_CHECK_ET))
         .thenReturn(Duration.ofHours(2));
     lenient().when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(17));
+    // Before the 16:00 expiry close, so a flatten may be re-attempted.
+    lenient()
+        .when(calendar.durationUntilEodCloseEt(CondorHoldWorkflowImpl.EXPIRY_CLOSE_ET))
+        .thenReturn(Duration.ofHours(1));
     lenient().when(condorExec.heldCondorLegs(any(), any(), any())).thenReturn(List.of());
     lenient()
         .when(condorExec.flattenCondor(any()))
@@ -340,6 +344,59 @@ class CondorHoldWorkflowImplTest {
     when(market.settlementSpot("XSP")).thenReturn(600.0);
 
     assertThat(runToCompletion()).isEqualTo("settled");
+  }
+
+  @Test
+  void shortCoverNeverFills_flattenIsReCalledUpToMaxAttempts_thenPagesOnceAndSettles() {
+    // The activity RETURNS (not throws) shorts_covered=false when a cover stays unfilled through
+    // its polls; the hold itself must re-call it, then page only after the final attempt.
+    when(condorExec.flattenCondor(any()))
+        .thenReturn(new CondorFlattenResult(false, false, "short cover not confirmed filled"));
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+    CondorHoldWorkflow wf = stub();
+    WorkflowClient.start(wf::run, input());
+    wf.riskBreach(new RiskBreachPayload());
+
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class)).isEqualTo("settled");
+
+    verify(condorExec, Mockito.times(CondorHoldWorkflowImpl.EXEC_MAX_ATTEMPTS))
+        .flattenCondor(any());
+    assertThat(onlyAudit("CondorFlattenIncomplete").getSubject())
+        .containsEntry("attempts", CondorHoldWorkflowImpl.EXEC_MAX_ATTEMPTS)
+        .containsEntry("exit_reason", "killswitch_flatten");
+    onlyAudit("CondorSettled");
+  }
+
+  @Test
+  void slowShortCover_secondAttemptCompletes_noIncompletePage() {
+    when(condorExec.flattenCondor(any()))
+        .thenReturn(new CondorFlattenResult(false, false, "short cover not confirmed filled"))
+        .thenReturn(new CondorFlattenResult(true, true, null));
+    CondorHoldWorkflow wf = stub();
+    WorkflowClient.start(wf::run, input());
+    wf.forceClose("operator:alice");
+
+    assertThat(WorkflowStub.fromTyped(wf).getResult(String.class))
+        .isEqualTo("flattened:operator_force_close");
+    verify(condorExec, Mockito.times(2)).flattenCondor(any());
+    assertThat(onlyAudit("CondorFlattened").getSubject()).containsEntry("attempts", 2);
+  }
+
+  @Test
+  void pastTheExpiryClose_flattenIsNotReAttempted() {
+    when(calendar.durationUntilEodCloseEt(CondorHoldWorkflowImpl.EXPIRY_CLOSE_ET))
+        .thenReturn(Duration.ZERO);
+    when(condorExec.flattenCondor(any()))
+        .thenReturn(new CondorFlattenResult(false, false, "short cover not confirmed filled"));
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+    CondorHoldWorkflow wf = stub();
+    WorkflowClient.start(wf::run, input());
+    wf.forceClose("operator:alice");
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    verify(condorExec, Mockito.times(1)).flattenCondor(any());
+    onlyAudit("CondorFlattenIncomplete");
   }
 
   @Test

@@ -115,6 +115,29 @@ class CondorExecActivityImplTest {
   }
 
   @Test
+  void flatten_rejectedShortCover_failsFast_withoutWaitingOutThePolls() {
+    int[] polls = {0};
+    onPoll = () -> polls[0]++;
+    broker.placeClosingOrder(
+        new PlaceOrderRequest(
+            TENANT,
+            ClientOrderId.forIntent("condor-staging_paper-gated_condor-2026-10-05-x0"),
+            "XSP   261005C00601000",
+            "BUY",
+            1L,
+            null));
+    broker.cancelOrder(boid(0)); // terminal, never fills
+
+    CondorFlattenResult r = activity.flattenCondor(flatten(TARGET));
+
+    assertThat(r.shortsCovered()).isFalse();
+    assertThat(polls[0]).isZero();
+    assertThat(broker.placedClosingOrders())
+        .extracting(PlaceOrderRequest::side)
+        .doesNotContain("SELL");
+  }
+
+  @Test
   void flatten_journalsEveryCloseUnderTheCondorPrefix() {
     onPoll =
         () -> {

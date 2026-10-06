@@ -48,6 +48,9 @@ public class CondorExecActivityImpl implements CondorExecActivity {
   // the wait for the shorts before the longs are touched.
   static final Duration SHORT_FILL_POLL = Duration.ofMillis(500);
   static final int SHORT_FILL_ATTEMPTS = 20;
+  static final java.util.Set<BrokerOrderStatus> TERMINAL_UNFILLED =
+      java.util.EnumSet.of(
+          BrokerOrderStatus.CANCELLED, BrokerOrderStatus.REJECTED, BrokerOrderStatus.EXPIRED);
 
   private final OrderIntentJournal journal;
   private final BrokerClientRegistry registry;
@@ -266,6 +269,9 @@ public class CondorExecActivityImpl implements CondorExecActivity {
       }
       BrokerOrderStatus status = broker.getOrderStatus(brokerOrderId);
       for (int i = 1; status != BrokerOrderStatus.FILLED && i < SHORT_FILL_ATTEMPTS; i++) {
+        if (TERMINAL_UNFILLED.contains(status)) {
+          return false; // cancelled/rejected/expired: waiting cannot fill it
+        }
         sleeper.sleep(SHORT_FILL_POLL);
         status = broker.getOrderStatus(brokerOrderId);
       }

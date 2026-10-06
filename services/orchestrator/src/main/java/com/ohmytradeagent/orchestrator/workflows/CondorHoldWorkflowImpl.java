@@ -20,6 +20,7 @@ import io.temporal.common.RetryOptions;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.workflow.Workflow;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalTime;
 import java.util.LinkedHashMap;
@@ -44,6 +45,9 @@ import java.util.Map;
 public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
 
   static final LocalTime SETTLE_CHECK_ET = LocalTime.of(16, 15);
+
+  /** XSP 0DTE stops trading at 16:00 ET: no flatten is (re-)attempted at or after it. */
+  static final LocalTime EXPIRY_CLOSE_ET = LocalTime.of(16, 0);
 
   /** Past the open so the broker's overnight expiry/settlement processing has posted. */
   static final Duration RECONCILE_AFTER_OPEN = Duration.ofMinutes(5);
@@ -149,31 +153,51 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
 
   /** True iff all four legs were closed. */
   private boolean flatten() {
-    CondorFlattenResult r;
-    try {
-      r =
-          condorExec()
-              .flattenCondor(
-                  new CondorFlattenRequest(
-                      input.getTenantId(),
-                      input.getStrategyId(),
-                      input.getBrokerTarget(),
-                      input.getAttemptId(),
-                      input.getQty(),
-                      input.getLegs()));
-    } catch (ActivityFailure e) {
-      r = new CondorFlattenResult(false, false, "flatten_activity_failed: " + e.getCause());
+    // The activity RETURNS shorts_covered=false when a cover stays unfilled through its polls, so
+    // Temporal's activity retry never sees it: re-call here (idempotent per leg — journaled
+    // SUBMITTED/FILLED closes are reused, never re-sent) up to EXEC_MAX_ATTEMPTS while the market
+    // is still open, and page only after the final attempt.
+    CondorFlattenResult r = null;
+    int attempt = 0;
+    while (attempt < EXEC_MAX_ATTEMPTS) {
+      attempt++;
+      r = flattenOnce();
+      if (r.shortsCovered() && r.longsClosed()) {
+        break;
+      }
+      Duration untilExpiryClose = calendar.durationUntilEodCloseEt(EXPIRY_CLOSE_ET);
+      if (untilExpiryClose == null || untilExpiryClose.compareTo(Duration.ZERO) <= 0) {
+        break;
+      }
     }
+    boolean complete = r.shortsCovered() && r.longsClosed();
     logAudit(
-        r.shortsCovered() && r.longsClosed() ? KIND_FLATTENED : KIND_FLATTEN_INCOMPLETE,
+        complete ? KIND_FLATTENED : KIND_FLATTEN_INCOMPLETE,
         subject(
             "exit_reason", exitReason,
             "actor", exitActor,
             "shorts_covered", r.shortsCovered(),
             "longs_closed", r.longsClosed(),
+            "attempts", attempt,
             "reason", r.reason(),
             "legs", occs()));
-    return r.shortsCovered() && r.longsClosed();
+    return complete;
+  }
+
+  private CondorFlattenResult flattenOnce() {
+    try {
+      return condorExec()
+          .flattenCondor(
+              new CondorFlattenRequest(
+                  input.getTenantId(),
+                  input.getStrategyId(),
+                  input.getBrokerTarget(),
+                  input.getAttemptId(),
+                  input.getQty(),
+                  input.getLegs()));
+    } catch (ActivityFailure e) {
+      return new CondorFlattenResult(false, false, "flatten_activity_failed: " + e.getCause());
+    }
   }
 
   /**
@@ -183,9 +207,9 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
    */
   private String settle(boolean afterPartialFlatten) {
     List<CondorLeg> priced = input.getLegs();
-    java.math.BigDecimal credit = input.getCredit();
+    BigDecimal credit = input.getCredit();
     if (afterPartialFlatten) {
-      credit = java.math.BigDecimal.ZERO;
+      credit = BigDecimal.ZERO;
       List<HeldLeg> heldNow = readHeldLegs();
       if (heldNow != null) {
         List<String> held = heldNow.stream().map(HeldLeg::occSymbol).toList();
@@ -231,6 +255,8 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
               priced.stream().map(CondorLeg::occSymbol).toList()));
     }
 
+    // A forceClose/riskBreach arriving during this overnight wait is recorded but intentionally
+    // not acted on: the legs expired at 16:00 and only settlement remains to reconcile.
     Duration untilOpen = calendar.durationUntilNextRthOpenEt();
     Workflow.sleep(untilOpen.plus(RECONCILE_AFTER_OPEN));
     List<HeldLeg> held = readHeldLegs();
