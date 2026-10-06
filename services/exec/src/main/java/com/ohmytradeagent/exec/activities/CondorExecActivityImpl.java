@@ -14,6 +14,7 @@ import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
+import io.temporal.activity.Activity;
 import io.temporal.failure.ApplicationFailure;
 import java.time.Clock;
 import java.time.Duration;
@@ -60,7 +61,12 @@ public class CondorExecActivityImpl implements CondorExecActivity {
       OrderIntentJournal journal,
       BrokerClientRegistry registry,
       @Value("${temporal.task-queue:broker-alpaca-paper}") String taskQueue) {
-    this(journal, registry, taskQueue, Clock.systemUTC(), d -> Thread.sleep(d.toMillis()));
+    this(
+        journal,
+        registry,
+        taskQueue,
+        Clock.systemUTC(),
+        CondorExecActivityImpl::heartbeatThenSleep);
   }
 
   CondorExecActivityImpl(
@@ -75,6 +81,15 @@ public class CondorExecActivityImpl implements CondorExecActivity {
     this.clock = clock;
     this.sleeper = sleeper;
     this.walker = new MidWalkExecutor(journal, registry, clock, sleeper);
+  }
+
+  /**
+   * Every wait in the walk and the flatten heartbeats first, so the workflow's heartbeat timeout
+   * (#901) detects a dead worker within one rung instead of only at start-to-close.
+   */
+  private static void heartbeatThenSleep(Duration d) throws InterruptedException {
+    Activity.getExecutionContext().heartbeat(null);
+    Thread.sleep(d.toMillis());
   }
 
   @Override

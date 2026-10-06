@@ -1273,6 +1273,54 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void positionOrphanFilled_condorJournalRow_refusesAdoption_evenWithHoldGone() {
+    // #901: a condor wing whose hold has ENDED (not running) still has a condor- closing-leg
+    // journal row; recon must never adopt it (a lone wing in a PositionWorkflow may be flattened,
+    // leaving the paired short naked).
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(
+            List.of(
+                filledJournal("condor-dev-copytrade-v1-2026-10-05-x2", "2026-10-05", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    runWorkflow();
+
+    assertThat(captureKind("AutoAdoptRefusedCondorLeg").getSubject())
+        .containsEntry("source", "condor_journal_row");
+    assertThat(ADOPT_STARTED).isEmpty();
+    verify(metrics, never())
+        .recordAutoAdopt(anyString(), anyString(), anyString(), eq("initiated"));
+  }
+
+  @Test
+  void positionOrphanFilled_condorPosCacheOwner_refusesAdoption() {
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(positionLookup.isCondorLegOcc("dev", paddedOcc)).thenReturn(true);
+
+    runWorkflow();
+
+    assertThat(captureKind("AutoAdoptRefusedCondorLeg").getSubject())
+        .containsEntry("source", "condor_pos_cache");
+    assertThat(ADOPT_STARTED).isEmpty();
+  }
+
+  @Test
   void positionOrphanFilled_adoptionIdAlreadyRunning_precheckSkipsStart() {
     // A prior cycle already issued the adoption start and that adoption id is still RUNNING (the
     // in-flight window). The precheck must skip the duplicate start, emit no Initiated audit, and

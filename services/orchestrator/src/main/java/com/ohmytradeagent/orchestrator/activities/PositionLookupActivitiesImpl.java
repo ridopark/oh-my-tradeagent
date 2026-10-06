@@ -275,13 +275,23 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
 
   @Override
   public boolean hasRunningCondorOwnerForOcc(String tenantId, String occPadded) {
+    return condorOwnerOf(tenantId, occPadded, true);
+  }
+
+  @Override
+  public boolean isCondorLegOcc(String tenantId, String occPadded) {
+    return condorOwnerOf(tenantId, occPadded, false);
+  }
+
+  private boolean condorOwnerOf(String tenantId, String occPadded, boolean requireRunning) {
     try {
       ScanOptions opts =
           ScanOptions.scanOptions().match("pos:" + tenantId + ":*:" + occPadded).count(256).build();
       try (Cursor<String> cursor = redis.scan(opts)) {
         while (cursor.hasNext()) {
           String wfId = redis.opsForValue().get(cursor.next());
-          if (WorkflowIds.isCondorHold(wfId) && isPositionWorkflowRunning(wfId)) {
+          if (WorkflowIds.isCondorHold(wfId)
+              && (!requireRunning || isPositionWorkflowRunning(wfId))) {
             return true;
           }
         }
@@ -289,7 +299,7 @@ public class PositionLookupActivitiesImpl implements PositionLookupActivities {
       return false;
     } catch (RuntimeException e) {
       log.warn(
-          "hasRunningCondorOwnerForOcc best-effort probe failed tenant={} occ={} err={}",
+          "condor-owner best-effort probe failed tenant={} occ={} err={}",
           tenantId,
           occPadded,
           e.getMessage());

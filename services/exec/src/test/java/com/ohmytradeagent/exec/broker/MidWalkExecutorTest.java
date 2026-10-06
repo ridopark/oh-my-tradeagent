@@ -252,11 +252,114 @@ class MidWalkExecutorTest {
   }
 
   @Test
-  void alreadyJournaledTerminalRung_haltsWithoutPlacing() throws Exception {
-    // A re-run of the same attempt whose rung 0 already ended (CANCELLED) must never re-walk.
-    when(journal.recordComboIntent(any())).thenReturn(false);
+  void cleanCancelledRung_onReRun_advancesToTheNextRung() throws Exception {
     when(journal.findByIntentKey(key(0)))
         .thenReturn(Optional.of(row(key(0), OrderState.CANCELLED, "stub-x", "0.45")));
+    onRungWait =
+        i ->
+            broker.setAlreadyFilled(
+                boid(1), 1L, bd("-0.44"), OffsetDateTime.parse("2026-10-05T18:00:20Z"));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.44"), Duration.ofMinutes(10)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.FILLED);
+    assertThat(broker.placedMlegOrders())
+        .singleElement()
+        .satisfies(
+            p -> {
+              assertThat(p.clientOrderId()).isEqualTo(ClientOrderId.forIntent(key(1)));
+              assertThat(p.netCredit()).isEqualByComparingTo("0.44");
+            });
+  }
+
+  @Test
+  void retryPastDeadline_settlesSubmittedR1_butPlacesNothingNew() throws Exception {
+    // #901: the retry arrives after the walk deadline. r0 ended cancelled; r1 is still working at
+    // the broker. It must be settled (here: cancelled), and no new rung may be sent.
+    when(journal.findByIntentKey(key(0)))
+        .thenReturn(Optional.of(row(key(0), OrderState.CANCELLED, "stub-x", "0.45")));
+    broker.placeMlegOrder(mlegFor(key(1), "0.44"));
+    when(journal.findByIntentKey(key(1)))
+        .thenReturn(Optional.of(row(key(1), OrderState.SUBMITTED, boid(1), "0.44")));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.30"), Duration.ofSeconds(-1)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.ABANDONED);
+    assertThat(r.reason()).contains("deadline");
+    assertThat(broker.placedMlegOrders()).hasSize(1); // only the pre-existing r1
+    verify(journal).markCancelAttempted(key(1));
+    verify(journal).markCancelledIfSubmitted(key(1));
+    verify(journal, never()).recordComboIntent(any());
+  }
+
+  @Test
+  void retryAfterR2PlacementThrew_reSendsR2WithSameCidAtItsJournaledCredit() throws Exception {
+    // #901: r0/r1 cancelled cleanly, then r2's placement threw ambiguously (RECORDED, no id).
+    when(journal.findByIntentKey(key(0)))
+        .thenReturn(Optional.of(row(key(0), OrderState.CANCELLED, "stub-a", "0.45")));
+    when(journal.findByIntentKey(key(1)))
+        .thenReturn(Optional.of(row(key(1), OrderState.CANCELLED, "stub-b", "0.44")));
+    when(journal.findByIntentKey(key(2)))
+        .thenReturn(Optional.of(row(key(2), OrderState.RECORDED, null, "0.43")));
+    onRungWait =
+        i ->
+            broker.setAlreadyFilled(
+                boid(2), 1L, bd("-0.43"), OffsetDateTime.parse("2026-10-05T18:00:40Z"));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.42"), Duration.ofMinutes(10)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.FILLED);
+    assertThat(broker.placedMlegOrders())
+        .singleElement()
+        .satisfies(
+            p -> {
+              assertThat(p.clientOrderId()).isEqualTo(ClientOrderId.forIntent(key(2)));
+              assertThat(p.netCredit()).isEqualByComparingTo("0.43");
+            });
+    verify(journal).markSubmittedIfRecorded(key(2), boid(2));
+  }
+
+  @Test
+  void filledR1_onReRun_returnsFilled_soTheHoldStarts() throws Exception {
+    when(journal.findByIntentKey(key(0)))
+        .thenReturn(Optional.of(row(key(0), OrderState.CANCELLED, "stub-a", "0.45")));
+    when(journal.findByIntentKey(key(1)))
+        .thenReturn(Optional.of(filledRow(key(1), OrderState.FILLED, 1L, "-0.44")));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.44"), Duration.ofSeconds(-1)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.FILLED);
+    assertThat(r.filledQty()).isEqualTo(1L);
+    assertThat(r.avgFillCredit()).isEqualByComparingTo("0.44");
+    assertThat(broker.placedMlegOrders()).isEmpty();
+    verify(journal, never()).recordComboIntent(any());
+  }
+
+  @Test
+  void cancelledWithFillR0_onReRun_returnsPartial() throws Exception {
+    when(journal.findByIntentKey(key(0)))
+        .thenReturn(Optional.of(filledRow(key(0), OrderState.CANCELLED, 1L, "-0.45")));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.44"), Duration.ofMinutes(10)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.PARTIAL);
+    assertThat(broker.placedMlegOrders()).isEmpty();
+  }
+
+  @Test
+  void unconfirmedRecordedRungPastDeadline_haltsWithoutSending() throws Exception {
+    when(journal.findByIntentKey(key(0)))
+        .thenReturn(Optional.of(row(key(0), OrderState.RECORDED, null, "0.45")));
+
+    MidWalkExecutor.Result r = executor.execute(request(bd("0.44"), Duration.ofSeconds(-1)));
+
+    assertThat(r.outcome()).isEqualTo(Outcome.HALTED);
+    assertThat(broker.placedMlegOrders()).isEmpty();
+  }
+
+  @Test
+  void rungJournaledConcurrently_halts() throws Exception {
+    when(journal.recordComboIntent(any())).thenReturn(false);
 
     MidWalkExecutor.Result r = executor.execute(request(bd("0.44"), Duration.ofMinutes(10)));
 
@@ -268,7 +371,6 @@ class MidWalkExecutorTest {
   void recordedRungWithoutBrokerId_isRePlacedWithSameCid_thenMarkedSubmitted() throws Exception {
     // #897 blocker 1: the prior attempt's placement threw ambiguously — the broker may or may not
     // hold the order. The re-run re-sends the SAME client_order_id (idempotent) and tracks it.
-    when(journal.recordComboIntent(any())).thenReturn(false);
     when(journal.findByIntentKey(key(0)))
         .thenReturn(Optional.of(row(key(0), OrderState.RECORDED, null, "0.45")));
     fillAtRungWait(0, "0.45");
@@ -418,6 +520,44 @@ class MidWalkExecutorTest {
 
   private static String key(int step) {
     return "condor-staging_paper-gated_condor-2026-10-05-r" + step;
+  }
+
+  private static PlaceMlegOrderRequest mlegFor(String intentKey, String credit) {
+    return new PlaceMlegOrderRequest(
+        "staging_paper",
+        ClientOrderId.forIntent(intentKey),
+        1L,
+        bd(credit),
+        List.of(
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00573000", "SELL", 1L),
+            new PlaceMlegOrderRequest.Leg("XSP   261005P00570000", "BUY", 1L)));
+  }
+
+  private static JournaledOrder filledRow(
+      String intentKey, OrderState state, long filledQty, String avgFillPrice) {
+    JournaledOrder r = row(intentKey, state, "stub-f", "0.44");
+    return new JournaledOrder(
+        r.intentKey(),
+        r.signalId(),
+        r.tenantId(),
+        r.strategyId(),
+        r.brokerTarget(),
+        r.clientOrderId(),
+        r.optionSymbol(),
+        r.side(),
+        r.qty(),
+        r.limitPrice(),
+        r.state(),
+        r.brokerOrderId(),
+        null,
+        null,
+        null,
+        null,
+        null,
+        filledQty,
+        bd(avgFillPrice),
+        OffsetDateTime.parse("2026-10-05T18:00:15Z"),
+        0L);
   }
 
   private static JournaledOrder row(

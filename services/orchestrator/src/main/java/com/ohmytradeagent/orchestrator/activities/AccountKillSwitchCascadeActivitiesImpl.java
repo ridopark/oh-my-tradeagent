@@ -63,7 +63,10 @@ public class AccountKillSwitchCascadeActivitiesImpl implements AccountKillSwitch
       String query =
           "TenantStrategy='"
               + WorkflowIds.escapeForVisibilityQuery(WorkflowIds.tenantStrategy(tenantId, sid))
-              + "' AND WorkflowType='PositionWorkflow' AND ExecutionStatus='Running'";
+              // Gated-condor: the CondorHoldWorkflow owns its 4-leg combo outside PositionWorkflow;
+              // its riskBreach handler flattens it shorts-first, so the account cap reaches it too.
+              + "' AND WorkflowType IN ('PositionWorkflow','CondorHoldWorkflow')"
+              + " AND ExecutionStatus='Running'";
       try (Stream<WorkflowExecutionMetadata> stream = client.listExecutions(query)) {
         var it = stream.iterator();
         while (it.hasNext()) {

@@ -34,6 +34,18 @@ class CondorDayActivitiesImplTest {
   }
 
   @Test
+  void missingCalendar_failsTheCall_notConstruction() {
+    // #901: a missing file must fail only the condor session's activity, never crash-loop the
+    // orchestrator at bean construction.
+    CondorDayActivitiesImpl missing = new CondorDayActivitiesImpl("/no-such-fomc-dates.txt");
+
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> missing.eventSkipReason(LocalDate.of(2026, 10, 5), true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("missing");
+  }
+
+  @Test
   void fridayJuly3_isTheObservedHoliday_notAHalfDay() {
     assertThat(CondorDayActivitiesImpl.isHalfDay(LocalDate.of(2026, 7, 3))).isFalse();
     assertThat(CondorDayActivitiesImpl.isHalfDay(LocalDate.of(2026, 11, 26))).isFalse();

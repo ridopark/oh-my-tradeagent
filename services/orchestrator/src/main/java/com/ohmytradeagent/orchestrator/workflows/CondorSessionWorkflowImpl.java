@@ -329,6 +329,9 @@ public class CondorSessionWorkflowImpl implements CondorSessionWorkflow {
             .setTaskQueue(ExecActivitiesFactory.taskQueueFor(brokerTarget))
             .setStartToCloseTimeout(Duration.ofMinutes(4))
             .setScheduleToCloseTimeout(Duration.ofMinutes(10))
+            // The walk heartbeats on every wait (each <= one 10s rung): a dead worker is detected
+            // in ~30s and the retry resumes the journaled rungs.
+            .setHeartbeatTimeout(Duration.ofSeconds(30))
             .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(3).build())
             .build());
   }

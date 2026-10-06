@@ -81,6 +81,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // expired contract has been dropped by the broker; adopting it would spawn a PositionWorkflow
   // that lingers open (no buyer for a worthless contract) and gets re-adopted every cycle.
   private static final String KIND_AUTO_ADOPT_REFUSED_EXPIRED = "AutoAdoptRefusedExpired";
+  // Gated-condor (#901): auto-adopt refused because the OCC is a leg of a condor combo.
+  private static final String KIND_AUTO_ADOPT_REFUSED_CONDOR = "AutoAdoptRefusedCondorLeg";
   // Cross-strategy recon-orphan suppression: a PositionOrphan(missing) page was suppressed because
   // a
   // running sibling-strategy PositionWorkflow on the shared broker account fully covers the broker
@@ -135,6 +137,13 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    * missing-visibility-fallback). Read ONCE outside the position loop.
    */
   private static final String VERSION_PARTIAL_COVERAGE = "recon-partial-coverage-v1";
+
+  /**
+   * Gated-condor Phase 4 (#901): gates the two condor-ownership probes (missing-branch suppression
+   * and the auto-adopt refusal) — each is a NEW activity command, so a recon run in flight across
+   * the deploy roll must replay its pre-change history without them. Read once outside the loop.
+   */
+  static final String VERSION_CONDOR_OWNER = "recon-condor-owner-v1";
 
   /** Hard expiry-session close in America/New_York (16:00 ET); past this a 0DTE OCC is done. */
   private static final LocalTime ET_MARKET_CLOSE = LocalTime.of(16, 0);
@@ -347,6 +356,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // #817: read ONCE outside the loop (command-stream determinism regardless of position count).
     int partialCoverageVersion =
         Workflow.getVersion(VERSION_PARTIAL_COVERAGE, Workflow.DEFAULT_VERSION, 1);
+    int condorOwnerVersion = Workflow.getVersion(VERSION_CONDOR_OWNER, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -366,8 +376,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // never page it, and above all never auto-adopt one wing of a live defined-risk combo
         // (adoption would hand a lone leg to a PositionWorkflow that may flatten it and leave the
         // paired short naked). Short legs never reach recon at all: listOpenPositions is
-        // long-only by contract. No getVersion marker: recon runs are short-lived per schedule.
-        if (positionLookup.hasRunningCondorOwnerForOcc(in.getTenantId(), occPadded)) {
+        // long-only by contract. Gated (VERSION_CONDOR_OWNER): a new activity command.
+        if (condorOwnerVersion >= 1
+            && positionLookup.hasRunningCondorOwnerForOcc(in.getTenantId(), occPadded)) {
           auditLog(
               KIND_POSITION_ORPHAN_SUPPRESSED_SIBLING,
               subject(
@@ -524,7 +535,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // the two markers used at this call site — missingVisibilityFallback and
         // refuseExpiredSameday
         // (Phase 3 refuse-expired-sameday) — are read ONCE outside the loop and passed in.
-        maybeAutoAdopt(in, brokerTarget, p, occ, brokerOpen, refuseExpiredSameday);
+        maybeAutoAdopt(
+            in, brokerTarget, p, occ, brokerOpen, refuseExpiredSameday, filled, condorOwnerVersion);
       }
     }
 
@@ -778,9 +790,31 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       BrokerPosition p,
       String occ,
       List<BrokerOpenOrder> brokerOpen,
-      int refuseExpiredSameday) {
+      int refuseExpiredSameday,
+      List<JournalEntry> filled,
+      int condorOwnerVersion) {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
+
+    // Gated-condor (#901): never adopt a leg of a condor combo, whether or not its hold is still
+    // running — adoption hands one wing to a PositionWorkflow that may flatten it and leave the
+    // paired short naked. Two signals: a condor- journal row for this OCC (the hold's closing legs)
+    // or a pos:* key pointing at a CondorHoldWorkflow (seeded per leg at hold start).
+    if (condorOwnerVersion >= 1) {
+      boolean condorJournalRow =
+          filled.stream()
+              .anyMatch(e -> e.getIntentKey() != null && e.getIntentKey().startsWith("condor-"));
+      if (condorJournalRow
+          || positionLookup.isCondorLegOcc(in.getTenantId(), OccSymbol.padded(occ))) {
+        auditLog(
+            KIND_AUTO_ADOPT_REFUSED_CONDOR,
+            subject(
+                "option_symbol", p.getOptionSymbol(),
+                "qty", p.getQty(),
+                "source", condorJournalRow ? "condor_journal_row" : "condor_pos_cache"));
+        return;
+      }
+    }
 
     // Issue #434 + Phase 3 (PLAN-2026-07-12, B2): refuse to adopt an OCC whose expiry has
     // physically

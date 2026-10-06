@@ -417,6 +417,8 @@ public final class AuditEventKinds {
           "CondorFlattenIncomplete",
           "CondorSettled",
           "CondorSettleMismatch",
+          // ReconciliationWorkflowImpl: auto-adopt refused because the OCC is a condor leg.
+          "AutoAdoptRefusedCondorLeg",
           // ReconciliationWorkflowImpl
           "ReconciliationStarted",
           "ReconciliationCompleted",

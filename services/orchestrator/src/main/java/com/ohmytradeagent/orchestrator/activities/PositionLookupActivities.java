@@ -112,6 +112,13 @@ public interface PositionLookupActivities {
   boolean hasRunningCondorOwnerForOcc(String tenantId, String occPadded);
 
   /**
+   * Gated-condor (#901): true iff any {@code pos:<tenant>:*:<occPadded>} key points at a {@code
+   * CondorHoldWorkflow} id, RUNNING OR NOT — the auto-adopt refusal must hold after the hold ends.
+   * BEST-EFFORT: any error returns false.
+   */
+  boolean isCondorLegOcc(String tenantId, String occPadded);
+
+  /**
    * Phase F2b: ACCOUNT-scoped (cross-TENANT) sibling-owner probe. {@link #hasRunningOwnerForOcc}
    * above is TENANT-scoped, so a broker-held OCC managed by a running {@code PositionWorkflow}
    * under a DIFFERENT tenant that shares the SAME broker account (e.g. dev + prod_real both pointed

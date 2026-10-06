@@ -3,7 +3,6 @@ package com.ohmytradeagent.exec.broker;
 import com.ohmytradeagent.exec.journal.ComboIntent;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
-import com.ohmytradeagent.exec.journal.OrderState;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
@@ -31,11 +30,13 @@ import java.util.Optional;
  * confirmed by a fresh {@link OptionsBroker#getOrderStatus} read, permits the next rung. A partial
  * fill on a cancelled rung stops the walk: the remainder is never re-sent.
  *
- * <p>Re-run of the same attempt (an activity retry, #897 blocker 1): a rung already journaled
- * RECORDED with no broker order id — the placement threw ambiguously — is re-placed with the SAME
- * client_order_id (the broker's duplicate-cid handling resolves it to the prior order, never a
- * second one); a SUBMITTED rung is settled where it stands; any other state halts without placing.
- * So no path double-sends and no placed rung is left untracked.
+ * <p>Re-run of the same attempt (an activity retry, #897/#901): every rung already journaled is
+ * resolved first, in order — RECORDED without a broker order id (the placement threw ambiguously)
+ * is re-sent with the SAME client_order_id (the broker's duplicate-cid handling resolves it to the
+ * prior order, never a second one) and then worked; SUBMITTED is settled (cancelled if still open);
+ * a clean CANCELLED advances; FILLED / cancelled-with-fill return FILLED / PARTIAL so the hold
+ * starts. Past the deadline nothing is (re-)sent, old rungs are still settled, and anything that
+ * cannot be resolved HALTS (pages). So no path double-sends and no placed rung is left untracked.
  *
  * <p>Paper-only (#897 blocker 2): the broker is resolved FROM {@code brokerTarget} through the
  * {@link BrokerClientRegistry} — never handed in independently — and a non-{@code -paper} target is
@@ -145,7 +146,78 @@ public final class MidWalkExecutor {
     BigDecimal floor = req.modelCredit().subtract(minModelCredit);
     BigDecimal price = roundToTick(netMid, req.tick());
     List<Rung> ladder = new ArrayList<>();
-    for (int step = 0; ; step++) {
+    int step = 0;
+
+    // Recovery (#897 / #901): a re-run of this attempt first walks the rungs it already journaled,
+    // r0..rN until the first absent one, and resolves each BEFORE the floor/deadline checks — so a
+    // retry past the deadline still settles (or cancels) what an earlier attempt left at the
+    // broker, and a rung that filled hands back FILLED so the hold starts.
+    for (Optional<JournaledOrder> prior = journal.findByIntentKey(rungIntentKey(req, step));
+        prior.isPresent();
+        prior = journal.findByIntentKey(rungIntentKey(req, step))) {
+      JournaledOrder row = prior.get();
+      String intentKey = row.intentKey();
+      BigDecimal rowPrice = row.limitPrice();
+      Settled s;
+      switch (row.state()) {
+        case FILLED ->
+            s =
+                row.filledQty() == null || row.avgFillPrice() == null
+                    ? new Settled(
+                        "FILLED", null, false, "filled rung without fill detail: " + intentKey)
+                    : new Settled(
+                        "FILLED",
+                        new BrokerFillDetail(row.filledQty(), row.avgFillPrice(), row.filledAt()),
+                        false,
+                        null);
+        case CANCELLED ->
+            s =
+                row.filledQty() != null && row.filledQty() > 0
+                    ? new Settled(
+                        "PARTIAL",
+                        new BrokerFillDetail(row.filledQty(), row.avgFillPrice(), row.filledAt()),
+                        true,
+                        null)
+                    : new Settled("CANCELLED", null, false, null);
+        case SUBMITTED -> {
+          if (row.brokerOrderId() == null) {
+            s = new Settled("SUBMITTED", null, false, "submitted rung without broker id");
+          } else {
+            s = settle(broker, intentKey, row.brokerOrderId());
+          }
+        }
+        case RECORDED -> {
+          if (row.brokerOrderId() != null) {
+            s = settle(broker, intentKey, row.brokerOrderId());
+          } else if (!clock.instant().isBefore(req.deadline())) {
+            // Past the deadline nothing may be (re-)sent, and an unconfirmed placement cannot be
+            // proven absent from the broker without one — page.
+            s =
+                new Settled(
+                    "RECORDED", null, false, "unconfirmed rung past deadline: " + intentKey);
+          } else {
+            // The prior placement never confirmed: re-send the SAME client_order_id at the SAME
+            // journaled credit (idempotent at the broker), then work it like a fresh rung.
+            String brokerOrderId =
+                place(broker, req, intentKey, ClientOrderId.forIntent(intentKey), rowPrice);
+            sleeper.sleep(RUNG_WAIT);
+            s = settle(broker, intentKey, brokerOrderId);
+          }
+        }
+        default -> s = new Settled(row.state().name(), null, false, "rung " + row.state());
+      }
+      ladder.add(new Rung(step, intentKey, row.clientOrderId(), rowPrice, s.result()));
+      if (s.fill() != null) {
+        return filled(s, intentKey, netMid, ladder);
+      }
+      if (s.haltReason() != null) {
+        return end(Outcome.HALTED, netMid, ladder, s.haltReason());
+      }
+      price = rowPrice.subtract(req.tick());
+      step++;
+    }
+
+    for (; ; step++) {
       if (price.compareTo(floor) < 0) {
         return end(Outcome.ABANDONED, netMid, ladder, "below_floor: next " + price + " < " + floor);
       }
@@ -154,32 +226,11 @@ public final class MidWalkExecutor {
       }
       String intentKey = rungIntentKey(req, step);
       String clientOrderId = ClientOrderId.forIntent(intentKey);
-      String brokerOrderId;
-      if (journal.recordComboIntent(combo(req, intentKey, price))) {
-        brokerOrderId = place(broker, req, intentKey, clientOrderId, price);
-      } else {
-        Optional<JournaledOrder> prior = journal.findByIntentKey(intentKey);
-        if (prior.isPresent()
-            && prior.get().state() == OrderState.RECORDED
-            && prior.get().brokerOrderId() == null) {
-          // The prior attempt journaled this rung but its placement never confirmed: re-send the
-          // SAME client_order_id at the SAME journaled credit (idempotent at the broker).
-          brokerOrderId = place(broker, req, intentKey, clientOrderId, prior.get().limitPrice());
-        } else if (prior.isPresent()
-            && prior.get().state() == OrderState.SUBMITTED
-            && prior.get().brokerOrderId() != null) {
-          brokerOrderId = prior.get().brokerOrderId();
-        } else {
-          return end(
-              Outcome.HALTED,
-              netMid,
-              ladder,
-              "rung already journaled: "
-                  + intentKey
-                  + " state="
-                  + prior.map(JournaledOrder::state).orElse(null));
-        }
+      if (!journal.recordComboIntent(combo(req, intentKey, price))) {
+        // Absent a moment ago, present now: a concurrent attempt is walking this ladder.
+        return end(Outcome.HALTED, netMid, ladder, "rung journaled concurrently: " + intentKey);
       }
+      String brokerOrderId = place(broker, req, intentKey, clientOrderId, price);
       sleeper.sleep(RUNG_WAIT);
 
       Settled s = settle(broker, intentKey, brokerOrderId);

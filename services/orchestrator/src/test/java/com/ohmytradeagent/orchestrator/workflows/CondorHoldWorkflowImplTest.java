@@ -246,7 +246,42 @@ class CondorHoldWorkflowImplTest {
     assertThat(onlyAudit("CondorFlattenIncomplete").getSubject())
         .containsEntry("shorts_covered", false)
         .containsEntry("longs_closed", false);
-    verify(condorExec).heldCondorLegs(any(), any(), any());
+    // Once to price the remainder at 16:15, once for the next-open reconciliation.
+    verify(condorExec, Mockito.times(2)).heldCondorLegs(any(), any(), any());
+  }
+
+  @Test
+  void partialFlatten_settlementPricesOnlyTheLegsStillHeld() {
+    // Shorts not confirmed covered → wings left in place. At 16:15 the broker holds only the two
+    // long wings; with spot 610 the long 604C is worth 6, so the remainder settles +$600 — NOT the
+    // full-combo −$190 that pricing all four legs would report.
+    when(condorExec.flattenCondor(any()))
+        .thenReturn(new CondorFlattenResult(false, false, "short cover not confirmed filled"));
+    when(condorExec.heldCondorLegs(any(), any(), any()))
+        .thenReturn(
+            List.of(
+                new HeldLeg("XSP   261005C00604000", 1L), new HeldLeg("XSP   261005P00596000", 1L)))
+        .thenReturn(List.of());
+    when(market.settlementSpot("XSP")).thenReturn(610.0);
+    CondorHoldWorkflow wf = stub();
+    WorkflowClient.start(wf::run, input());
+    wf.forceClose("operator:alice");
+
+    WorkflowStub.fromTyped(wf).getResult(String.class);
+
+    Map<String, Object> s = onlyAudit("CondorSettled").getSubject();
+    assertThat(s).containsEntry("partial", true);
+    assertThat(new BigDecimal(s.get("expected_pnl").toString())).isEqualByComparingTo("600.00");
+  }
+
+  @Test
+  void cacheSeedFailure_neverBlocksTheHold() {
+    Mockito.doThrow(new RuntimeException("redis down"))
+        .when(positionLookup)
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+
+    assertThat(runToCompletion()).isEqualTo("settled");
   }
 
   @Test

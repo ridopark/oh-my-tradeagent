@@ -63,8 +63,15 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
   private final MarketCalendarActivities calendar =
       Workflow.newActivityStub(MarketCalendarActivities.class, DEFAULT_OPTIONS);
+  // Best-effort (#901): the recon cache seed must never block or fail the hold — one short attempt,
+  // failure logged and ignored (mirrors the watchlist cacheArmedLeg contract).
   private final PositionLookupActivities positionLookup =
-      Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
+      Workflow.newActivityStub(
+          PositionLookupActivities.class,
+          ActivityOptions.newBuilder()
+              .setStartToCloseTimeout(Duration.ofSeconds(2))
+              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+              .build());
   private final CondorMarketActivity market =
       Workflow.newActivityStub(
           CondorMarketActivity.class,
@@ -90,8 +97,13 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     this.input = in;
     String self = Workflow.getInfo().getWorkflowId();
     for (CondorLeg leg : in.getLegs()) {
-      positionLookup.cachePositionMapping(
-          in.getTenantId(), in.getStrategyId(), leg.occSymbol(), self);
+      try {
+        positionLookup.cachePositionMapping(
+            in.getTenantId(), in.getStrategyId(), leg.occSymbol(), self);
+      } catch (ActivityFailure e) {
+        Workflow.getLogger(CondorHoldWorkflowImpl.class)
+            .warn("condor pos cache seed failed occ={} err={}", leg.occSymbol(), e.getMessage());
+      }
     }
 
     Duration untilSettle = calendar.durationUntilEodCloseEt(SETTLE_CHECK_ET);
@@ -105,7 +117,7 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     if (exitRequested && flatten()) {
       return "flattened:" + exitReason;
     }
-    return settle();
+    return settle(exitRequested);
   }
 
   @Override
@@ -154,22 +166,46 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     return r.shortsCovered() && r.longsClosed();
   }
 
-  private String settle() {
+  /**
+   * @param afterPartialFlatten a flatten closed only some legs: price only the legs the broker
+   *     still holds, with no credit (the entry credit and the closing fills are booked separately),
+   *     so {@code expected_pnl} is the settlement cash of the remainder.
+   */
+  private String settle(boolean afterPartialFlatten) {
+    List<CondorLeg> priced = input.getLegs();
+    java.math.BigDecimal credit = input.getCredit();
+    if (afterPartialFlatten) {
+      List<String> held =
+          condorExec().heldCondorLegs(input.getTenantId(), input.getBrokerTarget(), occs()).stream()
+              .map(HeldLeg::occSymbol)
+              .toList();
+      priced = input.getLegs().stream().filter(l -> held.contains(l.occSymbol())).toList();
+      credit = java.math.BigDecimal.ZERO;
+    }
     Double spot = market.settlementSpot(input.getUnderlying());
     if (spot == null) {
       logAudit(KIND_SETTLE_MISMATCH, subject("reason", "settlement_spot_unavailable"));
     } else {
-      CondorSettlement.Result s =
-          CondorSettlement.settle(input.getLegs(), input.getCredit(), input.getQty(), spot);
+      CondorSettlement.Result s = CondorSettlement.settle(priced, credit, input.getQty(), spot);
       logAudit(
           KIND_SETTLED,
           subject(
-              "settlement_spot", spot,
-              "credit", input.getCredit(),
-              "settlement_debit", s.debit(),
-              "expected_pnl", s.pnl(),
-              "outcome", s.itm() ? "ITM" : "OTM",
-              "qty", input.getQty()));
+              "settlement_spot",
+              spot,
+              "credit",
+              credit,
+              "settlement_debit",
+              s.debit(),
+              "expected_pnl",
+              s.pnl(),
+              "outcome",
+              s.itm() ? "ITM" : "OTM",
+              "qty",
+              input.getQty(),
+              "partial",
+              afterPartialFlatten,
+              "legs_priced",
+              priced.stream().map(CondorLeg::occSymbol).toList()));
     }
 
     Duration untilOpen = calendar.durationUntilNextRthOpenEt();
@@ -196,6 +232,7 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
         ActivityOptions.newBuilder()
             .setTaskQueue(ExecActivitiesFactory.taskQueueFor(input.getBrokerTarget()))
             .setStartToCloseTimeout(Duration.ofMinutes(1))
+            .setHeartbeatTimeout(Duration.ofSeconds(30))
             .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(5).build())
             .build());
   }

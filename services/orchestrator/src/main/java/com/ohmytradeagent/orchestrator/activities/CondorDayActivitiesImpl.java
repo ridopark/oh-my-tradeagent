@@ -10,31 +10,46 @@ import java.time.Month;
 import java.time.temporal.TemporalAdjusters;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
  * Reads the FOMC statement-day calendar from the classpath resource {@value #FOMC_RESOURCE} — the
  * SAME file the research and scripts use ({@code scripts/data/fomc-dates.txt}, packaged into the
- * orchestrator jar by its pom, so there is one copy to maintain). Fail-closed: a missing or
- * unreadable file throws at construction, so the orchestrator cannot silently trade FOMC days.
+ * orchestrator jar by its pom, so there is one copy to maintain). Fail-closed but contained (#901):
+ * a missing or unreadable file throws from {@link #eventSkipReason}, failing only the condor
+ * session's day — never bean construction, which would crash-loop the whole orchestrator.
  */
 @Component
 public class CondorDayActivitiesImpl implements CondorDayActivities {
 
   static final String FOMC_RESOURCE = "/fomc-dates.txt";
 
-  private final Set<LocalDate> fomcDays;
+  private final String resource;
+  private volatile Set<LocalDate> fomcDays;
 
+  @Autowired
   public CondorDayActivitiesImpl() {
-    this.fomcDays = loadFomcDays();
+    this(FOMC_RESOURCE);
+  }
+
+  CondorDayActivitiesImpl(String resource) {
+    this.resource = resource;
   }
 
   @Override
   public String eventSkipReason(LocalDate etDate, boolean skipEventDays) {
+    Set<LocalDate> fomc = fomcDays;
+    if (fomc == null) {
+      // Loaded on every call until it succeeds; read before the half-day check so a missing file
+      // is surfaced on the first session rather than hidden behind a half-day skip.
+      fomc = loadFomcDays(resource);
+      fomcDays = fomc;
+    }
     if (isHalfDay(etDate)) {
       return "half_day";
     }
-    if (skipEventDays && fomcDays.contains(etDate)) {
+    if (skipEventDays && fomc.contains(etDate)) {
       return "fomc";
     }
     return null;
@@ -59,10 +74,10 @@ public class CondorDayActivitiesImpl implements CondorDayActivities {
             || (d.getMonth() == Month.JULY && d.getDayOfMonth() == 3));
   }
 
-  static Set<LocalDate> loadFomcDays() {
-    try (InputStream in = CondorDayActivitiesImpl.class.getResourceAsStream(FOMC_RESOURCE)) {
+  static Set<LocalDate> loadFomcDays(String resource) {
+    try (InputStream in = CondorDayActivitiesImpl.class.getResourceAsStream(resource)) {
       if (in == null) {
-        throw new IllegalStateException("classpath resource " + FOMC_RESOURCE + " is missing");
+        throw new IllegalStateException("classpath resource " + resource + " is missing");
       }
       return new String(in.readAllBytes(), StandardCharsets.UTF_8)
           .lines()
