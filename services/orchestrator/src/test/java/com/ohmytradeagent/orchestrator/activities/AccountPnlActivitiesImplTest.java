@@ -253,19 +253,26 @@ class AccountPnlActivitiesImplTest {
     assertThat(activities.accountOpenBook("dev").condorMaxLoss()).isEqualByComparingTo("0");
   }
 
-  // Fail-closed (same discipline as a Visibility error): an unreadable condor start input
-  // propagates rather than being silently charged nothing.
+  // #899 round 2: an unreadable hold (history read failure, or a malformed input) is COUNTED as a
+  // condor read failure — never thrown, which would disarm the whole shared cap — and the readable
+  // holds are still charged.
   @Test
-  void accountOpenBook_condorHistoryReadFailure_propagates() {
+  void accountOpenBook_unreadableCondorHolds_countedNotThrown_restCharged() {
     activities = forStrategies(List.of("condor-v1"));
     when(client.listExecutions(contains(POSITION_QUERY))).thenAnswer(inv -> Stream.empty());
     when(client.listExecutions(contains(CONDOR_QUERY)))
-        .thenAnswer(inv -> Stream.of(metadata("hold-a")));
-    when(client.fetchHistory("hold-a")).thenThrow(new RuntimeException("history unavailable"));
+        .thenAnswer(
+            inv -> Stream.of(metadata("hold-ok"), metadata("hold-gone"), metadata("hold-bad")));
+    stubCondorHold("hold-ok", condorInput(596, 599, 601, 604, "0.80", 2L));
+    when(client.fetchHistory("hold-gone")).thenThrow(new RuntimeException("history unavailable"));
+    CondorHoldWorkflowInput threeLegs = condorInput(596, 599, 601, 604, "0.80", 1L);
+    threeLegs.setLegs(threeLegs.getLegs().subList(0, 3));
+    stubCondorHold("hold-bad", threeLegs);
 
-    assertThatThrownBy(() -> activities.accountOpenBook("dev"))
-        .isInstanceOf(RuntimeException.class)
-        .hasMessageContaining("history unavailable");
+    AccountOpenBook book = activities.accountOpenBook("dev");
+
+    assertThat(book.condorMaxLoss()).isEqualByComparingTo("440");
+    assertThat(book.condorReadFailures()).isEqualTo(2);
   }
 
   // ----- helpers (mirror VisibilityPortfolioSnapshotTest) -----

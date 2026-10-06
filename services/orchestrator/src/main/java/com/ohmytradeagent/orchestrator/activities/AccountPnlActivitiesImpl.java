@@ -158,21 +158,27 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
         }
       }
     }
+    CondorCharge condors = condorMaxLoss(tenantId, strategyIds);
     return new AccountOpenBook(
-        positions, listed, valueFailures, condorMaxLoss(tenantId, strategyIds));
+        positions, listed, valueFailures, condors.maxLoss(), condors.readFailures());
   }
+
+  private record CondorCharge(BigDecimal maxLoss, int readFailures) {}
 
   /**
    * #899: sums the defined max loss of every Running {@code CondorHoldWorkflow} on the tenant's
    * strategies, read from each hold's recorded start input (legs, credit, qty) — version-agnostic,
    * so it works against holds started by any worker build and needs no query handler. A hold is
    * charged for as long as it runs, including its post-settlement wait for the next open
-   * (conservative). A history read or decode failure PROPAGATES (fail-closed, like a Visibility
-   * error) rather than charging the condor nothing.
+   * (conservative). A hold whose history cannot be read or whose input is not a valid condor is
+   * COUNTED, not thrown: a throw here would disarm the whole shared cap every heartbeat, while a
+   * count lets the workflow fail-close it through the existing MTM debounce. A Visibility error
+   * still propagates.
    */
-  private BigDecimal condorMaxLoss(String tenantId, Set<String> strategyIds) {
+  private CondorCharge condorMaxLoss(String tenantId, Set<String> strategyIds) {
     DataConverter converter = client.getOptions().getDataConverter();
     BigDecimal total = BigDecimal.ZERO;
+    int readFailures = 0;
     Set<String> seen = new LinkedHashSet<>();
     for (String sid : strategyIds) {
       String query =
@@ -186,24 +192,34 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
           if (!seen.add(wfId)) {
             continue;
           }
-          Payloads startInput =
-              client
-                  .fetchHistory(wfId)
-                  .getEvents()
-                  .get(0)
-                  .getWorkflowExecutionStartedEventAttributes()
-                  .getInput();
-          CondorHoldWorkflowInput in =
-              converter.fromPayloads(
-                  0,
-                  Optional.of(startInput),
-                  CondorHoldWorkflowInput.class,
-                  CondorHoldWorkflowInput.class);
-          total = total.add(CondorSettlement.maxLoss(in.getLegs(), in.getCredit(), in.getQty()));
+          try {
+            Payloads startInput =
+                client
+                    .fetchHistory(wfId)
+                    .getEvents()
+                    .get(0)
+                    .getWorkflowExecutionStartedEventAttributes()
+                    .getInput();
+            CondorHoldWorkflowInput in =
+                converter.fromPayloads(
+                    0,
+                    Optional.of(startInput),
+                    CondorHoldWorkflowInput.class,
+                    CondorHoldWorkflowInput.class);
+            total = total.add(CondorSettlement.maxLoss(in.getLegs(), in.getCredit(), in.getQty()));
+          } catch (RuntimeException e) {
+            readFailures++;
+            log.warn(
+                "condor hold max-loss read failed wf={} tenant={} strategy={} err={}",
+                wfId,
+                tenantId,
+                sid,
+                e.getMessage());
+          }
         }
       }
     }
-    return total;
+    return new CondorCharge(total, readFailures);
   }
 
   /**

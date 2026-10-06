@@ -299,7 +299,7 @@ class AccountKillSwitchWorkflowImplTest {
   @Test
   void heartbeat_condorMaxLossCrossesThreshold_tripsDailyLoss() {
     when(accountPnl.accountOpenBook(anyString()))
-        .thenReturn(new AccountOpenBook(List.of(), 0, 0, new BigDecimal("6000")));
+        .thenReturn(new AccountOpenBook(List.of(), 0, 0, new BigDecimal("6000"), 0));
 
     AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-trip");
     WorkflowStub.fromTyped(stub).start(input());
@@ -324,7 +324,8 @@ class AccountKillSwitchWorkflowImplTest {
                     new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
                 1,
                 0,
-                new BigDecimal("440")));
+                new BigDecimal("440"),
+                0));
     when(optionQuote.getOptionQuote(any()))
         .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.50")));
 
@@ -335,6 +336,86 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isFalse();
     assertThat(s.getOpenMtm()).isEqualByComparingTo("-690");
+  }
+
+  // #899 round 2: an unreadable condor hold is a valuation failure, NOT a thrown heartbeat. On a
+  // condor-only book it takes the existing MTM debounce: a deferred page, then a fail-closed trip.
+  @Test
+  void heartbeat_unreadableCondorHold_debouncesThenFailsClosed_neverThrows() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(new AccountOpenBook(List.of(), 0, 0, BigDecimal.ZERO, 1));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-unreadable");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+
+    env.sleep(Duration.ofSeconds(60));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+    assertThat(countKind("KillSwitchHeartbeatError")).isEqualTo(0L);
+  }
+
+  // #899 round 2: at v>=1 a null condorMaxLoss (an OLD pod answered accountOpenBook mid-roll)
+  // takes the same debounce path rather than silently charging nothing.
+  @Test
+  void heartbeat_nullCondorMaxLossAtV1_debouncesThenFailsClosed() {
+    AccountKillSwitchWorkflowImpl.MTM_UNAVAILABLE_TRIP_TICKS = 2;
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(new AccountOpenBook(List.of(), 0, 0, null, 0));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-null");
+    WorkflowStub.fromTyped(stub).start(input());
+
+    env.sleep(Duration.ofSeconds(75));
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("AccountKillSwitchMtmDeferred")).isEqualTo(1L);
+
+    env.sleep(Duration.ofSeconds(60));
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_mtm_unavailable");
+    assertThat(countKind("KillSwitchHeartbeatError")).isEqualTo(0L);
+  }
+
+  // #899 round 2: one unreadable hold among a larger priced mirror book stays under the fail-close
+  // bound (1 of 4), so the cap stays ARMED and still trips on the mirror's real loss.
+  @Test
+  void heartbeat_unreadableCondorHold_largeBook_mirrorLossStillTrips() {
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation(
+                        "NVDA  261218C00140000", new BigDecimal("10.00"), 10L),
+                    new OpenPositionValuation(
+                        "TSLA  261218C00300000", new BigDecimal("10.00"), 10L),
+                    new OpenPositionValuation(
+                        "AAPL  261218C00200000", new BigDecimal("10.00"), 10L)),
+                3,
+                0,
+                BigDecimal.ZERO,
+                1));
+    // Each lot (2.00 - 10.00) x 10 x 100 = -8000 => -24000 < -5000.
+    when(optionQuote.getOptionQuote(quoteFor("NVDA  261218C00140000")))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("TSLA  261218C00300000")))
+        .thenReturn(okQuote("TSLA  261218C00300000", new BigDecimal("2.00")));
+    when(optionQuote.getOptionQuote(quoteFor("AAPL  261218C00200000")))
+        .thenReturn(okQuote("AAPL  261218C00200000", new BigDecimal("2.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-unreadable-large");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    assertThat(s.getOpenPositions()).isEqualTo(4L);
   }
 
   // Unset threshold => cap inert: even a massive loss does not trip (and PnL is never computed).

@@ -28,15 +28,19 @@ import java.util.List;
  *     {@code CondorHoldWorkflow}s, charged to the open MTM in full — a short combo's worst case is
  *     known at entry, so it needs no quote and cannot move with a wide book. Not counted in {@code
  *     listed}. Null in a result recorded before the field existed.
+ * @param condorReadFailures Running holds whose start input could not be read or is not a valid
+ *     condor; charged nothing here — the workflow folds each one into the fail-close bound as a
+ *     listed position that failed to value.
  */
 public record AccountOpenBook(
     List<OpenPositionValuation> positions,
     int listed,
     int valueFailures,
-    BigDecimal condorMaxLoss) {
+    BigDecimal condorMaxLoss,
+    int condorReadFailures) {
 
   public AccountOpenBook(List<OpenPositionValuation> positions, int listed, int valueFailures) {
-    this(positions, listed, valueFailures, BigDecimal.ZERO);
+    this(positions, listed, valueFailures, BigDecimal.ZERO, 0);
   }
 
   /**
