@@ -13,7 +13,7 @@ richness gate, M3 defined risk, M6 hold-to-settle. Known risk edge (U3): gated F
 median (richness = straddle ÷ (0.7979 · σ₁ₘᵢₙ(09:30→14:00) · √(minutes to close) · spot)): sell an
 XSP iron condor — shorts at ±0.15% from spot, wings at ±0.60% (nearest $1 XSP strikes) — as ONE
 4-leg net-credit order, hold to cash settlement. No stops, no targets, no premium exits. Max risk
-per trade = width − credit, known at entry. Trades ~40% of days (~2/week).
+per trade = width − credit, known at entry. Trades ~40% of days (~2/week). Runs as a standalone strategy row (`gated_condor`) on the `staging_paper` tenant — all behavior keys off per-strategy config, nothing tenant-specific in code.
 
 **Why XSP:** cash-settled (SPY/QQQ physical settlement + Alpaca's 15:30 expiry-day handling make
 the measured edge untradeable there), $0 exchange fee under 10 contracts, $1 strikes. Alpaca has
@@ -29,15 +29,27 @@ content of its Phase 6 moves here (Phase 3).
 - **Deploy `scripts/data/option_quote_collector.py` on the homelab now** (crontab `@reboot` or a
   k8s Deployment; a session cron dies with the session — `reference_prod_real_monitoring`). Every
   market day not collected is unrecoverable NBBO history (feeds U5/U6 and the fill model).
-- Verify the paper account's **index-option entitlement for XSP** (read-only probe: fetch an XSP
-  0DTE snapshot with the trade keys; index options are live on Alpaca paper since 2026-07-23).
-- Create paper tenant `paper_condor` (NOT `staging_paper` — it mirrors dev copytrade signals).
-  `capital_weight` is DOLLARS: set $1,000 (1 contract ≈ $400–600 max risk).
-- After phases deploy: insert the strategy row (DB-only; tenants ConfigMap is retired), Activate.
-  Confirm the new fields are null on every other tenant.
-- FOMC date list: confirm `scripts/data/fomc-dates.txt` (seeded from the research calendar) and
-  refresh it when the Fed publishes next year's calendar (~June).
-
+- Verify **XSP index-option entitlement on staging_paper's paper account** (read-only probe with
+  that tenant's trade keys; index options live on Alpaca paper since 2026-07-23).
+- **Deployment target: a NEW strategy row on the existing `staging_paper` tenant** (operator
+  decision 2026-10-05) — strategy_id `gated_condor`, alongside the copytrade-mirror strategy.
+  Live-tenant config is DB-only (tenants ConfigMap retired): after Phases 1–4 deploy, insert the
+  row with the frozen values + the Phase-1 fields, `capital_weight` = **$1,000** (DOLLARS, per
+  strategy, pod-global $100k base trap — `reference_capital_weight_is_dollars_not_a_fraction`;
+  set at CREATE since the lever is decrease-only afterwards), `tp_ratio=null`, then Activate.
+  Config edits later: re-Activate after every edit (an edit silently halts entries).
+- Confirm darkness: Phase-1 fields null on every other strategy row (including staging_paper's
+  own copytrade strategy) and every other tenant.
+- **Shared-tenant interactions (acknowledge before enabling):**
+  - The **account-level loss cap** on staging_paper is ARMED (#767) and shared with the mirror
+    strategy. A cap trip from EITHER strategy force-flattens BOTH. Phase 4 must verify condor
+    combo marks can't false-trip it (see the cap task there); until verified, the condor does not
+    Activate.
+  - **One-click Deactivate / kill switch is tenant-level** and will market-flatten the condor's 4
+    legs mid-hold — acceptable (defined risk, pays exit spread once) but it contaminates that
+    day's scorecard row; the scorecard flags kill-switch exits.
+  - FOMC calendar: refresh `scripts/data/fomc-dates.txt` when the Fed publishes next year's
+    schedule (~June).
 ## Phase 1 — StrategyConfig fields (contract)
 **Goal:** carry the condor config; null/absent = fully dark.
 **Changes (anchors):** `contract/schemas/strategy-config.json` — optional fields (NOT in
@@ -107,11 +119,17 @@ image `application.yml` (not env).
   intrinsic-at-close; mismatch → audit `CondorSettleMismatch`, page). Seed the Redis position
   cache on start (recon false-orphan gap — mirror `VERSION_POSITION_CACHE`'s activity, no gate
   needed in a net-new type).
-- **Account-cap interaction (explicit task):** the cap charges `(bid − entryPremium)` for long
-  positions (`project_account_cap_crossday_and_reset_enabled`); verify short-combo marks don't
-  false-trip it. A condor's max loss is structural (width − credit) — if the cap can't represent
-  that, EXCLUDE condor lots from the cap mark and document it (paper-only), with a follow-up issue
-  before any real-money plan.
+- **Account-cap interaction (BLOCKING task — shared cap with the live copytrade mirror on
+  staging_paper):** the cap charges `(bid − entryPremium)` for long positions
+  (`project_account_cap_crossday_and_reset_enabled`); a short 4-leg combo's marks could false-trip
+  the SHARED cap and force-flatten the mirror strategy's positions too. Write the test that feeds
+  condor-shaped positions through the cap mark BEFORE enabling; if the cap cannot represent
+  defined-risk combos, EXCLUDE condor lots from the cap mark (paper-only) with a follow-up issue
+  before any real-money plan. The condor strategy row is not Activated until this is verified.
+- **Tenant kill-switch coverage:** a kill-switch force-flatten must close all 4 legs (shorts
+  covered — never leave a naked short by closing longs first; flatten as 4 concurrent market
+  orders or shorts-first). Add a CondorHoldWorkflow test for the kill-switch path; scorecard tags
+  these exits `killswitch_flatten`.
 - Recon: ensure the OCC-anchored orphan sweep (#432-435) tolerates the 4 condor legs (adopted-lot
   check must see the combo's legs as owned; add the workflow id mapping for each leg).
 **Tests (TDD):** TestWorkflowEnvironment — gated-out day places nothing but audits the gate;
@@ -123,7 +141,11 @@ added (dev only; live tenants DB-only).
 
 ## Phase 5 — Scorecard (read-only scripts)
 `scripts/research/condor_forward_report.py`: SELECT from `exec_alpaca_paper.order_intent_journal`
-(+ `orchestrator.audit_log`), grouped by tenant_id (shared exec DB). Per attempt: gate value,
+(+ `orchestrator.audit_log`), grouped by tenant_id (shared exec DB) AND strategy: staging_paper
+also journals the copytrade mirror, so condor intents MUST be attributable — every condor
+`client_order_id`/intent_key carries a `condor-` prefix and every condor audit event carries
+`strategy_id=gated_condor` (make this a Phase-3/4 requirement, not a scorecard-side regex hope).
+Per attempt: gate value,
 model credit, achieved credit, per-leg slippage_vs_mid, settlement P&L, and the criteria check
 below. Also joins collector NBBO (U5) once deployed. Unit-test the criteria math.
 
@@ -135,7 +157,9 @@ signals/week ⇒ ~12 weeks):
   (4 ticks across 4 XSP legs); or abandon rate > 40% of gated attempts; or any settlement mismatch
   unresolved > 1 trading day.
 - **Hard kill immediately:** any naked leg (partial combo fill unhedged > 5 min); any order on a
-  non-paper tenant; any position past expiry without settlement booked.
+  non-paper tenant; any position past expiry without settlement booked; any condor-attributed
+  account-cap trip that flattens the copytrade mirror's positions (shared-tenant interference —
+  operator review before re-enabling).
 - **Continue/extend** if mean > 0 and fill telemetry within the model; **real money requires a new
   plan + operator sign-off** — this plan grants no path to it.
 - Secondary (reported, never decisive): U5 print-model vs NBBO comparison; U6 gate from the XSP
