@@ -123,6 +123,19 @@
   </dependencies>
 
   <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <!-- Gated-condor: the FOMC statement-day calendar is single-sourced from scripts/data (the
+           research + scripts read it there); CondorDayActivitiesImpl loads it off the classpath. -->
+      <resource>
+        <directory>${project.basedir}/../../scripts/data</directory>
+        <includes>
+          <include>fomc-dates.txt</include>
+        </includes>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

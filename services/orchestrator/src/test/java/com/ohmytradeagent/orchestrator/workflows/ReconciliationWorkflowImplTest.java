@@ -433,6 +433,31 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void run_condorLegOwnedByRunningCondorHold_isNeverPagedOrAdopted() {
+    // Gated-condor Phase 4: a condor long wing has no OCC journal row (the combo is one 'MLEG'
+    // row), so it lands in the missing branch — even on a sweep that would otherwise page. Its
+    // running CondorHoldWorkflow owns it: suppress, never page, never auto-adopt one wing.
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(PADDED_OCC, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(auditQuery.countPriorPositionOrphanObserved(
+            eq("dev"), eq("copytrade-v1"), eq(PADDED_OCC), eq("missing"), any()))
+        .thenReturn(1L);
+    when(positionLookup.hasRunningCondorOwnerForOcc("dev", PADDED_OCC)).thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow();
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    verify(audit, never())
+        .log(Mockito.argThat(e -> e != null && "PositionOrphan".equals(e.getKind())));
+    assertThat(captureKind("PositionOrphanSuppressedSiblingOwner").getSubject())
+        .containsEntry("owner_source", "condor");
+    verify(positionLookup, never()).sumRunningOwnerRemainingQtyForOcc(anyString(), anyString());
+  }
+
+  @Test
   void positionOrphan_priorDetectionWithinWindow_isDebounced() {
     // Issue #206: the same broker position has already been detected as a PositionOrphan within
     // the 1h debounce window. The workflow must suppress the per-cycle PositionOrphan audit
@@ -1245,6 +1270,54 @@ class ReconciliationWorkflowImplTest {
 
     verify(metrics, times(1))
         .recordAutoAdopt(eq("dev"), eq("copytrade-v1"), eq("alpaca-paper"), eq("initiated"));
+  }
+
+  @Test
+  void positionOrphanFilled_condorJournalRow_refusesAdoption_evenWithHoldGone() {
+    // #901: a condor wing whose hold has ENDED (not running) still has a condor- closing-leg
+    // journal row; recon must never adopt it (a lone wing in a PositionWorkflow may be flattened,
+    // leaving the paired short naked).
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(
+            List.of(
+                filledJournal("condor-dev-copytrade-v1-2026-10-05-x2", "2026-10-05", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+
+    runWorkflow();
+
+    assertThat(captureKind("AutoAdoptRefusedCondorLeg").getSubject())
+        .containsEntry("source", "condor_journal_row");
+    assertThat(ADOPT_STARTED).isEmpty();
+    verify(metrics, never())
+        .recordAutoAdopt(anyString(), anyString(), anyString(), eq("initiated"));
+  }
+
+  @Test
+  void positionOrphanFilled_condorPosCacheOwner_refusesAdoption() {
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 1L, new BigDecimal("0.05"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), eq(paddedOcc)))
+        .thenReturn(List.of(filledJournal("intent-1", "chat-99:0", paddedOcc)));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(positionLookup.isCondorLegOcc("dev", paddedOcc)).thenReturn(true);
+
+    runWorkflow();
+
+    assertThat(captureKind("AutoAdoptRefusedCondorLeg").getSubject())
+        .containsEntry("source", "condor_pos_cache");
+    assertThat(ADOPT_STARTED).isEmpty();
   }
 
   @Test

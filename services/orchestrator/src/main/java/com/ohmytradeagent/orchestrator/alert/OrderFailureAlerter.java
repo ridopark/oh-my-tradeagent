@@ -137,7 +137,8 @@ public class OrderFailureAlerter {
       "OrphanSTC,EntryExpired,PositionOrphan,PositionOrphanOngoing,PartialExitPlaceFailed,"
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
-          + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed";
+          + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
+          + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 

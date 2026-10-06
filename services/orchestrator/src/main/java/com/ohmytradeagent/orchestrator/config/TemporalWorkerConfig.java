@@ -7,6 +7,7 @@ import com.ohmytradeagent.orchestrator.activities.AccountSnapshotMetricsActiviti
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.BrokerCredentialAuditActivities;
+import com.ohmytradeagent.orchestrator.activities.CondorDayActivities;
 import com.ohmytradeagent.orchestrator.activities.ContractActivities;
 import com.ohmytradeagent.orchestrator.activities.DailyPnlActivities;
 import com.ohmytradeagent.orchestrator.activities.DefaultTriggerFireDecider;
@@ -31,6 +32,8 @@ import com.ohmytradeagent.orchestrator.workflows.AccountSnapshotWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AdoptionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.AuditEmitWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.BrokerCredentialAuditWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.CondorHoldWorkflowImpl;
+import com.ohmytradeagent.orchestrator.workflows.CondorSessionWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeDeriskWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.CopytradeSignalWorkflowImpl;
 import com.ohmytradeagent.orchestrator.workflows.KillSwitchWorkflowImpl;
@@ -138,7 +141,8 @@ public class TemporalWorkerConfig {
       ReconciliationMetricsActivities reconciliationMetrics,
       AccountSnapshotMetricsActivities accountSnapshotMetrics,
       WatchlistMirrorActivities watchlistMirror,
-      WatchlistTriggerActivities watchlistTrigger) {
+      WatchlistTriggerActivities watchlistTrigger,
+      CondorDayActivities condorDay) {
     Worker worker = factory.newWorker(taskQueue);
     // Issue #239/#285: AdoptionWorkflow is the operator-triggered orphan-adoption entry point. It
     // runs as a workflow (not an in-process Activity) so its broker-truth
@@ -239,7 +243,13 @@ public class TemporalWorkerConfig {
         // fans out one WatchlistTriggerWorkflow child per leg. Both run on this orchestrator-core
         // queue; their activity impls (parse + arm/fire deciders) are registered below.
         WatchlistTriggerSessionWorkflowImpl.class,
-        WatchlistTriggerWorkflowImpl.class);
+        WatchlistTriggerWorkflowImpl.class,
+        // Gated-condor (PLAN-2026-10-05 Phase 4): the daily session (started by
+        // CondorScheduleBootstrapper's schedules) and the per-fill hold it spawns. Their
+        // market-data
+        // and exec activities run on the market-data / broker-<target> queues.
+        CondorSessionWorkflowImpl.class,
+        CondorHoldWorkflowImpl.class);
     worker.registerActivitiesImplementations(
         audit,
         auditQuery,
@@ -287,7 +297,9 @@ public class TemporalWorkerConfig {
         // decider would replace these here.
         watchlistTrigger,
         new DefaultWatchlistEntryDecider(),
-        new DefaultTriggerFireDecider());
+        new DefaultTriggerFireDecider(),
+        // Gated-condor day filter (half-day rules + the packaged FOMC calendar).
+        condorDay);
     return worker;
   }
 }

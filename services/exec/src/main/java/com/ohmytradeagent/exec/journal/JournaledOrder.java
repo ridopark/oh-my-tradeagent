@@ -32,4 +32,17 @@ public record JournaledOrder(
     Long filledQty,
     BigDecimal avgFillPrice,
     OffsetDateTime filledAt,
-    long version) {}
+    long version) {
+
+  /**
+   * Gated-condor (#897 blocker 3): a multi-leg combo row ({@code option_symbol='MLEG'}, credit in
+   * the broker's negative-is-credit notation, no BUY basis) or any order journaled under the {@code
+   * condor-} intent prefix (ladder rungs and closing legs). Single-symbol FIFO P&L readers — the
+   * daily-loss / account-cap realized figure — EXCLUDE these rows: the combo has no per-symbol
+   * basis to match, so it would otherwise credit "raw proceeds" as a phantom loss on the shared
+   * account.
+   */
+  public boolean isCondor() {
+    return "MLEG".equals(optionSymbol) || (intentKey != null && intentKey.startsWith("condor-"));
+  }
+}

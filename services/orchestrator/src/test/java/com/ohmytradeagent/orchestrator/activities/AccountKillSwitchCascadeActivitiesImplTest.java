@@ -98,6 +98,35 @@ class AccountKillSwitchCascadeActivitiesImplTest {
     verify(good, times(1)).signal(eq("riskBreach"), any());
   }
 
+  // Gated-condor: an account-cap trip must reach the tenant's CondorHoldWorkflow (its riskBreach
+  // handler flattens all four legs shorts-first), not only PositionWorkflows. Other workflow types
+  // under the same TenantStrategy (session parents etc.) stay excluded.
+  @Test
+  void cascadesToCondorHoldWorkflows_butNotOtherWorkflowTypes() {
+    cascade = forStrategies(List.of("gated_condor"));
+    when(client.listExecutions(anyString()))
+        .thenAnswer(
+            inv -> {
+              String query = inv.getArgument(0);
+              return Map.of(
+                      "t-dev/s-gated_condor/condor/2026-10-05", "CondorHoldWorkflow",
+                      "t-dev/s-gated_condor/condor-session/x", "CondorSessionWorkflow")
+                  .entrySet()
+                  .stream()
+                  .filter(e -> query.contains("'" + e.getValue() + "'"))
+                  .map(Map.Entry::getKey)
+                  .map(this::metadata);
+            });
+    WorkflowStub hold = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub("t-dev/s-gated_condor/condor/2026-10-05")).thenReturn(hold);
+
+    long sent = cascade.cascadeAccountRiskBreach("dev", "self", "auto:x", "auto:x");
+
+    assertThat(sent).isEqualTo(1);
+    verify(hold).signal(eq("riskBreach"), any(RiskBreachPayload.class));
+    verify(client, never()).newUntypedWorkflowStub("t-dev/s-gated_condor/condor-session/x");
+  }
+
   // ----- helpers -----
 
   private void stubExecutionsByQuery(Map<String, String> tenantStrategyToWorkflowId) {

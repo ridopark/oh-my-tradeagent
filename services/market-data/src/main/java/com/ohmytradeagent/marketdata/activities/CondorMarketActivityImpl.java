@@ -31,8 +31,9 @@ import org.springframework.stereotype.Component;
  * <p>Mirrors the research (docs/plans/experiments/0dte-spx-2026-10): the richness formula is {@code
  * t4_iv_gate.py}'s, spot is {@code spx_level.py}'s put-call parity (S = K + C − P at the strike
  * minimizing |C − P|), condor strikes are {@code sell_afternoon.legs_for}'s S2 rule. Today's
- * straddle and parity use live NBBO mids from the chain; the trailing distribution is recomputed
- * from option BARS (quotes don't backfill) on the same parity basis. σ always comes from the proxy
+ * straddle and the trailing distribution are BOTH priced from option BARS on the same parity basis
+ * (#898: quotes don't backfill, so a chain-NBBO today against a bars history would gate on two
+ * different price bases); only leg resolution reads live NBBO. σ always comes from the proxy
  * equity's 1-min bars ({@code XSP → SPY}; any other underlying is its own proxy, as in the
  * research's ETF runs). Bars are taken strictly before {@code entryEt} on every day so today and
  * the trailing days share one live-achievable basis.
@@ -77,17 +78,15 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
     String proxy = SIGMA_PROXY.getOrDefault(underlying, underlying);
     long minutesToClose = Duration.between(entry, CLOSE).toMinutes();
 
-    TreeMap<Integer, double[]> chain = new TreeMap<>();
-    provider
-        .optionChainQuotes(underlying, today)
-        .forEach((sym, q) -> put(chain, sym, q.mid().doubleValue()));
-    double[] closes =
-        closesBefore(
-            provider.stockBars1Min(proxy, at(today, OPEN), at(today, entry)), at(today, entry));
-    Double richness = richnessOf(chain, closes, minutesToClose);
+    Double richness = barsRichness(underlying, proxy, today, entry, minutesToClose);
     if (richness == null) {
       return new RichnessResult(
-          null, null, null, 0, false, "today: no parity strip / ATM straddle / proxy bars");
+          null,
+          null,
+          null,
+          0,
+          false,
+          "today: no option-bar parity strip / ATM straddle / proxy bars");
     }
 
     List<Double> trailing = new ArrayList<>();
@@ -98,7 +97,7 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
         continue;
       }
       scanned++;
-      Double r = trailingRichness(underlying, proxy, d, entry, minutesToClose);
+      Double r = barsRichness(underlying, proxy, d, entry, minutesToClose);
       if (r != null) {
         trailing.add(r);
       }
@@ -120,6 +119,18 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
           "insufficient trailing history " + sorted.length + "/" + lookbackDays);
     }
     return new RichnessResult(richness, median, quantile, sorted.length, richness >= median, null);
+  }
+
+  @Override
+  public Double settlementSpot(String underlying) {
+    LocalDate today = LocalDate.now(clock);
+    BarStrip strip =
+        barStrip(underlying, SIGMA_PROXY.getOrDefault(underlying, underlying), today, CLOSE);
+    if (strip == null) {
+      return null;
+    }
+    double spot = paritySpot(strip.chain());
+    return Double.isNaN(spot) ? null : spot;
   }
 
   @Override
@@ -158,10 +169,19 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
     return new CondorLegsResult(spot, legs, credit, null);
   }
 
-  private Double trailingRichness(
+  /** Richness on day {@code d} at {@code entry}, priced from bars only; null if not computable. */
+  private Double barsRichness(
       String underlying, String proxy, LocalDate d, LocalTime entry, long minutesToClose) {
+    BarStrip strip = barStrip(underlying, proxy, d, entry);
+    return strip == null ? null : richnessOf(strip.chain(), strip.closes(), minutesToClose);
+  }
+
+  /** The proxy's closes before {@code until} and the option-bar {C, P} strip as of then. */
+  private record BarStrip(TreeMap<Integer, double[]> chain, double[] closes) {}
+
+  private BarStrip barStrip(String underlying, String proxy, LocalDate d, LocalTime until) {
     Instant open = at(d, OPEN);
-    Instant entryAt = at(d, entry);
+    Instant entryAt = at(d, until);
     List<Bar> proxyBars = provider.stockBars1Min(proxy, open, entryAt);
     // A holiday has no bars; a half day has none in the minute before entry.
     if (proxyBars.stream().noneMatch(b -> b.t().equals(entryAt.minusSeconds(60)))) {
@@ -186,7 +206,7 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
                     .reduce((a, b) -> b)
                     .filter(b -> !b.t().isBefore(entryAt.minus(MAX_BAR_STALENESS)))
                     .ifPresent(b -> put(chain, sym, b.close())));
-    return richnessOf(chain, closes, minutesToClose);
+    return new BarStrip(chain, closes);
   }
 
   /** Richness from a per-strike {C, P} strip and the proxy closes, or null when not computable. */

@@ -43,6 +43,10 @@ public class StubBroker implements OptionsBroker {
   private final Map<String, BrokerFillDetail> fillOnCancel = new ConcurrentHashMap<>();
   private final Map<String, String> failCancelReason = new ConcurrentHashMap<>();
   private final Map<String, BrokerFillDetail> partialFill = new ConcurrentHashMap<>();
+  // Gated-condor Phase 4 seams: every FRESH closing placement in order, and the signed
+  // (negative = short) option book the settlement reconciliation reads.
+  private final List<PlaceOrderRequest> placedClosingOrders = new CopyOnWriteArrayList<>();
+  private final Map<String, Long> signedPositions = new ConcurrentHashMap<>();
 
   @Override
   public PlaceOrderResponse placeOrder(PlaceOrderRequest request) {
@@ -52,6 +56,20 @@ public class StubBroker implements OptionsBroker {
     return prior != null
         ? PlaceOrderResponse.alreadyExisted(brokerOrderId)
         : PlaceOrderResponse.placed(brokerOrderId);
+  }
+
+  @Override
+  public PlaceOrderResponse placeClosingOrder(PlaceOrderRequest request) {
+    PlaceOrderResponse r = placeOrder(request);
+    if (!r.alreadyExisted()) {
+      placedClosingOrders.add(request);
+    }
+    return r;
+  }
+
+  @Override
+  public Map<String, Long> signedOptionPositions() {
+    return Map.copyOf(signedPositions);
   }
 
   @Override
@@ -147,6 +165,16 @@ public class StubBroker implements OptionsBroker {
     alreadyFilledFillDetail.put(
         brokerOrderId, new BrokerFillDetail(filledQty, avgFillPrice, filledAt));
     statusByBrokerOrderId.put(brokerOrderId, BrokerOrderStatus.FILLED);
+  }
+
+  /** Gated-condor Phase 4 test seam: fresh (non-duplicate) closing placements, in order. */
+  public List<PlaceOrderRequest> placedClosingOrders() {
+    return List.copyOf(placedClosingOrders);
+  }
+
+  /** Gated-condor Phase 4 test seam: a signed option position (negative = short). */
+  public void setSignedPositionForTest(String brokerSymbol, long signedQty) {
+    signedPositions.put(brokerSymbol, signedQty);
   }
 
   /** Gated-condor test seam: fresh (non-duplicate) mleg placements, in order. */
