@@ -3,19 +3,29 @@ package com.ohmytradeagent.orchestrator.activities;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.contract.StrategyConfig;
+import com.ohmytradeagent.contract.activities.CondorMarketActivity.CondorLeg;
+import com.ohmytradeagent.contract.temporal.LenientDataConverter;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
+import com.ohmytradeagent.orchestrator.workflows.CondorHoldWorkflowInput;
 import com.ohmytradeagent.orchestrator.workflows.PositionState;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.enums.v1.EventType;
+import io.temporal.api.history.v1.History;
+import io.temporal.api.history.v1.HistoryEvent;
+import io.temporal.api.history.v1.WorkflowExecutionStartedEventAttributes;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowClientOptions;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.WorkflowExecutionHistory;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
@@ -27,6 +37,8 @@ import org.junit.jupiter.api.Test;
 class AccountPnlActivitiesImplTest {
 
   private static final LocalDate DAY = LocalDate.of(2026, 5, 14);
+  private static final String POSITION_QUERY = "WorkflowType='PositionWorkflow'";
+  private static final String CONDOR_QUERY = "WorkflowType='CondorHoldWorkflow'";
 
   private DailyPnlActivities dailyPnl;
   private WorkflowClient client;
@@ -38,6 +50,13 @@ class AccountPnlActivitiesImplTest {
     dailyPnl = mock(DailyPnlActivities.class);
     client = mock(WorkflowClient.class);
     strategyRegistry = mock(StrategyRegistry.class);
+    lenient()
+        .when(client.getOptions())
+        .thenReturn(
+            WorkflowClientOptions.newBuilder()
+                .setDataConverter(LenientDataConverter.instance())
+                .build());
+    lenient().when(client.listExecutions(contains(CONDOR_QUERY))).thenAnswer(inv -> Stream.empty());
   }
 
   private AccountPnlActivitiesImpl forStrategies(List<String> strategyIds) {
@@ -135,7 +154,7 @@ class AccountPnlActivitiesImplTest {
     activities = forStrategies(List.of("copytrade-v1"));
     WorkflowExecutionMetadata good = metadata("wf-good");
     WorkflowExecutionMetadata bad = metadata("wf-bad");
-    when(client.listExecutions(anyString())).thenReturn(Stream.of(good, bad));
+    when(client.listExecutions(contains(POSITION_QUERY))).thenReturn(Stream.of(good, bad));
 
     WorkflowStub goodStub = mock(WorkflowStub.class);
     when(goodStub.query(eq("positionState"), eq(PositionState.class)))
@@ -196,12 +215,65 @@ class AccountPnlActivitiesImplTest {
         .hasMessageContaining("visibility unavailable");
   }
 
+  // #899: a running CondorHoldWorkflow is charged at its DEFINED max loss, (wider wing - credit) x
+  // 100 x qty, read from the hold's recorded start input — no quote, so a wide or missing book can
+  // never move it. Condors are kept out of positions/listed (the PositionWorkflow fail-closed
+  // denominator and the per-lot bid valuation).
+  @Test
+  void accountOpenBook_chargesRunningCondorHoldsAtDefinedMaxLoss() {
+    activities = forStrategies(List.of("condor-v1", "copytrade-v1"));
+    when(client.listExecutions(contains(POSITION_QUERY))).thenAnswer(inv -> Stream.empty());
+    when(client.listExecutions(contains(CONDOR_QUERY)))
+        .thenAnswer(
+            inv -> {
+              String query = inv.getArgument(0);
+              return query.contains("TenantStrategy='t-dev/s-condor-v1'")
+                  ? Stream.of(metadata("hold-a"), metadata("hold-b"))
+                  : Stream.empty();
+            });
+    // hold-a: 3-wide, credit 0.80, qty 2 -> 440; hold-b: 4-wide put wing, credit 1.00, qty 1 ->
+    // 300.
+    stubCondorHold("hold-a", condorInput(596, 599, 601, 604, "0.80", 2L));
+    stubCondorHold("hold-b", condorInput(595, 599, 601, 603, "1.00", 1L));
+
+    AccountOpenBook book = activities.accountOpenBook("dev");
+
+    assertThat(book.condorMaxLoss()).isEqualByComparingTo("740");
+    assertThat(book.positions()).isEmpty();
+    assertThat(book.listed()).isZero();
+    assertThat(book.valueFailures()).isZero();
+  }
+
+  @Test
+  void accountOpenBook_noCondorHolds_chargesZero() {
+    activities = forStrategies(List.of("copytrade-v1"));
+    stubExecutions(
+        Map.of("wf-live", new PositionState("MSFT  250516C00300000", 2L, new BigDecimal("1.00"))));
+
+    assertThat(activities.accountOpenBook("dev").condorMaxLoss()).isEqualByComparingTo("0");
+  }
+
+  // Fail-closed (same discipline as a Visibility error): an unreadable condor start input
+  // propagates rather than being silently charged nothing.
+  @Test
+  void accountOpenBook_condorHistoryReadFailure_propagates() {
+    activities = forStrategies(List.of("condor-v1"));
+    when(client.listExecutions(contains(POSITION_QUERY))).thenAnswer(inv -> Stream.empty());
+    when(client.listExecutions(contains(CONDOR_QUERY)))
+        .thenAnswer(inv -> Stream.of(metadata("hold-a")));
+    when(client.fetchHistory("hold-a")).thenThrow(new RuntimeException("history unavailable"));
+
+    assertThatThrownBy(() -> activities.accountOpenBook("dev"))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("history unavailable");
+  }
+
   // ----- helpers (mirror VisibilityPortfolioSnapshotTest) -----
 
   private void stubExecutionsByQuery(
       Map<String, String> tenantStrategyToWorkflowId,
       Map<String, PositionState> stateByWorkflowId) {
-    when(client.listExecutions(anyString()))
+    when(client.listExecutions(contains(POSITION_QUERY)))
         .thenAnswer(
             inv -> {
               String query = inv.getArgument(0);
@@ -222,7 +294,7 @@ class AccountPnlActivitiesImplTest {
 
   private void stubExecutions(Map<String, PositionState> byWorkflowId) {
     Stream<WorkflowExecutionMetadata> stream = byWorkflowId.keySet().stream().map(this::metadata);
-    when(client.listExecutions(anyString())).thenReturn(stream);
+    when(client.listExecutions(contains(POSITION_QUERY))).thenReturn(stream);
     byWorkflowId.forEach(
         (wfId, state) -> {
           WorkflowStub stub = mock(WorkflowStub.class);
@@ -231,6 +303,39 @@ class AccountPnlActivitiesImplTest {
               .thenReturn(state);
           when(client.newUntypedWorkflowStub(wfId)).thenReturn(stub);
         });
+  }
+
+  private static CondorHoldWorkflowInput condorInput(
+      int longPut, int shortPut, int shortCall, int longCall, String credit, long qty) {
+    List<CondorLeg> legs =
+        List.of(
+            new CondorLeg("XSP-SC", "sell", "C", shortCall, null, null),
+            new CondorLeg("XSP-SP", "sell", "P", shortPut, null, null),
+            new CondorLeg("XSP-LC", "buy", "C", longCall, null, null),
+            new CondorLeg("XSP-LP", "buy", "P", longPut, null, null));
+    return new CondorHoldWorkflowInput(
+        "dev",
+        "condor-v1",
+        "alpaca-paper",
+        "att-1",
+        "2026-05-14",
+        "XSP",
+        qty,
+        new BigDecimal(credit),
+        legs);
+  }
+
+  private void stubCondorHold(String workflowId, CondorHoldWorkflowInput input) {
+    HistoryEvent started =
+        HistoryEvent.newBuilder()
+            .setEventId(1)
+            .setEventType(EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED)
+            .setWorkflowExecutionStartedEventAttributes(
+                WorkflowExecutionStartedEventAttributes.newBuilder()
+                    .setInput(LenientDataConverter.instance().toPayloads(input).orElseThrow()))
+            .build();
+    when(client.fetchHistory(workflowId))
+        .thenReturn(new WorkflowExecutionHistory(History.newBuilder().addEvents(started).build()));
   }
 
   private WorkflowExecutionMetadata metadata(String workflowId) {

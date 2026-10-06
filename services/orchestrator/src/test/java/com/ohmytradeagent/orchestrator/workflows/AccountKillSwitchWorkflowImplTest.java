@@ -294,6 +294,49 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(s.getOpenMtm()).isNull();
   }
 
+  // #899: a running condor's DEFINED max loss is charged to the open MTM; alone it crosses the
+  // 5000 cap -> a daily-loss trip (not an mtm-unavailable one: it needs no quote).
+  @Test
+  void heartbeat_condorMaxLossCrossesThreshold_tripsDailyLoss() {
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(new AccountOpenBook(List.of(), 0, 0, new BigDecimal("6000")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-trip");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+    verify(optionQuote, never()).getOptionQuote(any());
+  }
+
+  // #899: the condor charge adds to the long-lot MTM (and the cached exposure) without tripping
+  // below the cap: -1000 realized + (2.50-3.00)*5*100 - 440 condor = -1690 > -5000.
+  @Test
+  void heartbeat_condorMaxLossAddsToOpenMtm_belowThreshold_noTrip() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-1000"));
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(
+                List.of(
+                    new OpenPositionValuation("NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
+                1,
+                0,
+                new BigDecimal("440")));
+    when(optionQuote.getOptionQuote(any()))
+        .thenReturn(okQuote("NVDA  261218C00140000", new BigDecimal("2.50")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-below");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    assertThat(s.getOpenMtm()).isEqualByComparingTo("-690");
+  }
+
   // Unset threshold => cap inert: even a massive loss does not trip (and PnL is never computed).
   @Test
   void heartbeat_unsetThreshold_capInert_noTripOnLargeLoss() {

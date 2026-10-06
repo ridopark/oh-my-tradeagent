@@ -281,6 +281,15 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       "account-killswitch-clear-only-when-armable-v1";
 
   /**
+   * #899: charge {@link AccountOpenBook#condorMaxLoss()} (each Running condor's defined max loss)
+   * to the open MTM. Adds no command but alters the TRIP DECISION, so it is gated: a tick whose
+   * {@code accountOpenBook} was answered by a new activity worker while an old workflow worker
+   * ignored the field (mid-roll) must replay as the recorded no-trip. Read appended LAST (marker
+   * order preserved).
+   */
+  static final String VERSION_ACCOUNT_CONDOR_MAX_LOSS = "killswitch-condor-max-loss-v1";
+
+  /**
    * Issue #669: the daily still-tripped page, actor-agnostic. Same kind name as the per-strategy
    * switch's — the alerter renders workflow identity from the row.
    */
@@ -532,6 +541,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * the tick, so a field keeps the read deterministic and single).
    */
   private int expiredWorthZeroVersion;
+
+  /** #899 gate, resolved once per heartbeat like {@link #expiredWorthZeroVersion}. */
+  private int condorMaxLossVersion;
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -874,6 +886,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     // #670: appended last (see the change-id javadoc).
     int clearOnlyWhenArmable =
         Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
+    // #899: appended last (see the change-id javadoc).
+    this.condorMaxLossVersion =
+        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 1);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -1187,6 +1202,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
               perContract
                   .multiply(BigDecimal.valueOf(pos.remainingQty()))
                   .multiply(CONTRACT_MULTIPLIER));
+    }
+    if (condorMaxLossVersion >= 1 && book.condorMaxLoss() != null) {
+      openMtm = openMtm.subtract(book.condorMaxLoss());
     }
     return new OpenBookMtm(openMtm, quoteFailures);
   }
