@@ -245,6 +245,104 @@ class CondorMarketActivityImplTest {
     assertThat(r.reason()).isNotBlank();
   }
 
+  // --- #912: minute-bar publication lag on today's read ---
+
+  @Test
+  void todaysLastProxyMinuteLate_isWaitedFor_thenRichnessComputes() {
+    // 2026-10-07: the eval ran at 14:00:00.177 and the 13:59 SPY bar was not yet published, so the
+    // holiday guard gated out a genuine trade day. The first read sees bars through 13:58 only;
+    // the 13:59 bar appears on a later poll.
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    int[] todayReads = {0};
+    when(provider.stockBars1Min(eq("SPY"), any(), any()))
+        .thenAnswer(
+            inv -> {
+              Instant start = inv.getArgument(1);
+              List<Bar> bars = proxyBarsFrom(start);
+              if (start.atZone(MarketHours.ET).toLocalDate().equals(TODAY)
+                  && todayReads[0]++ == 0) {
+                return bars.subList(0, bars.size() - 1); // 13:59 not yet published
+              }
+              return bars;
+            });
+    stubTrailingOptionBars(
+        provider,
+        Map.of(
+            TODAY,
+            2.0,
+            LocalDate.of(2026, 10, 2),
+            1.0,
+            LocalDate.of(2026, 10, 1),
+            1.5,
+            LocalDate.of(2026, 9, 30),
+            3.0));
+    int[] sleeps = {0};
+
+    RichnessResult r =
+        new CondorMarketActivityImpl(provider, CLOCK, d -> sleeps[0]++)
+            .evaluateRichness("XSP", "14:00", 3);
+
+    assertThat(r.reason()).isNull();
+    assertThat(r.gate()).isTrue();
+    assertThat(sleeps[0]).isEqualTo(1);
+  }
+
+  @Test
+  void noProxyBarsAtAllToday_isAHoliday_noWait() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    stubProxyBars(provider, Map.of(TODAY, List.of()));
+    int[] sleeps = {0};
+
+    RichnessResult r =
+        new CondorMarketActivityImpl(provider, CLOCK, d -> sleeps[0]++)
+            .evaluateRichness("XSP", "14:00", 3);
+
+    assertThat(r.gate()).isFalse();
+    assertThat(r.reason()).contains("no proxy bars");
+    assertThat(sleeps[0]).isZero();
+  }
+
+  @Test
+  void barsNeverComplete_givesUpAfterTheBoundedWait_withADistinctReason() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    when(provider.stockBars1Min(eq("SPY"), any(), any()))
+        .thenAnswer(
+            inv -> {
+              List<Bar> bars = proxyBarsFrom(inv.getArgument(1));
+              return bars.subList(0, bars.size() - 1); // 13:59 never arrives
+            });
+    int[] sleeps = {0};
+
+    RichnessResult r =
+        new CondorMarketActivityImpl(provider, CLOCK, d -> sleeps[0]++)
+            .evaluateRichness("XSP", "14:00", 3);
+
+    assertThat(r.gate()).isFalse();
+    assertThat(r.reason()).contains("incomplete after").doesNotContain("no proxy bars");
+    assertThat(sleeps[0]).isEqualTo(CondorMarketActivityImpl.MAX_PUBLICATION_POLLS);
+  }
+
+  @Test
+  void publicationWait_isBoundedByTheClock_too() {
+    MarketDataProvider provider = mock(MarketDataProvider.class);
+    when(provider.stockBars1Min(eq("SPY"), any(), any()))
+        .thenAnswer(
+            inv -> {
+              List<Bar> bars = proxyBarsFrom(inv.getArgument(1));
+              return bars.subList(0, bars.size() - 1);
+            });
+    Clock late =
+        Clock.fixed(
+            ZonedDateTime.of(TODAY, LocalTime.of(14, 2), MarketHours.ET).toInstant(),
+            MarketHours.ET);
+    int[] sleeps = {0};
+
+    new CondorMarketActivityImpl(provider, late, d -> sleeps[0]++)
+        .evaluateRichness("XSP", "14:00", 3);
+
+    assertThat(sleeps[0]).isZero(); // already past entry + MAX_PUBLICATION_WAIT
+  }
+
   // --- resolveCondorLegs ---
 
   @Test
@@ -362,6 +460,16 @@ class CondorMarketActivityImplTest {
       out.put(compact('P', (int) r[0]), List.of(new Bar(at, r[2])));
     }
     when(provider.optionBars1Min(any(), any(), any())).thenReturn(out);
+  }
+
+  /** The full 09:30..13:59 alternating-close SPY bar list starting at {@code start}. */
+  private static List<Bar> proxyBarsFrom(Instant start) {
+    double[] c = proxyCloses();
+    List<Bar> bars = new ArrayList<>();
+    for (int i = 0; i < c.length; i++) {
+      bars.add(new Bar(start.plusSeconds(60L * i), c[i]));
+    }
+    return bars;
   }
 
   /** SPY bars for any day, except the overridden days. */
