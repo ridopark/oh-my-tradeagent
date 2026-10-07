@@ -53,22 +53,47 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
   /** Option-bar strike strip searched around the proxy's last close on a trailing day. */
   static final int TRAILING_STRIKE_HALF_WIDTH = 8;
 
+  /**
+   * #912: Alpaca publishes a minute bar seconds AFTER the minute closes, so at the entry minute
+   * today's last bar (entry − 1m) can still be missing. Today's read re-polls every {@link
+   * #PUBLICATION_POLL} until {@code entry + MAX_PUBLICATION_WAIT} (and at most {@link
+   * #MAX_PUBLICATION_POLLS} times) before giving up. Activity-internal: invisible to workflow
+   * history. Fits the session's 3-minute start-to-close with the trailing walk.
+   */
+  static final Duration PUBLICATION_POLL = Duration.ofSeconds(5);
+
+  static final Duration MAX_PUBLICATION_WAIT = Duration.ofSeconds(90);
+  static final int MAX_PUBLICATION_POLLS = 18;
+
   private static final Map<String, String> SIGMA_PROXY = Map.of("XSP", "SPY");
   private static final LocalTime OPEN = LocalTime.of(9, 30);
   private static final LocalTime CLOSE = LocalTime.of(16, 0);
 
   private final MarketDataProvider provider;
   private final Clock clock;
+  private final Sleeper sleeper;
 
   @Autowired
   public CondorMarketActivityImpl(MarketDataProvider provider) {
-    this(provider, Clock.system(ET));
+    this(provider, Clock.system(ET), d -> Thread.sleep(d.toMillis()));
   }
 
-  /** Visible for tests: inject a fixed clock. */
+  /** Visible for tests: inject a fixed clock (publication-lag polls do not sleep). */
   CondorMarketActivityImpl(MarketDataProvider provider, Clock clock) {
+    this(provider, clock, d -> {});
+  }
+
+  /** Visible for tests: inject the clock and the publication-lag poll sleeper. */
+  CondorMarketActivityImpl(MarketDataProvider provider, Clock clock, Sleeper sleeper) {
     this.provider = provider;
     this.clock = clock;
+    this.sleeper = sleeper;
+  }
+
+  /** Blocking wait between publication-lag polls; injectable so tests never really sleep. */
+  @FunctionalInterface
+  interface Sleeper {
+    void sleep(Duration d) throws InterruptedException;
   }
 
   @Override
@@ -78,15 +103,10 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
     String proxy = SIGMA_PROXY.getOrDefault(underlying, underlying);
     long minutesToClose = Duration.between(entry, CLOSE).toMinutes();
 
-    Double richness = barsRichness(underlying, proxy, today, entry, minutesToClose);
+    TodayRead todayRead = todayRichness(underlying, proxy, today, entry, minutesToClose);
+    Double richness = todayRead.richness();
     if (richness == null) {
-      return new RichnessResult(
-          null,
-          null,
-          null,
-          0,
-          false,
-          "today: no option-bar parity strip / ATM straddle / proxy bars");
+      return new RichnessResult(null, null, null, 0, false, todayRead.reason());
     }
 
     List<Double> trailing = new ArrayList<>();
@@ -169,6 +189,49 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
     return new CondorLegsResult(spot, legs, credit, null);
   }
 
+  /** Today's richness, or null with the scorecard-distinguishable reason it is not computable. */
+  private record TodayRead(Double richness, String reason) {}
+
+  /**
+   * #912: today's read distinguishes "no proxy bars at all" (holiday/closed — skip at once) from
+   * "bars present but the last minute(s) not yet published" (publication lag — re-poll, bounded).
+   * Re-polling never widens the data window: every read still uses only bars strictly before the
+   * entry minute, and option bars within {@link #MAX_BAR_STALENESS} of it, so a late read cannot
+   * price a staler quote than an on-time one.
+   */
+  private TodayRead todayRichness(
+      String underlying, String proxy, LocalDate d, LocalTime entry, long minutesToClose) {
+    Instant open = at(d, OPEN);
+    Instant entryAt = at(d, entry);
+    Instant waitUntil = entryAt.plus(MAX_PUBLICATION_WAIT);
+    for (int poll = 0; ; poll++) {
+      List<Bar> proxyBars = provider.stockBars1Min(proxy, open, entryAt);
+      if (proxyBars.isEmpty()) {
+        return new TodayRead(null, "today: no proxy bars (holiday / market closed)");
+      }
+      BarStrip strip = stripFrom(underlying, d, entryAt, proxyBars);
+      Double r = strip == null ? null : richnessOf(strip.chain(), strip.closes(), minutesToClose);
+      if (r != null) {
+        return new TodayRead(r, null);
+      }
+      if (poll >= MAX_PUBLICATION_POLLS || !clock.instant().isBefore(waitUntil)) {
+        return new TodayRead(
+            null,
+            "today: bars incomplete after publication wait ("
+                + (strip == null
+                    ? "last proxy minute missing"
+                    : "no option-bar parity strip / ATM straddle")
+                + ")");
+      }
+      try {
+        sleeper.sleep(PUBLICATION_POLL);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return new TodayRead(null, "today: interrupted during publication wait");
+      }
+    }
+  }
+
   /** Richness on day {@code d} at {@code entry}, priced from bars only; null if not computable. */
   private Double barsRichness(
       String underlying, String proxy, LocalDate d, LocalTime entry, long minutesToClose) {
@@ -180,9 +243,13 @@ public class CondorMarketActivityImpl implements CondorMarketActivity {
   private record BarStrip(TreeMap<Integer, double[]> chain, double[] closes) {}
 
   private BarStrip barStrip(String underlying, String proxy, LocalDate d, LocalTime until) {
-    Instant open = at(d, OPEN);
     Instant entryAt = at(d, until);
-    List<Bar> proxyBars = provider.stockBars1Min(proxy, open, entryAt);
+    return stripFrom(underlying, d, entryAt, provider.stockBars1Min(proxy, at(d, OPEN), entryAt));
+  }
+
+  /** The strip from already-fetched proxy bars; null when the minute before entry is absent. */
+  private BarStrip stripFrom(String underlying, LocalDate d, Instant entryAt, List<Bar> proxyBars) {
+    Instant open = at(d, OPEN);
     // A holiday has no bars; a half day has none in the minute before entry.
     if (proxyBars.stream().noneMatch(b -> b.t().equals(entryAt.minusSeconds(60)))) {
       return null;
