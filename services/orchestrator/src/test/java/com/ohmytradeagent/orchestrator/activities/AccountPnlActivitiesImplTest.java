@@ -240,6 +240,7 @@ class AccountPnlActivitiesImplTest {
 
     assertThat(book.condorMaxLoss()).isEqualByComparingTo("740");
     assertThat(book.condorHolds()).isEqualTo(2);
+    assertThat(book.condorHoldIds()).containsExactly("hold-a", "hold-b");
     assertThat(book.positions()).isEmpty();
     assertThat(book.listed()).isZero();
     assertThat(book.valueFailures()).isZero();

@@ -34,4 +34,15 @@ public interface DailyPnlExecActivity {
    * match.
    */
   BigDecimal computeRealizedPnl(String tenantId, String strategyId, LocalDate tradingDay);
+
+  /**
+   * #906: realized P&amp;L in dollars of the gated-condor attempt ({@code tradingDay}'s ET date)
+   * for ({@code tenantId}, {@code strategyId}), from its {@code condor-} journal rows: entry credit
+   * (filled rungs) minus closing debits (BUY covers) plus closing proceeds (SELL wings), × 100.
+   * When any of the four legs is not fully closed the attempt is incomplete and the figure is
+   * floored at zero (never books open credit as a gain). Zero when there is no attempt that day.
+   * The caller counts it only once the attempt's hold is no longer Running (until then the hold is
+   * charged at its defined max loss).
+   */
+  BigDecimal computeCondorRealizedPnl(String tenantId, String strategyId, LocalDate tradingDay);
 }

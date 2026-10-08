@@ -11,6 +11,7 @@ import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -291,6 +292,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * <p>#908: WIDENED to maxSupported=2 — at v&gt;=2 a tick with an unreadable condor hold pages
    * {@code AccountKillSwitchMtmDeferred} ({@code source=condor_read}) once per streak, a NEW {@code
    * audit.log} command. A history recorded at 1 replays as 1 (no page).
+   *
+   * <p>#906: WIDENED to maxSupported=3 — at v&gt;=3 each tick also reads, per strategy whose
+   * today's hold is NOT Running, the condor REALIZED from exec ({@code computeCondorRealizedPnl}, a
+   * NEW activity command) and adds it to the day total. A history recorded at 1 or 2 replays as
+   * such (no read).
    */
   static final String VERSION_ACCOUNT_CONDOR_MAX_LOSS = "killswitch-condor-max-loss-v1";
 
@@ -562,6 +568,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * once per streak. Not carried across continue-as-new (a still-open streak re-pages once).
    */
   private boolean condorReadFailureStreak;
+
+  /**
+   * #906: the strategies (with broker_target) the current tick's exec realized read resolved,
+   * reused by the condor realized read so both cover the same strategy set. Pure per-tick state.
+   */
+  private List<TenantStrategyBrokerTarget> realizedStrategies = List.of();
 
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
@@ -906,7 +918,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
     // #899: appended last (see the change-id javadoc).
     this.condorMaxLossVersion =
-        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 2);
+        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 3);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -1163,6 +1175,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     consecutiveMtmUnavailableTicks = 0;
 
     BigDecimal openMtm = valued.openMtm();
+    if (condorMaxLossVersion >= 3 && realizedVersion >= 1) {
+      BigDecimal condorRealized = execCondorRealized(book);
+      if (condorRealized == null) {
+        return false; // deferred like any per-strategy realized read (G2) — never a partial sum.
+      }
+      realized = realized.add(condorRealized);
+    }
     BigDecimal totalPnl = realized.add(openMtm);
     if (totalPnl.compareTo(threshold.negate()) <= 0) {
       // Carry the full listed open-position count + current open MTM so the (no-flatten) page is
@@ -1294,7 +1313,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         book.valueFailures() + failures,
         maxLoss,
         0,
-        book.condorHolds());
+        book.condorHolds(),
+        book.condorHoldIds());
   }
 
   /**
@@ -1464,6 +1484,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       recordRealizedReadFailure(null, e.getMessage());
       return null;
     }
+    this.realizedStrategies = strategies;
     BigDecimal total = BigDecimal.ZERO;
     for (TenantStrategyBrokerTarget s : strategies) {
       try {
@@ -1477,6 +1498,40 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         // — never sum a partial. taskQueueFor(...) throws a non-retryable ApplicationFailure (a
         // TemporalFailure) synchronously on a null/bare broker_target, so an unroutable strategy is
         // caught here too.
+        recordRealizedReadFailure(s.brokerTarget(), e.getMessage());
+        return null;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * #906 (v&gt;=3): sums each strategy's booked condor realized for today, read only when that
+   * strategy's today's {@code CondorHoldWorkflow} is NOT in {@code book.condorHoldIds()}. While the
+   * hold runs it is charged at its defined max loss instead, so the two never overlap: the charge
+   * drops when the hold completes and the realized enters on the same tick. The book is read BEFORE
+   * this, and a hold completes only after its flatten's closes are journaled, so a hold missing
+   * from the book has its closes visible here. A null id list (an OLD pod answered mid-roll) skips
+   * the read for the tick rather than risk double-counting a still-charged hold. A read failure
+   * returns null (the caller defers, as for {@link #execTenantRealized}).
+   */
+  private BigDecimal execCondorRealized(AccountOpenBook book) {
+    if (book.condorHoldIds() == null) {
+      return BigDecimal.ZERO;
+    }
+    BigDecimal total = BigDecimal.ZERO;
+    for (TenantStrategyBrokerTarget s : realizedStrategies) {
+      String todaysHold =
+          WorkflowIds.condorHold(input.getTenantId(), s.strategyId(), tradingDay.toString());
+      if (book.condorHoldIds().contains(todaysHold)) {
+        continue;
+      }
+      try {
+        total =
+            total.add(
+                execRealized(s.brokerTarget())
+                    .computeCondorRealizedPnl(input.getTenantId(), s.strategyId(), tradingDay));
+      } catch (TemporalFailure e) {
         recordRealizedReadFailure(s.brokerTarget(), e.getMessage());
         return null;
       }

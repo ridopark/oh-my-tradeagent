@@ -1,6 +1,7 @@
 package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
+import com.ohmytradeagent.exec.broker.MidWalkExecutor;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import java.math.BigDecimal;
@@ -12,6 +13,7 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
@@ -75,6 +77,8 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
    */
   static final int REALIZED_LOOKBACK_DAYS = 90;
 
+  private static final int CONDOR_LEGS = 4;
+
   private final OrderIntentJournal journal;
 
   public DailyPnlExecActivityImpl(OrderIntentJournal journal) {
@@ -99,6 +103,43 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
       realized = realized.add(realizePerSymbol(entries, e.getValue(), tradingDay));
     }
     return realized.multiply(MULTIPLIER);
+  }
+
+  @Override
+  public BigDecimal computeCondorRealizedPnl(
+      String tenantId, String strategyId, LocalDate tradingDay) {
+    String attemptKey =
+        MidWalkExecutor.CONDOR_PREFIX + tenantId + "-" + strategyId + "-" + tradingDay + "-";
+    BigDecimal cash = BigDecimal.ZERO;
+    long entryQty = 0;
+    for (int step = 0; ; step++) {
+      Optional<JournaledOrder> rung = journal.findByIntentKey(attemptKey + "r" + step);
+      if (rung.isEmpty()) {
+        break;
+      }
+      JournaledOrder r = rung.get();
+      if (r.filledQty() != null && r.filledQty() > 0 && r.avgFillPrice() != null) {
+        // Combo fills are in the broker's negative-is-credit notation (MidWalkExecutor#filled).
+        cash = cash.add(r.avgFillPrice().abs().multiply(BigDecimal.valueOf(r.filledQty())));
+        entryQty += r.filledQty();
+      }
+    }
+    if (entryQty == 0) {
+      return BigDecimal.ZERO;
+    }
+    boolean complete = true;
+    for (int leg = 0; leg < CONDOR_LEGS; leg++) {
+      JournaledOrder c = journal.findByIntentKey(attemptKey + "x" + leg).orElse(null);
+      if (c == null || c.filledQty() == null || c.avgFillPrice() == null) {
+        complete = false;
+        continue;
+      }
+      BigDecimal proceeds = c.avgFillPrice().multiply(BigDecimal.valueOf(c.filledQty()));
+      cash = "BUY".equalsIgnoreCase(c.side()) ? cash.subtract(proceeds) : cash.add(proceeds);
+      complete &= c.filledQty() == entryQty;
+    }
+    BigDecimal realized = cash.multiply(MULTIPLIER);
+    return complete ? realized : realized.min(BigDecimal.ZERO);
   }
 
   // Buckets the lookback-bounded FILLED journal rows for one side by option_symbol (grouping on the
