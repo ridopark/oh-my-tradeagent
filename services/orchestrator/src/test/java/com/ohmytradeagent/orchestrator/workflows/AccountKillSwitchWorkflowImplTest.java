@@ -534,6 +534,26 @@ class AccountKillSwitchWorkflowImplTest {
     verify(execPnl, never()).computeCondorRealizedPnl(anyString(), anyString(), any());
   }
 
+  // #919 review: the condor realized read is PAPER-scoped. A "-live" strategy never schedules
+  // ComputeCondorRealizedPnl (exec-alpaca-live is manually rolled and may not register it; a
+  // missing activity would defer — disarm — a real-money cap every tick).
+  @Test
+  void heartbeat_liveStrategy_neverSchedulesCondorRealizedRead() {
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget("s1", BROKER_TARGET),
+                new TenantStrategyBrokerTarget("s-live", "alpaca-live")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-live-scope");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75 + 60));
+
+    verify(execPnl, never()).computeCondorRealizedPnl(anyString(), eq("s-live"), any());
+    verify(execPnl, atLeast(2)).computeCondorRealizedPnl(anyString(), eq("s1"), any());
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
   // #906: a failed condor realized read defers the tick like any per-strategy realized read (G2:
   // never sum a partial) — no trip on the mirror's -6000 alone, and no thrown heartbeat.
   @Test

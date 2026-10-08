@@ -1514,6 +1514,11 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * from the book has its closes visible here. A null id list (an OLD pod answered mid-roll) skips
    * the read for the tick rather than risk double-counting a still-charged hold. A read failure
    * returns null (the caller defers, as for {@link #execTenantRealized}).
+   *
+   * <p>PAPER-scoped (same guard as {@code CondorSessionWorkflowImpl} / {@code
+   * CondorScheduleBootstrapper}): a non-{@code -paper} strategy is never read. The live exec worker
+   * is rolled by hand and may not register this activity; scheduling it there would defer — and so
+   * disarm — a real-money cap on every tick.
    */
   private BigDecimal execCondorRealized(AccountOpenBook book) {
     if (book.condorHoldIds() == null) {
@@ -1521,6 +1526,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     BigDecimal total = BigDecimal.ZERO;
     for (TenantStrategyBrokerTarget s : realizedStrategies) {
+      if (s.brokerTarget() == null || !s.brokerTarget().endsWith("-paper")) {
+        continue;
+      }
       String todaysHold =
           WorkflowIds.condorHold(input.getTenantId(), s.strategyId(), tradingDay.toString());
       if (book.condorHoldIds().contains(todaysHold)) {
