@@ -28,8 +28,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Holds one filled gated condor to cash settlement. Net-new workflow type: NO {@code
- * Workflow.getVersion} gates; the body reads no wall clock or RNG except via {@code Workflow.*} and
+ * Holds one filled gated condor to cash settlement. One {@code Workflow.getVersion} gate ({@link
+ * #VERSION_SETTLEMENT_CASH}); the body reads no wall clock or RNG except via {@code Workflow.*} and
  * Activity results.
  *
  * <p>On start it seeds the recon position cache with this workflow's id for each of the four legs
@@ -70,6 +70,20 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
   static final String KIND_SETTLED = "CondorSettled";
   static final String KIND_SETTLE_MISMATCH = "CondorSettleMismatch";
 
+  /**
+   * #920 change-id: after the next-open held-legs read finds the legs gone, compare the broker's
+   * BOOKED settlement cash to the expected settlement cash (a NEW exec activity command). A hold
+   * recorded before it replays at DEFAULT_VERSION (no read).
+   */
+  static final String VERSION_SETTLEMENT_CASH = "condor-hold-settlement-cash-v1";
+
+  /**
+   * #920: allowed |booked − expected| settlement cash per contract. The expected figure prices the
+   * legs off the 16:00 option-bar parity spot; the broker settles on the official closing print, so
+   * an ITM short can differ by a few index cents ($25/contract = 0.25 XSP points).
+   */
+  static final BigDecimal SETTLEMENT_CASH_TOLERANCE_PER_CONTRACT = new BigDecimal("25");
+
   private static final ActivityOptions DEFAULT_OPTIONS =
       ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofSeconds(10)).build();
 
@@ -86,6 +100,8 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
               .setStartToCloseTimeout(Duration.ofSeconds(2))
               .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
               .build());
+  private static final BigDecimal CONTRACT_MULTIPLIER = BigDecimal.valueOf(100);
+
   private final CondorMarketActivity market =
       Workflow.newActivityStub(
           CondorMarketActivity.class,
@@ -228,12 +244,14 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
     // A missing (no bars) or stale (no strip within the bar-staleness window) settlement spot is
     // NEVER priced as zero: page and mark this settlement unresolved for the operator.
     boolean unresolved = spot == null || !Double.isFinite(spot) || spot <= 0;
+    CondorSettlement.Result settled = null;
     if (unresolved) {
       logAudit(
           KIND_SETTLE_MISMATCH,
           subject("reason", "settlement_spot_unavailable", "settlement_spot", spot));
     } else {
       CondorSettlement.Result s = CondorSettlement.settle(priced, credit, input.getQty(), spot);
+      settled = s;
       logAudit(
           KIND_SETTLED,
           subject(
@@ -270,7 +288,61 @@ public class CondorHoldWorkflowImpl implements CondorHoldWorkflow {
           KIND_SETTLE_MISMATCH, subject("reason", "legs_still_held_after_expiry", "held", heldQty));
       return "settle_mismatch";
     }
+    if (!unresolved
+        && Workflow.getVersion(VERSION_SETTLEMENT_CASH, Workflow.DEFAULT_VERSION, 1) >= 1
+        && !bookedCashMatches(priced, settled)) {
+      return "settle_mismatch";
+    }
     return unresolved ? "settle_unresolved" : "settled";
+  }
+
+  /**
+   * #920: true iff the broker's booked settlement cash for {@code priced} is within {@link
+   * #SETTLEMENT_CASH_TOLERANCE_PER_CONTRACT} × qty of the expected settlement cash ({@code −debit ×
+   * 100 × qty}; the entry credit is booked separately as a trade). Otherwise pages {@value
+   * #KIND_SETTLE_MISMATCH} — including when nothing is booked for an ITM expiry, or the read fails.
+   */
+  private boolean bookedCashMatches(List<CondorLeg> priced, CondorSettlement.Result settled) {
+    BigDecimal expected = settled.debit().negate().multiply(CONTRACT_MULTIPLIER).multiply(qty());
+    CondorExecActivity.SettlementCash booked;
+    try {
+      booked =
+          condorExec()
+              .bookedSettlementCash(
+                  input.getTenantId(),
+                  input.getBrokerTarget(),
+                  priced.stream().map(CondorLeg::occSymbol).toList(),
+                  input.getEtDate());
+    } catch (ActivityFailure e) {
+      logAudit(
+          KIND_SETTLE_MISMATCH,
+          subject("reason", "booked_cash_read_failed", "error", String.valueOf(e.getMessage())));
+      return false;
+    }
+    BigDecimal tolerance = SETTLEMENT_CASH_TOLERANCE_PER_CONTRACT.multiply(qty());
+    if (booked.cash().subtract(expected).abs().compareTo(tolerance) <= 0) {
+      return true;
+    }
+    logAudit(
+        KIND_SETTLE_MISMATCH,
+        subject(
+            "reason",
+            "booked_cash_mismatch",
+            "expected_settlement_cash",
+            expected,
+            "booked_settlement_cash",
+            booked.cash(),
+            "activities",
+            booked.activities(),
+            "tolerance",
+            tolerance,
+            "legs_priced",
+            priced.stream().map(CondorLeg::occSymbol).toList()));
+    return false;
+  }
+
+  private BigDecimal qty() {
+    return BigDecimal.valueOf(input.getQty());
   }
 
   /**

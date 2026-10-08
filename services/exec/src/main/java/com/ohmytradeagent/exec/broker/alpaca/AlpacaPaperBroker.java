@@ -929,39 +929,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
             .truncatedTo(ChronoUnit.DAYS)
             .plus(1, ChronoUnit.DAYS)
             .toString();
-    // Alpaca PAGES this endpoint. A single unpaged GET silently truncates at the page size, and a
-    // dropped deposit is indistinguishable from no deposit — it would put that money back into the
-    // range return as profit. Walk the pages instead, and if the walk doesn't terminate within
-    // ACTIVITIES_MAX_PAGES, THROW rather than return a partial list: the caller degrades to
-    // cash_flows_available=false and the UI shows "—", which is honest. Silently understating
-    // netFlows is not.
-    List<AlpacaAccountActivity> raw = new ArrayList<>();
-    String pageToken = null;
-    boolean complete = false;
-    for (int page = 0; page < ACTIVITIES_MAX_PAGES; page++) {
-      List<AlpacaAccountActivity> batch = fetchActivitiesPage(after, until, pageToken);
-      if (batch == null || batch.isEmpty()) {
-        complete = true;
-        break;
-      }
-      raw.addAll(batch);
-      if (batch.size() < ACTIVITIES_PAGE_SIZE) {
-        complete = true;
-        break;
-      }
-      pageToken = batch.get(batch.size() - 1).id();
-      if (pageToken == null || pageToken.isBlank()) {
-        // No cursor to advance on — refuse to loop forever AND refuse to claim the list is whole.
-        break;
-      }
-    }
-    if (!complete) {
-      throw ApplicationFailure.newFailure(
-          "Alpaca /v2/account/activities did not paginate to completion within "
-              + ACTIVITIES_MAX_PAGES
-              + " pages — refusing to report a truncated cash-flow list",
-          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
-    }
+    List<AlpacaAccountActivity> raw = fetchAllActivities("CSD,CSW,JNLC", after, until);
     List<AccountCashFlow> out = new ArrayList<>(raw.size());
     for (AlpacaAccountActivity a : raw) {
       if (a.netAmount() == null) {
@@ -981,6 +949,72 @@ public class AlpacaPaperBroker implements OptionsBroker {
   }
 
   /**
+   * #920: option expiry/settlement activities over whole UTC days {@code [fromDay, toDay]}, widened
+   * by a day on each side like {@link #getAccountActivities} (the caller filters by symbol).
+   */
+  @Override
+  public List<OptionActivity> getOptionActivities(LocalDate fromDay, LocalDate toDay) {
+    List<AlpacaAccountActivity> raw =
+        fetchAllActivities(
+            "OPEXP,OPASN,OPEXC,OPCSH",
+            fromDay.minusDays(1).toString(),
+            toDay.plusDays(1).toString());
+    List<OptionActivity> out = new ArrayList<>(raw.size());
+    for (AlpacaAccountActivity a : raw) {
+      if (a.netAmount() == null || a.symbol() == null || a.date() == null) {
+        log.warn(
+            "Alpaca option activity missing symbol/net_amount/date (activity_type={}); skipping",
+            a.activityType());
+        continue;
+      }
+      out.add(
+          new OptionActivity(
+              a.activityType(), a.symbol(), a.netAmount(), LocalDate.parse(a.date())));
+    }
+    return out;
+  }
+
+  /**
+   * Alpaca PAGES {@code /v2/account/activities}. A single unpaged GET silently truncates at the
+   * page size, and a dropped row is indistinguishable from no row (a dropped deposit lands back in
+   * the range return as profit; a dropped settlement reads as unbooked). Walk the pages instead,
+   * and if the walk doesn't terminate within ACTIVITIES_MAX_PAGES, THROW rather than return a
+   * partial list.
+   */
+  private List<AlpacaAccountActivity> fetchAllActivities(
+      String activityTypes, String after, String until) {
+    List<AlpacaAccountActivity> raw = new ArrayList<>();
+    String pageToken = null;
+    boolean complete = false;
+    for (int page = 0; page < ACTIVITIES_MAX_PAGES; page++) {
+      List<AlpacaAccountActivity> batch =
+          fetchActivitiesPage(activityTypes, after, until, pageToken);
+      if (batch == null || batch.isEmpty()) {
+        complete = true;
+        break;
+      }
+      raw.addAll(batch);
+      if (batch.size() < ACTIVITIES_PAGE_SIZE) {
+        complete = true;
+        break;
+      }
+      pageToken = batch.get(batch.size() - 1).id();
+      if (pageToken == null || pageToken.isBlank()) {
+        // No cursor to advance on — refuse to loop forever AND refuse to claim the list is whole.
+        break;
+      }
+    }
+    if (!complete) {
+      throw ApplicationFailure.newFailure(
+          "Alpaca /v2/account/activities did not paginate to completion within "
+              + ACTIVITIES_MAX_PAGES
+              + " pages — refusing to report a truncated activity list",
+          ACCOUNT_ACTIVITIES_READ_ERROR_TYPE);
+    }
+    return raw;
+  }
+
+  /**
    * One page of {@code /v2/account/activities}. {@code pageToken} is null for the first page and
    * the previous page's last {@code id} thereafter. Read-path errors are deliberately NOT routed
    * through the order-worded {@link #mapError}: that helper's classifications say "Alpaca rejected
@@ -989,7 +1023,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
    * worded read failure is strictly more honest in logs.
    */
   private List<AlpacaAccountActivity> fetchActivitiesPage(
-      String after, String until, String pageToken) {
+      String activityTypes, String after, String until, String pageToken) {
     try {
       return activitiesClient
           .get()
@@ -997,7 +1031,7 @@ public class AlpacaPaperBroker implements OptionsBroker {
               uriBuilder -> {
                 uriBuilder
                     .path("/v2/account/activities")
-                    .queryParam("activity_types", "CSD,CSW,JNLC")
+                    .queryParam("activity_types", activityTypes)
                     .queryParam("after", after)
                     .queryParam("until", until)
                     .queryParam("page_size", ACTIVITIES_PAGE_SIZE);

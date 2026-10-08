@@ -14,9 +14,11 @@ import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorEntryRequ
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorFlattenRequest;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorFlattenResult;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.HeldLeg;
+import com.ohmytradeagent.contract.activities.CondorExecActivity.SettlementCash;
 import com.ohmytradeagent.contract.activities.CondorMarketActivity.CondorLeg;
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.ClientOrderId;
+import com.ohmytradeagent.exec.broker.OptionsBroker;
 import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.stub.StubBroker;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
@@ -26,6 +28,7 @@ import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -189,6 +192,36 @@ class CondorExecActivityImplTest {
         .isInstanceOf(ApplicationFailure.class);
     verify(registry, never()).brokerFor(anyString(), anyString());
     verify(journal, never()).recordComboIntent(any());
+  }
+
+  @Test
+  void bookedSettlementCash_sumsOnlyThisCondorsLegs() {
+    broker.setOptionActivitiesForTest(
+        List.of(
+            new OptionsBroker.OptionActivity(
+                "OPASN",
+                "XSP261005C00601000",
+                new BigDecimal("-150.00"),
+                LocalDate.of(2026, 10, 5)),
+            new OptionsBroker.OptionActivity(
+                "OPEXP", "XSP261005P00596000", BigDecimal.ZERO, LocalDate.of(2026, 10, 5)),
+            new OptionsBroker.OptionActivity(
+                "OPASN", "SPY261005C00600000", new BigDecimal("-999"), LocalDate.of(2026, 10, 5))));
+
+    SettlementCash cash =
+        activity.bookedSettlementCash(
+            TENANT, TARGET, legs().stream().map(CondorLeg::occSymbol).toList(), "2026-10-05");
+
+    assertThat(cash.cash()).isEqualByComparingTo("-150.00");
+    assertThat(cash.activities()).isEqualTo(2);
+  }
+
+  @Test
+  void bookedSettlementCash_liveTarget_rejectedPaperOnly() {
+    assertThatThrownBy(
+            () -> activity.bookedSettlementCash(TENANT, "alpaca-live", List.of(), "2026-10-05"))
+        .isInstanceOf(ApplicationFailure.class);
+    verify(registry, never()).brokerFor(anyString(), anyString());
   }
 
   @Test

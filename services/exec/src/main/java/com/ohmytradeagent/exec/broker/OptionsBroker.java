@@ -289,4 +289,17 @@ public interface OptionsBroker {
    * a broker_target) and never a risk-gate input.
    */
   record AccountCashFlow(long timestamp, BigDecimal amount) {}
+
+  /**
+   * #920: the account's option expiry/settlement activities (Alpaca {@code OPEXP} expiration,
+   * {@code OPASN} assignment, {@code OPEXC} exercise, {@code OPCSH} cash deliverable) dated within
+   * {@code [fromDay, toDay]}. A READ-ONLY GET. Default throws {@link
+   * UnsupportedOperationException}, like {@link #getAccountActivities}.
+   */
+  default List<OptionActivity> getOptionActivities(LocalDate fromDay, LocalDate toDay) {
+    throw new UnsupportedOperationException("getOptionActivities not supported by this broker");
+  }
+
+  /** One option activity: {@code symbol} is the broker's unpadded OCC; {@code netAmount} cash. */
+  record OptionActivity(String activityType, String symbol, BigDecimal netAmount, LocalDate date) {}
 }

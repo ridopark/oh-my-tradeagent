@@ -10,6 +10,7 @@ import com.ohmytradeagent.exec.broker.PlaceOrderRequest;
 import com.ohmytradeagent.exec.broker.PlaceOrderResponse;
 import io.temporal.failure.ApplicationFailure;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,8 @@ import org.springframework.stereotype.Component;
 @Component
 @ConditionalOnProperty(name = "broker.impl", havingValue = "stub", matchIfMissing = true)
 public class StubBroker implements OptionsBroker {
+
+  private volatile List<OptionActivity> optionActivities = List.of();
 
   private final Map<String, BrokerOrderStatus> statusByBrokerOrderId = new ConcurrentHashMap<>();
   // Issue #165: seeded by setAlreadyFilled to drive the cancel-on-filled IT path. cancelOrder and
@@ -175,6 +178,18 @@ public class StubBroker implements OptionsBroker {
   /** Gated-condor Phase 4 test seam: a signed option position (negative = short). */
   public void setSignedPositionForTest(String brokerSymbol, long signedQty) {
     signedPositions.put(brokerSymbol, signedQty);
+  }
+
+  /** #920 test seam: the option activities {@link #getOptionActivities} returns. */
+  public void setOptionActivitiesForTest(List<OptionActivity> activities) {
+    optionActivities = List.copyOf(activities);
+  }
+
+  @Override
+  public List<OptionActivity> getOptionActivities(LocalDate fromDay, LocalDate toDay) {
+    return optionActivities.stream()
+        .filter(a -> !a.date().isBefore(fromDay) && !a.date().isAfter(toDay))
+        .toList();
   }
 
   /** Gated-condor test seam: fresh (non-duplicate) mleg placements, in order. */

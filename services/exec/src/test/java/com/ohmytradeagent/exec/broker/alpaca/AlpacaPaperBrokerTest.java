@@ -691,6 +691,39 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getOptionActivities_sendsOptionTypesAndMapsSymbolCashAndDate() throws Exception {
+    // #920: option expiry/assignment/exercise/cash rows, keyed by the broker (unpadded) OCC symbol.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "[{\"id\":\"a1\",\"activity_type\":\"OPASN\",\"symbol\":\"XSP261005C00601000\","
+                    + "\"net_amount\":\"-150.00\",\"date\":\"2026-10-05\"},"
+                    + "{\"id\":\"a2\",\"activity_type\":\"OPEXP\",\"symbol\":\"XSP261005P00596000\","
+                    + "\"net_amount\":\"0\",\"date\":\"2026-10-06\"}]"));
+
+    List<OptionsBroker.OptionActivity> rows =
+        broker.getOptionActivities(LocalDate.of(2026, 10, 5), LocalDate.of(2026, 10, 9));
+
+    assertThat(rows)
+        .containsExactly(
+            new OptionsBroker.OptionActivity(
+                "OPASN",
+                "XSP261005C00601000",
+                new BigDecimal("-150.00"),
+                LocalDate.of(2026, 10, 5)),
+            new OptionsBroker.OptionActivity(
+                "OPEXP", "XSP261005P00596000", new BigDecimal("0"), LocalDate.of(2026, 10, 6)));
+    String path = server.takeRequest().getPath();
+    assertThat(path)
+        .contains("/v2/account/activities")
+        .contains("activity_types=OPEXP,OPASN,OPEXC,OPCSH")
+        .contains("after=2026-10-04")
+        .contains("until=2026-10-10");
+  }
+
+  @Test
   void getAccountActivities_walksAllPagesSoOlderCashFlowsAreNotSilentlyDropped() {
     // Alpaca pages this endpoint. An unpaged read truncates at page_size and a dropped deposit is
     // indistinguishable from no deposit — it would land back in the range return as profit. Assert

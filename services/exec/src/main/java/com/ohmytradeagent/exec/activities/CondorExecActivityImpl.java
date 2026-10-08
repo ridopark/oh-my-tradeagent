@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.activities.CondorExecActivity;
+import com.ohmytradeagent.contract.activities.CondorExecActivity.SettlementCash;
 import com.ohmytradeagent.contract.activities.CondorMarketActivity.CondorLeg;
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.BrokerFillDetail;
@@ -16,15 +17,19 @@ import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import io.temporal.activity.Activity;
 import io.temporal.failure.ApplicationFailure;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -184,6 +189,33 @@ public class CondorExecActivityImpl implements CondorExecActivity {
     return held;
   }
 
+  /**
+   * #920: sums the broker's option expiry/settlement activities for these legs from {@code
+   * expiryDate} through {@value #SETTLEMENT_LOOKAHEAD_DAYS} days after (Alpaca posts overnight
+   * expiry processing dated the expiry day or the next business day). The account is shared by the
+   * tenant's strategies, so rows are matched on this condor's leg symbols only.
+   */
+  @Override
+  public SettlementCash bookedSettlementCash(
+      String tenantId, String brokerTarget, List<String> occSymbols, String expiryDate) {
+    requirePaperQueue(brokerTarget);
+    LocalDate expiry = LocalDate.parse(expiryDate);
+    Set<String> legs = new HashSet<>();
+    occSymbols.forEach(occ -> legs.add(occ.replace(" ", "")));
+    BigDecimal cash = BigDecimal.ZERO;
+    int activities = 0;
+    for (OptionsBroker.OptionActivity a :
+        registry
+            .brokerFor(tenantId, BrokerClientRegistry.providerOf(brokerTarget))
+            .getOptionActivities(expiry, expiry.plusDays(SETTLEMENT_LOOKAHEAD_DAYS))) {
+      if (legs.contains(a.symbol().replace(" ", ""))) {
+        cash = cash.add(a.netAmount());
+        activities++;
+      }
+    }
+    return new SettlementCash(cash, activities);
+  }
+
   private void requirePaperQueue(String brokerTarget) {
     if (!MidWalkExecutor.isPaperTarget(brokerTarget)
         || !taskQueue.equals("broker-" + brokerTarget)) {
@@ -195,6 +227,8 @@ public class CondorExecActivityImpl implements CondorExecActivity {
           NOT_PAPER_ERROR);
     }
   }
+
+  static final int SETTLEMENT_LOOKAHEAD_DAYS = 4;
 
   static String closeIntentKey(CondorFlattenRequest req, int legIndex) {
     return MidWalkExecutor.CONDOR_PREFIX
