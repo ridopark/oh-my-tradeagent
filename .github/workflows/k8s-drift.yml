@@ -25,6 +25,16 @@ name: k8s drift check
 # `::warning::` + a `🔒 BLOCKING` marker in the PR comment) so it can
 # never be mistaken for "checked and clean".
 #
+# DECLARED-BUT-ABSENT (#926): a manifest whose object was never applied shows up in
+# `kubectl diff` as an all-`+` creation, which reads like any other drift and was easy to wave
+# through (#853 feared exactly this for 57-audit-completeness-check-cron.yaml, which deploy.yml
+# never applies). Each manifest is therefore also read with `kubectl get -f` (read-only), and
+# every NotFound object is named in its own ABSENT ON CLUSTER line + a job `::warning::`.
+# Advisory, NOT failing: a PR that ADDS a free-standing manifest is always absent before merge
+# (its first apply is a post-merge operator step), so failing would block every such PR. Every
+# run checks EVERY manifest, so an object that silently never got applied resurfaces on the
+# next infra/k8s PR of any kind.
+#
 # Why this exists: kubeconform (in ci.yml) catches schema regressions but
 # does NOT compare to live cluster state. This workflow closes that loop
 # so reviewers see drift before merging. Implements Option 1 (advisory
@@ -315,7 +325,7 @@ jobs:
             echo "- ⚠ **noise filter unavailable** (no python3 on the runner) — every diff below is UNFILTERED, so server-assigned metadata and list reordering appear as drift." >> "$RUNNER_TEMP/coverage.txt"
           fi
 
-          clean=0; drifted=0; skipped=0; errored=0; suppressed=0
+          clean=0; drifted=0; skipped=0; errored=0; suppressed=0; absent=0
           for f in infra/k8s/*.yaml; do
             b=$(basename "$f")
             if echo "$b" | grep -qE "$EXCLUDE_RE"; then
@@ -327,6 +337,15 @@ jobs:
               blocking_tag="🔒 BLOCKING — "
             else
               blocking_tag=""
+            fi
+            # #926: declared but absent. Only NotFound counts — a Forbidden or an unreachable
+            # cluster is a coverage gap, reported by the diff below, never "absent".
+            missing=$(kubectl get -f "$f" -o name 2>&1 >/dev/null | grep '(NotFound)' \
+              | sed -E 's/^Error from server \(NotFound\): //' | paste -sd ';' -)
+            if [ -n "$missing" ]; then
+              absent=$((absent + 1))
+              echo "::warning::$b declares object(s) ABSENT from the cluster (never applied?): $missing"
+              echo "- \`$b\` — ${blocking_tag}**ABSENT ON CLUSTER**: $missing — declared here but not applied (expected only for an object this PR adds; its first apply is an operator step)" >> "$RUNNER_TEMP/coverage.txt"
             fi
             out=$(kubectl diff -f "$f" 2>&1)
             rc=$?
@@ -407,11 +426,11 @@ jobs:
           done
           set -e
           checked=$((clean + drifted))
-          printf 'Coverage: **%d** manifests checked (%d clean — %d of them after noise filtering, %d drifted), **%d** excluded by design, **%d** unreadable.\n' \
-            "$checked" "$clean" "$suppressed" "$drifted" "$skipped" "$errored" > "$RUNNER_TEMP/coverage.head"
+          printf 'Coverage: **%d** manifests checked (%d clean — %d of them after noise filtering, %d drifted), **%d** excluded by design, **%d** unreadable, **%d** with objects ABSENT on the cluster.\n' \
+            "$checked" "$clean" "$suppressed" "$drifted" "$skipped" "$errored" "$absent" > "$RUNNER_TEMP/coverage.head"
           cat "$RUNNER_TEMP/coverage.txt" >> "$RUNNER_TEMP/coverage.head"
           mv "$RUNNER_TEMP/coverage.head" "$RUNNER_TEMP/coverage.txt"
-          echo "checked=$checked clean=$clean (noise-filtered=$suppressed) drifted=$drifted skipped=$skipped errored=$errored"
+          echo "checked=$checked clean=$clean (noise-filtered=$suppressed) drifted=$drifted skipped=$skipped errored=$errored absent=$absent"
           # Truncate to keep PR comment under GitHub's 65k limit.
           # 60k leaves room for the markdown wrapper + marker.
           head -c 60000 "$RUNNER_TEMP/drift.txt" > "$RUNNER_TEMP/drift.trimmed.txt"
