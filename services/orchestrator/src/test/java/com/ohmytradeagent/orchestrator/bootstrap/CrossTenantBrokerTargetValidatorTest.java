@@ -314,6 +314,16 @@ class CrossTenantBrokerTargetValidatorTest {
         .hasMessageContaining("declares no broker_account_id");
   }
 
+  /** Same with an explicit enabled=true: only rows that cannot trade are exempt. */
+  @Test
+  void sharedModeStillRejectsExplicitlyEnabledTenantWithoutAccount_871() {
+    StrategyRegistry registry = sharedLiveRegistry(true);
+
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry, true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("prod-soonwon");
+  }
+
   /**
    * #871: a row created but not yet enabled (or an onboarding abandoned before enable) has no
    * verified account to declare. It opens nothing, and every arm route now binds the verified id,
