@@ -139,7 +139,7 @@ public class OrderFailureAlerter {
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
           + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed,"
-          + "KillSwitchWorkflowDown";
+          + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -193,6 +193,9 @@ public class OrderFailureAlerter {
   // down (pre-trade checks fail closed) or when recreated TRIPPED on unreadable prior state;
   // YELLOW once recreated with its prior state carried forward.
   private static final String KILL_SWITCH_WORKFLOW_DOWN_KIND = "KillSwitchWorkflowDown";
+
+  // #910: a condor workflow whose workflow task keeps failing (CondorTaskFailureWatchdog). RED.
+  private static final String CONDOR_WORKFLOW_TASK_FAILING_KIND = "CondorWorkflowTaskFailing";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -271,6 +274,8 @@ public class OrderFailureAlerter {
         embed = buildTrailDisarmedEmbed(event);
       } else if (KILL_SWITCH_WORKFLOW_DOWN_KIND.equals(event.getKind())) {
         embed = buildKillSwitchWorkflowDownEmbed(event);
+      } else if (CONDOR_WORKFLOW_TASK_FAILING_KIND.equals(event.getKind())) {
+        embed = buildCondorWorkflowTaskFailingEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -319,6 +324,25 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /** #910: the condor workflow-task-failure page. RED; every key null-safe. */
+  private WebhookEmbed buildCondorWorkflowTaskFailingEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String title =
+        ":rotating_light: "
+            + subjectStr(subject, "workflow_type")
+            + " STUCK — workflow task failing, its code is not running";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("attempt", subjectStr(subject, "attempt"), false));
+    fields.add(new WebhookEmbed.Field("run_id", subjectStr(subject, "run_id"), false));
+    return new WebhookEmbed(
+        title,
+        "No session/hold audit or page can fire until the task stops failing — check the"
+            + " orchestrator worker logs for the exception.",
+        AlertColors.RED,
+        buildFooter(event),
+        fields);
   }
 
   /**
