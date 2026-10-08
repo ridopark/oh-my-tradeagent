@@ -138,7 +138,8 @@ public class OrderFailureAlerter {
           + "EodForceFlattenFailed,FlattenRetryExhausted,PartialExitRetryExhausted,"
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
-          + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed";
+          + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed,"
+          + "KillSwitchWorkflowDown";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -187,6 +188,10 @@ public class OrderFailureAlerter {
   // visible (real-money protection just went away). Subject shape (contract_symbol /
   // prior_peak_premium / prior_giveback_pct / operator) gets its own small embed.
   private static final String TRAIL_DISARMED_KIND = "TrailDisarmed";
+
+  // #911: a kill-switch workflow found not running by KillSwitchBootstrapper. RED while it stays
+  // down (pre-trade checks fail closed); YELLOW once recreated (any manual trip was reset).
+  private static final String KILL_SWITCH_WORKFLOW_DOWN_KIND = "KillSwitchWorkflowDown";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -263,6 +268,8 @@ public class OrderFailureAlerter {
         embed = buildLotCorrectedEmbed(event);
       } else if (TRAIL_DISARMED_KIND.equals(event.getKind())) {
         embed = buildTrailDisarmedEmbed(event);
+      } else if (KILL_SWITCH_WORKFLOW_DOWN_KIND.equals(event.getKind())) {
+        embed = buildKillSwitchWorkflowDownEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -311,6 +318,26 @@ public class OrderFailureAlerter {
     fields.add(new WebhookEmbed.Field("signal_id", subjectStr(subject, "signal_id"), false));
 
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
+  }
+
+  /** #911: the kill-switch-down page. Every key null-safe; an absent flag reads as still down. */
+  private WebhookEmbed buildKillSwitchWorkflowDownEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    boolean recreated = "true".equals(rawSubject(subject, "recreated"));
+    String title =
+        recreated
+            ? ":warning: Kill switch was down and has been RECREATED — any manual trip was reset"
+            : ":rotating_light: Kill switch DOWN — pre-trade checks are failing closed";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("scope", subjectStr(subject, "scope"), false));
+    fields.add(new WebhookEmbed.Field("prior_status", subjectStr(subject, "prior_status"), false));
+    if (!recreated) {
+      fields.add(
+          new WebhookEmbed.Field(
+              "consecutive_failures", subjectStr(subject, "consecutive_failures"), false));
+    }
+    return new WebhookEmbed(
+        title, null, recreated ? AlertColors.YELLOW : AlertColors.RED, buildFooter(event), fields);
   }
 
   /**

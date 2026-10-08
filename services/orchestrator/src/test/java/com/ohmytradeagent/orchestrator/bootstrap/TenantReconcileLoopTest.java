@@ -66,19 +66,53 @@ class TenantReconcileLoopTest {
     loop.reconcileTick();
     verify(killSwitch).ensureForTenantStrategy("beta", "strat-b");
     verify(recon).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
-    // A must NOT be re-ensured — it was already seen on tick 1.
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+    // A's recon schedule must NOT be re-ensured — it was already seen on tick 1. (Its kill
+    // switches are re-asserted every tick — issue #911.)
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
 
-    // Tick 3: desired unchanged → zero further ensure calls.
+    // Tick 3: desired unchanged → no further recon-schedule ensure calls.
     loop.reconcileTick();
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
   }
 
-  /** desired == running (all already seen) → zero state-mutating ensure calls on the next tick. */
+  /**
+   * Issue #911: an already-seen pair's kill switches are re-asserted EVERY tick (the ensure is a
+   * describe when RUNNING), so a kill switch terminated after its first ensure comes back within a
+   * tick instead of staying down until a restart. The recon schedule stays latched.
+   */
+  @Test
+  void seenPairKillSwitchIsReassertedEveryTickButReconScheduleIsNot() {
+    when(registry.list()).thenReturn(List.of(A));
+    loop.reconcileTick();
+    loop.reconcileTick();
+    loop.reconcileTick();
+
+    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
+    verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
+    verify(recon, times(1)).newScheduleClient();
+  }
+
+  /** A throwing re-assert of one seen pair does not starve the others. */
+  @Test
+  void seenPairReassertFailureDoesNotStarveOtherPairs() {
+    when(registry.list()).thenReturn(List.of(A, B));
+    loop.reconcileTick();
+    when(killSwitch.ensureForTenantStrategy("acme", "strat-a"))
+        .thenThrow(new RuntimeException("boom"));
+
+    loop.reconcileTick();
+
+    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
+  }
+
+  /**
+   * desired == running (all already seen) → no recon-schedule ensure on the next tick; only the
+   * kill-switch re-assert (#911), which is a describe for a RUNNING switch.
+   */
   @Test
   void desiredEqualsRunningMakesNoMutatingCalls() {
     when(registry.list()).thenReturn(List.of(A, B));
@@ -88,8 +122,8 @@ class TenantReconcileLoopTest {
 
     // Second tick, identical desired set → nothing new to ensure.
     loop.reconcileTick();
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
   }
@@ -133,9 +167,10 @@ class TenantReconcileLoopTest {
     loop.reconcileTick();
     verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
 
-    // Tick 3: now seen → no further ensure call.
+    // Tick 3: now seen → no further recon-schedule ensure (kill switches re-assert, #911).
     loop.reconcileTick();
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(recon, times(2)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
+    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
   }
 
   /** A failing registry.list() must not throw out of the tick (loop stays alive). */
@@ -171,7 +206,10 @@ class TenantReconcileLoopTest {
     verify(recon).ensureForTenantStrategy(scheduleClient, "prod-jinchul", "copytrade-v1");
   }
 
-  /** Pairs ensured at startup are seen, so the first scheduled tick re-ensures nothing. */
+  /**
+   * Pairs ensured at startup are seen, so the first scheduled tick re-ensures no recon schedule
+   * (kill switches re-assert, #911).
+   */
   @Test
   void scheduledTickAfterStartupPassIsANoOp() {
     when(registry.list()).thenReturn(List.of(A, B));
@@ -179,8 +217,10 @@ class TenantReconcileLoopTest {
     loop.run(null);
     loop.reconcileTick();
 
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
+    verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
+    verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
+    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
   }
 
   /** A startup pass that fails a pair must not latch it — the scheduled tick still retries. */

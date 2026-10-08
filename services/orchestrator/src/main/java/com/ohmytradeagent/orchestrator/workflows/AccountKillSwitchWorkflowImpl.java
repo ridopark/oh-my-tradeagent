@@ -106,7 +106,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private static final String KIND_KILL_SWITCH_CLEARED_ON_ROLLOVER = "KillSwitchClearedOnRollover";
 
   /** Audit strategy_id sentinel — the account cap is tenant-scoped, not strategy-scoped. */
-  static final String ACCOUNT_SCOPE = "__account__";
+  public static final String ACCOUNT_SCOPE = "__account__";
 
   /**
    * The actor (and reason) stamped by the auto account daily-loss trip — the ONLY day-scoped trip
