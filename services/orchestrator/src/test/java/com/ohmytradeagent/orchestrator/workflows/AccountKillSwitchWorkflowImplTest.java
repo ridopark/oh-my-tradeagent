@@ -458,6 +458,39 @@ class AccountKillSwitchWorkflowImplTest {
     verify(optionQuote, atLeast(15)).getOptionQuote(any());
   }
 
+  // #918 review: the condor_read page is best-effort — an audit outage on it must not stall the
+  // heartbeat (the default audit stub retries forever). The mirror's real loss still trips on the
+  // same tick, and the page is retried on the next tick (the streak stays open on a failed send).
+  @Test
+  void heartbeat_condorReadPageAuditDown_doesNotStallTripEvaluation() {
+    Mockito.doThrow(new RuntimeException("audit down"))
+        .when(audit)
+        .log(
+            Mockito.argThat(
+                e ->
+                    e != null
+                        && e.getSubject() != null
+                        && "condor_read".equals(e.getSubject().get("source"))));
+    when(accountPnl.accountOpenBook(anyString())).thenReturn(pricedBookWithCondorReadFailures(1));
+    // Each lot (1.00 - 3.00) x 5 x 100 = -1000; three lots plus -3000 realized = -6000 < -5000.
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-3000"));
+    when(optionQuote.getOptionQuote(any()))
+        .thenAnswer(
+            inv ->
+                okQuote(
+                    inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol(),
+                    new BigDecimal("1.00")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-page-audit-down");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
   // #908 (carried LOW): a condor-only book reports its holds to the cap-inactive holds-risk probe.
   @Test
   void capInactive_condorOnlyBook_openPositionsCountsCondorHolds() {
