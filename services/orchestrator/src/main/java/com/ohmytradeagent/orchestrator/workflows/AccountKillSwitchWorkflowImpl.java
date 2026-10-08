@@ -24,6 +24,7 @@ import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import com.ohmytradeagent.orchestrator.domain.Sizing;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.TemporalFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.Workflow;
@@ -401,6 +402,13 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
 
   private final AuditActivities audit =
       Workflow.newActivityStub(AuditActivities.class, DEFAULT_OPTIONS);
+  private final AuditActivities pageAudit =
+      Workflow.newActivityStub(
+          AuditActivities.class,
+          ActivityOptions.newBuilder()
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
+              .build());
   private final MarketCalendarActivities calendar =
       Workflow.newActivityStub(MarketCalendarActivities.class, DEFAULT_OPTIONS);
   private final TenantConfigActivities tenantConfig =
@@ -1222,17 +1230,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   }
 
   /**
-   * #899 (v&gt;=1): folds each condor hold the activity could not value — a counted read failure,
-   * or the whole condor charge when {@code condorMaxLoss} is null (an OLD pod answered mid-roll) —
-   * into the book as a listed position that failed to value. The existing fail-close bound and MTM
-   * debounce then handle it (deferred page, then {@code auto:account_mtm_unavailable}) instead of
-   * the cap silently under-charging or the heartbeat throwing and disarming. Pure; no command. At
-   * DEFAULT_VERSION the book is returned unchanged.
-   */
-  /**
    * #908 (v&gt;=2): pages an unreadable condor hold once per streak REGARDLESS of book size. On a
    * large priced book one such hold stays under the fail-close bound — uncharged and otherwise
-   * silent — so the debounce's own deferred page never fires for it.
+   * silent — so the debounce's own deferred page never fires for it. Sent BEST-EFFORT on a
+   * one-attempt stub: it runs before the trip evaluation, and the default audit stub's unlimited
+   * retries would stall the whole cap behind an audit outage. A failed send leaves the streak open
+   * so the next tick retries the page.
    */
   private void pageCondorReadFailures(AccountOpenBook book) {
     if (condorMaxLossVersion < 2) {
@@ -1246,22 +1249,36 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     if (condorReadFailureStreak) {
       return;
     }
-    condorReadFailureStreak = true;
-    auditLog(
-        KIND_ACCOUNT_MTM_DEFERRED,
-        subject(
-            "trading_day",
-            tradingDay,
-            "source",
-            "condor_read",
-            "condor_read_failures",
-            failures,
-            "listed",
-            book.listed(),
-            "scope",
-            "account"));
+    try {
+      pageAudit.log(
+          auditEvent(
+              KIND_ACCOUNT_MTM_DEFERRED,
+              subject(
+                  "trading_day",
+                  tradingDay,
+                  "source",
+                  "condor_read",
+                  "condor_read_failures",
+                  failures,
+                  "listed",
+                  book.listed(),
+                  "scope",
+                  "account")));
+      condorReadFailureStreak = true;
+    } catch (ActivityFailure e) {
+      Workflow.getLogger(AccountKillSwitchWorkflowImpl.class)
+          .warn("condor_read page failed (retried next tick): {}", e.getMessage());
+    }
   }
 
+  /**
+   * #899 (v&gt;=1): folds each condor hold the activity could not value — a counted read failure,
+   * or the whole condor charge when {@code condorMaxLoss} is null (an OLD pod answered mid-roll) —
+   * into the book as a listed position that failed to value. The existing fail-close bound and MTM
+   * debounce then handle it (deferred page, then {@code auto:account_mtm_unavailable}) instead of
+   * the cap silently under-charging or the heartbeat throwing and disarming. Pure; no command. At
+   * DEFAULT_VERSION the book is returned unchanged.
+   */
   private AccountOpenBook foldCondorReadFailures(AccountOpenBook book) {
     if (condorMaxLossVersion < 1) {
       return book;
