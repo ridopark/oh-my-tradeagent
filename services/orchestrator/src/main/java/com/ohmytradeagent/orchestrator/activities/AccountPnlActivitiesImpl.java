@@ -160,10 +160,15 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
     }
     CondorCharge condors = condorMaxLoss(tenantId, strategyIds);
     return new AccountOpenBook(
-        positions, listed, valueFailures, condors.maxLoss(), condors.readFailures());
+        positions,
+        listed,
+        valueFailures,
+        condors.maxLoss(),
+        condors.readFailures(),
+        condors.holds());
   }
 
-  private record CondorCharge(BigDecimal maxLoss, int readFailures) {}
+  private record CondorCharge(BigDecimal maxLoss, int readFailures, int holds) {}
 
   /**
    * #899: sums the defined max loss of every Running {@code CondorHoldWorkflow} on the tenant's
@@ -219,7 +224,7 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
         }
       }
     }
-    return new CondorCharge(total, readFailures);
+    return new CondorCharge(total, readFailures, seen.size());
   }
 
   /**

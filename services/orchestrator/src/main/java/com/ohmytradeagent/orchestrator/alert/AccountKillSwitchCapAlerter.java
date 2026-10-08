@@ -172,6 +172,9 @@ public class AccountKillSwitchCapAlerter {
    */
   private WebhookEmbed buildMtmDeferredEmbed(AuditEvent event, Map<String, Object> subject) {
     String tenant = orNa(event.getTenantId());
+    if (subject != null && "condor_read".equals(subject.get("source"))) {
+      return buildCondorReadEmbed(event, tenant, subject);
+    }
     String tripTicks = subjectStr(subject, "trip_ticks");
     String ticks = subjectStr(subject, "consecutive_ticks") + "/" + tripTicks;
 
@@ -190,6 +193,29 @@ public class AccountKillSwitchCapAlerter {
     fields.add(new WebhookEmbed.Field("failures", subjectStr(subject, "failures"), false));
     fields.add(new WebhookEmbed.Field("consecutive_ticks", ticks, false));
 
+    String footer = "workflow_id: " + orNa(event.getWorkflowId());
+    return new WebhookEmbed(title, description, AlertColors.YELLOW, footer, fields);
+  }
+
+  /**
+   * #908: an unreadable gated-condor hold (YELLOW, once per streak). Its defined max loss is NOT in
+   * the cap total until the hold's start input reads again.
+   */
+  private WebhookEmbed buildCondorReadEmbed(
+      AuditEvent event, String tenant, Map<String, Object> subject) {
+    String title = ":hourglass_flowing_sand: Account cap: condor hold unreadable on " + tenant;
+    String description =
+        "A running condor hold's start input could not be read, so its defined max loss is NOT"
+            + " charged to the account cap. On a small book the cap fail-closes after the MTM"
+            + " debounce; on a larger book it stays armed without this condor. Check the"
+            + " CondorHoldWorkflow and the orchestrator WARN log.";
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("tenant_id", tenant, false));
+    fields.add(new WebhookEmbed.Field("trading_day", subjectStr(subject, "trading_day"), false));
+    fields.add(
+        new WebhookEmbed.Field(
+            "condor_read_failures", subjectStr(subject, "condor_read_failures"), false));
+    fields.add(new WebhookEmbed.Field("listed", subjectStr(subject, "listed"), false));
     String footer = "workflow_id: " + orNa(event.getWorkflowId());
     return new WebhookEmbed(title, description, AlertColors.YELLOW, footer, fields);
   }

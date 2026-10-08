@@ -248,6 +248,33 @@ class AccountKillSwitchCapAlerterTest {
   }
 
   @Test
+  void mtmDeferredCondorReadSourceDispatchesCondorSpecificYellowEmbed() {
+    // #908: an unreadable condor hold reuses the deferred kind with source=condor_read; the page
+    // must name the condor read failure, not a quote blip.
+    WebhookClient webhook = mock(WebhookClient.class);
+    AccountKillSwitchCapAlerter alerter = new AccountKillSwitchCapAlerter(webhook, RESOLVER);
+
+    Map<String, Object> subject = new LinkedHashMap<>();
+    subject.put("trading_day", "2026-10-07");
+    subject.put("source", "condor_read");
+    subject.put("condor_read_failures", 1);
+    subject.put("listed", 3);
+    subject.put("scope", "account");
+    AuditEvent event =
+        event("AccountKillSwitchMtmDeferred", "t-staging_paper/account/killswitch", subject);
+
+    alerter.onAuditEvent(event);
+
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(16705372); // yellow
+    assertThat(embed.title()).contains("condor hold unreadable", "prod_real");
+    assertThat(embed.title()).doesNotContain("quote blip");
+    assertThat(embed.description()).contains("NOT charged", "max loss");
+    assertThat(field(embed, "condor_read_failures")).isEqualTo("1");
+    assertThat(field(embed, "trading_day")).isEqualTo("2026-10-07");
+  }
+
+  @Test
   void mtmDeferredNullSubjectIsSafe() {
     // Non-throwing / never-lose contract: a null-subject deferred event still pages (n/a fields).
     WebhookClient webhook = mock(WebhookClient.class);
