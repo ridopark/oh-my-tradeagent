@@ -32,7 +32,11 @@ public class MarketCalendarActivitiesImpl implements MarketCalendarActivities {
   @Override
   public Duration durationUntilEodCloseEt(LocalTime eodEt) {
     ZonedDateTime now = ZonedDateTime.now(clock).withZoneSameInstant(ET);
-    ZonedDateTime eod = now.with(eodEt).withSecond(0).withNano(0);
+    // #913: with(LocalTime) replaces the WHOLE time of day (hour, minute, second, nano), so a
+    // whole-minute target (every config HH:MM time) already lands on :00.000. The former
+    // withSecond(0).withNano(0) was redundant for those and silently truncated second-precision
+    // targets (the condor session's entry + 30s bar-settle delay collapsed to the minute).
+    ZonedDateTime eod = now.with(eodEt);
     if (!now.isBefore(eod)) {
       return Duration.ZERO;
     }

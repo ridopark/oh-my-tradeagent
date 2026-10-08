@@ -66,6 +66,62 @@ class MarketCalendarActivitiesImplTest {
     assertThat(d).isEqualTo(Duration.ZERO);
   }
 
+  // ---------- #913: second-precision targets ----------
+
+  private static Clock clockAtEtSeconds(int hour, int minute, int second, int nano) {
+    Instant t = ZonedDateTime.of(2026, 10, 7, hour, minute, second, nano, ET).toInstant();
+    return Clock.fixed(t, ZoneOffset.UTC);
+  }
+
+  @Test
+  void secondPrecisionTarget_landsOnItsSeconds_notTheMinute() {
+    // The condor session sleeps to entry + 30s (14:00:30) so the 13:59 bar can publish. The old
+    // withSecond(0) truncated it to 14:00:00.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEtSeconds(13, 50, 0, 0));
+
+    Duration d = svc.durationUntilEodCloseEt(LocalTime.of(14, 0, 30));
+
+    assertThat(d).isEqualTo(Duration.ofMinutes(10).plusSeconds(30));
+  }
+
+  @Test
+  void secondPrecisionTarget_betweenTheMinuteAndItsSeconds_isStillPositive() {
+    // 14:00:10 is past 14:00:00 but before 14:00:30 — the old code returned ZERO here.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEtSeconds(14, 0, 10, 0));
+
+    assertThat(svc.durationUntilEodCloseEt(LocalTime.of(14, 0, 30)))
+        .isEqualTo(Duration.ofSeconds(20));
+  }
+
+  @Test
+  void wholeMinuteEodTarget_isExactlyUnchanged_fromAnOffMinuteNow() {
+    // PositionWorkflow EOD force-flatten path: whole-minute targets (schema pattern HH:MM). With
+    // "now" carrying seconds and nanos, the result must still land exactly on 15:30:00.000.
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEtSeconds(15, 29, 17, 250_000_000));
+
+    assertThat(svc.durationUntilEodCloseEt(LocalTime.of(15, 30)))
+        .isEqualTo(Duration.ofSeconds(42).plusMillis(750));
+  }
+
+  @Test
+  void pastSecondPrecisionTarget_returnsZero() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEtSeconds(14, 0, 31, 0));
+
+    assertThat(svc.durationUntilEodCloseEt(LocalTime.of(14, 0, 30))).isEqualTo(Duration.ZERO);
+  }
+
+  @Test
+  void exactlyAtTarget_returnsZero() {
+    MarketCalendarActivitiesImpl svc =
+        new MarketCalendarActivitiesImpl(clockAtEtSeconds(14, 0, 30, 0));
+
+    assertThat(svc.durationUntilEodCloseEt(LocalTime.of(14, 0, 30))).isEqualTo(Duration.ZERO);
+  }
+
   @Test
   void expiry_sameDayBeforeFifteenThirty_returnsPositive() {
     MarketCalendarActivitiesImpl svc =
