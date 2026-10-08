@@ -1,13 +1,19 @@
 package com.ohmytradeagent.audit;
 
+import static org.jooq.impl.DSL.field;
+import static org.jooq.impl.DSL.name;
+import static org.jooq.impl.DSL.table;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.contract.AuditEvent;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -27,7 +33,7 @@ import org.springframework.stereotype.Component;
  * infra/k8s/57-audit-completeness-check-cron.yaml).
  */
 @Component
-public class JooqAuditEventSource implements AuditEventSource, AuditPairSource {
+public class JooqAuditEventSource implements AuditEventSource, AuditPairSource, PriorEntrySource {
 
   private static final Logger log = LoggerFactory.getLogger(JooqAuditEventSource.class);
   private static final TypeReference<Map<String, Object>> SUBJECT_TYPE = new TypeReference<>() {};
@@ -53,6 +59,30 @@ public class JooqAuditEventSource implements AuditEventSource, AuditPairSource {
             r ->
                 new AuditPairSource.TenantStrategy(
                     r.get("tenant_id", String.class), r.get("strategy_id", String.class)));
+  }
+
+  @Override
+  public Set<String> correlationIdsWithEntry(
+      String tenantId,
+      String strategyId,
+      Set<String> correlationIds,
+      OffsetDateTime fromInclusive,
+      OffsetDateTime toExclusive) {
+    if (correlationIds.isEmpty()) {
+      return Set.of();
+    }
+    // Same (tenant_id, strategy_id, occurred_at) index as readWindow; only runs for the handful of
+    // lifecycles that hard-closed in the window without an entry in it.
+    return new HashSet<>(
+        dsl.selectDistinct(field(name("correlation_id"), String.class))
+            .from(table(name("audit_log")))
+            .where(field(name("tenant_id"), String.class).eq(tenantId))
+            .and(field(name("strategy_id"), String.class).eq(strategyId))
+            .and(field(name("occurred_at"), OffsetDateTime.class).ge(fromInclusive))
+            .and(field(name("occurred_at"), OffsetDateTime.class).lt(toExclusive))
+            .and(field(name("kind"), String.class).in(AuditEventKinds.ENTRY_KINDS))
+            .and(field(name("correlation_id"), String.class).in(correlationIds))
+            .fetch(field(name("correlation_id"), String.class)));
   }
 
   @Override

@@ -135,14 +135,17 @@ class LedgerRederiverTest {
   }
 
   @Test
-  void positionClosedWithoutPriorEntryReportsOrphanClose() {
-    // Hard-terminal close with no prior entry on the same correlation_id is an actual divergence.
+  void positionClosedWithoutEntryInSliceIsReportedNotJudged() {
+    // #925: a hard close with no entry IN THIS SLICE is reported, not judged — a multi-day hold's
+    // entry sits in an earlier window, so only the caller (which can look back) can tell an orphan
+    // close from a cross-window one. Mirrors how #853 reports unclosed lifecycles.
     String corr = "signal-orphan";
-    List<AuditEvent> events = new ArrayList<>(List.of(event(corr, "PositionClosed", t(0, 0))));
+    AuditEvent close = event(corr, "PositionClosed", t(0, 0));
+    List<AuditEvent> events = new ArrayList<>(List.of(close));
 
-    List<Divergence> findings = rederiver.rederive(events).divergences();
-    assertThat(findings).hasSize(1);
-    assertThat(findings.get(0).kind()).isEqualTo(Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY);
+    LedgerRederiver.Rederivation r = rederiver.rederive(events);
+    assertThat(r.divergences()).isEmpty();
+    assertThat(r.closedWithoutEntry()).containsEntry(corr, close.getEventId());
   }
 
   @Test
