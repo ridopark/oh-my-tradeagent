@@ -801,6 +801,57 @@ class OrderFailureAlerterTest {
   }
 
   @Test
+  void killSwitchWorkflowDown_stillDownPagesRed_recreatedPagesYellow_nullSafe() {
+    // #911: a kill switch that is not running leaves pre-trade checks failing closed (RED); one
+    // recreated over a closed run is back but lost any manual trip it held (YELLOW).
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> down = new java.util.LinkedHashMap<>();
+    down.put("scope", "account");
+    down.put("prior_status", "TERMINATED");
+    down.put("recreated", false);
+    down.put("consecutive_failures", 3);
+    alerter.onAuditEvent(event("KillSwitchWorkflowDown", "t-dev/account-killswitch", down));
+    WebhookEmbed red = capture(webhook);
+    assertThat(red.color()).isEqualTo(AlertColors.RED);
+    assertThat(red.title()).contains("DOWN");
+    assertThat(field(red, "prior_status")).isEqualTo("TERMINATED");
+    assertThat(red.footer()).contains("t-dev/account-killswitch");
+
+    WebhookClient webhook2 = mock(WebhookClient.class);
+    OrderFailureAlerter alerter2 =
+        new OrderFailureAlerter(
+            webhook2, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> recreated = new java.util.LinkedHashMap<>(down);
+    recreated.put("recreated", true);
+    recreated.put("tripped", false);
+    recreated.put("state_unknown", false);
+    alerter2.onAuditEvent(event("KillSwitchWorkflowDown", "wf", recreated));
+    WebhookEmbed yellow = capture(webhook2);
+    assertThat(yellow.color()).isEqualTo(AlertColors.YELLOW);
+    assertThat(yellow.title()).contains("RECREATED");
+    assertThat(field(yellow, "tripped")).isEqualTo("false");
+
+    // #911 R1: the closed run's state was unreadable, so the switch came back TRIPPED — RED.
+    WebhookClient webhook4 = mock(WebhookClient.class);
+    Map<String, Object> unknown = new java.util.LinkedHashMap<>(recreated);
+    unknown.put("tripped", true);
+    unknown.put("state_unknown", true);
+    new OrderFailureAlerter(webhook4, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true)
+        .onAuditEvent(event("KillSwitchWorkflowDown", "wf", unknown));
+    WebhookEmbed unknownEmbed = capture(webhook4);
+    assertThat(unknownEmbed.color()).isEqualTo(AlertColors.RED);
+    assertThat(unknownEmbed.title()).contains("TRIPPED");
+
+    // All-keys-absent render must survive (a throw is swallowed upstream and loses the page).
+    WebhookClient webhook3 = mock(WebhookClient.class);
+    new OrderFailureAlerter(webhook3, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true)
+        .onAuditEvent(event("KillSwitchWorkflowDown", null, new java.util.LinkedHashMap<>()));
+    assertThat(capture(webhook3).color()).isEqualTo(AlertColors.RED);
+  }
+
+  @Test
   void trailDisarmed_rendersYellowEmbed_nullSafe() {
     // #825: the disarm page must render (protection was just removed — losing this page silently
     // is the worst outcome) and must carry the prior anchor + operator identity.

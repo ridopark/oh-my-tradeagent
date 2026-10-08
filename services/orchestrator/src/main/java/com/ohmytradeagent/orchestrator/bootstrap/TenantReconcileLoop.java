@@ -3,7 +3,9 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import io.temporal.client.schedules.ScheduleClient;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -29,10 +31,10 @@ import org.springframework.stereotype.Component;
  * orchestrator restart. Phase A is <b>additive only</b>: it never tears down a kill-switch or
  * schedule (tenant deactivation is Phase F).
  *
- * <p>Because the underlying broker/Temporal calls are idempotent ({@code REJECT_DUPLICATE} /
- * swallowed {@code AlreadyRunning}), re-asserting every tick is safe — but to avoid per-tick log
- * spam we keep an in-memory {@code seen} set and only call the ensure logic for pairs not yet seen.
- * A re-ensure of an already-seen pair is still a benign no-op.
+ * <p>Because the underlying broker/Temporal calls are idempotent, re-asserting every tick is safe —
+ * but to avoid per-tick log spam we keep an in-memory {@code seen} set and only run the full ensure
+ * for pairs not yet seen. Exception (issue #911): a seen pair's KILL SWITCHES are still re-asserted
+ * every tick, because one can be terminated after its first ensure and must come back.
  *
  * <p><b>Not workflow code.</b> A Spring {@code @Scheduled} bean lives entirely outside Temporal
  * workflow history, so there is NO {@code Workflow.getVersion} marker here — replay determinism
@@ -101,8 +103,8 @@ public class TenantReconcileLoop implements ApplicationRunner {
    * starts serving — not a minute later.
    *
    * <p>Ordered {@link Ordered#LOWEST_PRECEDENCE} so the existing boot bootstrappers go first; the
-   * ensures are idempotent ({@code REJECT_DUPLICATE}) so overlapping with them is a no-op either
-   * way, and this only expresses that intent.
+   * ensures are idempotent so overlapping with them is a no-op either way, and this only expresses
+   * that intent.
    *
    * <p>Cannot wedge boot: {@link #reconcileOnce} catches per-pair failures and swallows a failing
    * {@code registry.list()}, leaving the pair unseen and retried on the next tick.
@@ -146,8 +148,11 @@ public class TenantReconcileLoop implements ApplicationRunner {
 
     ScheduleClient scheduleClient = null;
     int ensured = 0;
+    // The account switch is per TENANT: ensure it once per tick, not once per strategy.
+    Map<String, Boolean> accountOk = new HashMap<>();
     for (TenantStrategy ts : desired) {
       if (seen.contains(ts)) {
+        reassertKillSwitches(ts, accountOk);
         continue;
       }
       // A pair is marked seen ONLY once both ensures report success, so a transient failure
@@ -160,8 +165,9 @@ public class TenantReconcileLoop implements ApplicationRunner {
           // Lazily build the ScheduleClient only when there is at least one new pair to ensure.
           scheduleClient = reconciliationScheduleBootstrapper.newScheduleClient();
         }
-        boolean killSwitchOk =
-            killSwitchBootstrapper.ensureForTenantStrategy(ts.tenantId(), ts.strategyId());
+        boolean strategyOk =
+            killSwitchBootstrapper.ensureStrategyKillSwitch(ts.tenantId(), ts.strategyId());
+        boolean killSwitchOk = ensureAccountOnce(ts.tenantId(), accountOk) && strategyOk;
         boolean reconOk =
             reconciliationScheduleBootstrapper.ensureForTenantStrategy(
                 scheduleClient, ts.tenantId(), ts.strategyId());
@@ -192,5 +198,27 @@ public class TenantReconcileLoop implements ApplicationRunner {
     if (ensured > 0) {
       log.info("tenant reconcile: ensured {} new (tenant, strategy) pair(s) this tick", ensured);
     }
+  }
+
+  /**
+   * Issue #911: a seen pair's kill switches are re-asserted every tick — a kill switch can close
+   * AFTER its first ensure (operator terminate), and latching it would leave it down until a
+   * restart. The ensure is a describe when RUNNING, and owns its own logging and paging.
+   */
+  private void reassertKillSwitches(TenantStrategy ts, Map<String, Boolean> accountOk) {
+    try {
+      killSwitchBootstrapper.ensureStrategyKillSwitch(ts.tenantId(), ts.strategyId());
+      ensureAccountOnce(ts.tenantId(), accountOk);
+    } catch (RuntimeException e) {
+      log.error(
+          "tenant reconcile: kill-switch re-assert failed tenant={} strategy={}",
+          ts.tenantId(),
+          ts.strategyId(),
+          e);
+    }
+  }
+
+  private boolean ensureAccountOnce(String tenantId, Map<String, Boolean> accountOk) {
+    return accountOk.computeIfAbsent(tenantId, killSwitchBootstrapper::ensureAccountKillSwitch);
   }
 }
