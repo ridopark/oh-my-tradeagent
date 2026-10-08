@@ -90,6 +90,14 @@ public interface OrderIntentJournal {
   Optional<JournaledOrder> findLatestFilledByOcc(String tenantId, String strategyId, String occ);
 
   /**
+   * #930: the latest FILLED row for {@code occ} on one {@code side} ({@code BUY}/{@code SELL}),
+   * padding-agnostic like {@link #findLatestFilledByOcc}. Lets adoption anchor on the ENTRY even
+   * after a partial exit made a SELL the latest fill.
+   */
+  Optional<JournaledOrder> findLatestFilledByOccAndSide(
+      String tenantId, String strategyId, String occ, String side);
+
+  /**
    * Phase 2 (kill-switch realized re-source): all FILLED rows for one {@code side} ({@code BUY} =
    * entries, {@code SELL} = exits) on {@code tradingDay} (America/New_York) for ({@code tenantId},
    * {@code strategyId}), ordered {@code filled_at ASC, recorded_at ASC} (FIFO). Rows with a null

@@ -455,6 +455,9 @@ public final class AuditEventKinds {
           // ledger ENTRY is the adopted workflow's PositionEntered). Intentionally placed in
           // ALL_KINDS only, not in ENTRY_KINDS or any *_TERMINAL_CLOSE_KINDS group.
           "ReconAutoAdoptionInitiated",
+          // #930: the same OCC was auto-adopted 3+ times in one ET day (an adopt/close loop).
+          // Pages YELLOW via OrderFailureAlerter, once per OCC per day. Observability-only.
+          "ReconAdoptionLoop",
           // Issue #434: emitted by ReconciliationWorkflowImpl when a recon cycle refuses to
           // auto-adopt a broker remnant whose OCC has physically expired. An expired contract has
           // been dropped by the broker; adopting it would spawn a PositionWorkflow that lingers
