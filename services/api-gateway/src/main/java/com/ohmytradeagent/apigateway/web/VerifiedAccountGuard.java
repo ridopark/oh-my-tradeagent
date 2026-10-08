@@ -1,6 +1,7 @@
 package com.ohmytradeagent.apigateway.web;
 
 import com.ohmytradeagent.apigateway.config.ExecTargetProperties;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,9 +9,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.server.ResponseStatusException;
 
 /**
  * A1 (self-service-copytrade-onboarding) bypass-proof arm-guard. Given a tenant and its stored
@@ -165,11 +166,37 @@ public class VerifiedAccountGuard {
       return verifiedAccount;
     }
     if (!stored.equals(verifiedAccount)) {
-      log.warn("arm-guard: stored broker_account_id disagrees with the verified account");
-      throw new ResponseStatusException(
-          HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_ACCOUNT_MISMATCH");
+      log.warn(
+          "arm-guard: refusing to arm — stored broker_account_id={} but the verified account is {}",
+          stored,
+          verifiedAccount);
+      throw new AccountMismatchException(stored, verifiedAccount);
     }
     return stored;
+  }
+
+  /** A stored {@code broker_account_id} that the credentials do not authenticate (#871). */
+  static final class AccountMismatchException extends RuntimeException {
+    private final String stored;
+    private final String verified;
+
+    AccountMismatchException(String stored, String verified) {
+      super("REJECTED_ACCOUNT_MISMATCH");
+      this.stored = stored;
+      this.verified = verified;
+    }
+
+    /**
+     * 422 naming both ids, so the operator sees the cause rather than a generic refusal. Account
+     * ids are not secrets — the onboard flow already shows the verified one.
+     */
+    ResponseEntity<Map<String, Object>> toResponse() {
+      Map<String, Object> body = new LinkedHashMap<>();
+      body.put("status", "REJECTED_ACCOUNT_MISMATCH");
+      body.put("stored_broker_account_id", stored);
+      body.put("verified_broker_account_id", verified);
+      return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
+    }
   }
 
   /**

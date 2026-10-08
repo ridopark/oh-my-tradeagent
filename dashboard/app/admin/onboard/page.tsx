@@ -312,7 +312,12 @@ export default async function OnboardPage() {
       return { ok: false, status: 400 };
     }
     const r = await enableStrategy(tenant, strategy);
-    return { ok: r.ok, status: r.status, newVersion: r.newVersion };
+    return {
+      ok: r.ok,
+      status: r.status,
+      newVersion: r.newVersion,
+      accountMismatch: r.accountMismatch,
+    };
   }
 
   // Server action: promote a just-armed LIVE tenant to real trading via the Phase F activation route

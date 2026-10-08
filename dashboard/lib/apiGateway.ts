@@ -54,9 +54,15 @@ export interface StrategyConfigInput {
   correlation_id: string;
 }
 
+// #871: `accountMismatch` is set only when an ARMING write was refused because the strategy's bound
+// broker_account_id is not the account the verified keys authenticate (422 REJECTED_ACCOUNT_MISMATCH).
+export interface PostStrategyConfigResult extends PostBrokerCredentialResult {
+  accountMismatch?: boolean;
+}
+
 export async function postStrategyConfig(
   input: StrategyConfigInput,
-): Promise<PostBrokerCredentialResult> {
+): Promise<PostStrategyConfigResult> {
   const session = await auth();
   const tenantId = session?.tenantId;
   if (!tenantId) {
@@ -81,7 +87,13 @@ export async function postStrategyConfig(
       cache: "no-store",
       signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
     });
-    // Coarse result only — match the credential client (no body read).
+    // Coarse result only, plus one flag distinguishing the account-mismatch 422 from the other 422s.
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => null)) as { status?: string } | null;
+      if (body?.status === "REJECTED_ACCOUNT_MISMATCH") {
+        return { ok: false, status: 422, accountMismatch: true };
+      }
+    }
     return { ok: res.ok, status: res.status };
   } catch {
     // Transport/abort error — the write did not happen. Coarse failure, no thrown detail.

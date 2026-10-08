@@ -118,8 +118,12 @@ public class OperatorStrategyEnableController {
     // (c) flip enabled=true on the stored config, binding the verified broker_account_id (#871),
     // and
     // CAS via the existing update workflow.
-    config.setBrokerAccountId(
-        VerifiedAccountGuard.bindAccount(config.getBrokerAccountId(), verification.account()));
+    try {
+      config.setBrokerAccountId(
+          VerifiedAccountGuard.bindAccount(config.getBrokerAccountId(), verification.account()));
+    } catch (VerifiedAccountGuard.AccountMismatchException mismatch) {
+      return mismatch.toResponse();
+    }
     config.setEnabled(true);
 
     String correlationId =

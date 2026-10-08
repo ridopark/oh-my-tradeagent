@@ -1,7 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -150,12 +149,13 @@ class StrategyConfigControllerTest {
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
         .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
 
-    assertThatThrownBy(() -> controller.write(reqWithTenant(TENANT), armingBody()))
-        .isInstanceOf(ResponseStatusException.class)
-        .satisfies(
-            e ->
-                assertThat(((ResponseStatusException) e).getStatusCode())
-                    .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY));
+    var resp = controller.write(reqWithTenant(TENANT), armingBody());
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+    assertThat(resp.getBody())
+        .containsEntry("status", "REJECTED_ACCOUNT_MISMATCH")
+        .containsEntry("stored_broker_account_id", "111111111")
+        .containsEntry("verified_broker_account_id", "380083820");
     verify(stub, never()).update(any());
   }
 

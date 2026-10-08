@@ -161,16 +161,24 @@ class OperatorStrategyEnableControllerTest {
     assertThat(captor.getValue().getConfig().getBrokerAccountId()).isEqualTo("380083820");
   }
 
-  /** Stored account disagrees with the creds' verified account → refuse to arm (never re-route). */
+  /**
+   * Stored account disagrees with the creds' verified account → refuse to arm (never re-route). The
+   * 422 body names BOTH ids so the onboard banner can say exactly what is wrong (#718: a generic
+   * refusal on the dashboard hid the cause).
+   */
   @Test
-  void enable_storedAccountMismatch_is422_noWorkflowStarted() {
+  void enable_storedAccountMismatch_is422NamingBothIds_noWorkflowStarted() {
     stubStoredDisabledWithAccount("111111111");
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
         .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
 
-    assertResponseStatus(
-        () -> controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null),
-        HttpStatus.UNPROCESSABLE_ENTITY);
+    var resp = controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+    assertThat(resp.getBody())
+        .containsEntry("status", "REJECTED_ACCOUNT_MISMATCH")
+        .containsEntry("stored_broker_account_id", "111111111")
+        .containsEntry("verified_broker_account_id", "380083820");
     verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
   }
 

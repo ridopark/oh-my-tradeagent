@@ -222,6 +222,25 @@ class StrategyConfigWriterTest {
     verify(audit, never()).log(any());
   }
 
+  /**
+   * #871: the boot invariant exempts explicitly DISABLED rows, which is sound only because a
+   * null-id row can then only be one that was never armed: every arm route binds the verified id,
+   * and a set id can never be cleared — not even on a disabled row, or a strategy that traded could
+   * be disabled, cleared and slip past the check while still holding positions.
+   */
+  @Test
+  void rejectsBrokerAccountIdCleared_evenOnADisabledRow_871() {
+    StrategyConfig stored = liveSafeStored();
+    stored.setEnabled(false);
+    stored.setBrokerAccountId("380083820");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId(null);
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("broker_account_id");
+    verify(audit, never()).log(any());
+  }
+
   @Test
   void allowsDailyLossThresholdChange_noLongerDangerous() {
     // single-account-loss-rule Phase 4a: daily_loss_threshold is a dead field (the account cap is

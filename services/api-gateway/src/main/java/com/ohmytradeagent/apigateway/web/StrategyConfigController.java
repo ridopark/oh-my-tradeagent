@@ -126,7 +126,11 @@ public class StrategyConfigController {
                 HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNSUPPORTED_TARGET");
         case FAULT -> throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
       }
-      account = VerifiedAccountGuard.bindAccount(account, verification.account());
+      try {
+        account = VerifiedAccountGuard.bindAccount(account, verification.account());
+      } catch (VerifiedAccountGuard.AccountMismatchException mismatch) {
+        return mismatch.toResponse();
+      }
     }
     if (body.config() != null) {
       body.config().setBrokerAccountId(account);

@@ -82,6 +82,9 @@ export interface EnableStrategyResult {
   status: number;
   // Set only on a 200 UPDATED — the persisted config version after the enabled=true flip.
   newVersion?: number;
+  // #871: set only on a 422 REJECTED_ACCOUNT_MISMATCH — the stored broker_account_id and the account
+  // the verified keys authenticate. Both non-secret.
+  accountMismatch?: { storedAccountId: string; verifiedAccountId: string };
 }
 
 // Arm a just-onboarded tenant's strategy = flip enabled=true via the A1 operator enable route
@@ -111,14 +114,33 @@ export async function enableStrategy(
       signal: AbortSignal.timeout(API_GATEWAY_TIMEOUT_MS),
     });
     let newVersion: number | undefined;
+    let accountMismatch: EnableStrategyResult["accountMismatch"];
     if (res.ok) {
       // UPDATED body is {status, new_version} — non-secret. A parse failure is non-fatal.
       const body = (await res.json().catch(() => null)) as {
         new_version?: number;
       } | null;
       newVersion = body?.new_version;
+    } else if (res.status === 422) {
+      // A 422 is either "no verified account" (no body detail) or REJECTED_ACCOUNT_MISMATCH, whose
+      // body names both ids. Read it so the banner can say which (#718: a generic refusal hid it).
+      const body = (await res.json().catch(() => null)) as {
+        status?: string;
+        stored_broker_account_id?: string;
+        verified_broker_account_id?: string;
+      } | null;
+      if (
+        body?.status === "REJECTED_ACCOUNT_MISMATCH" &&
+        body.stored_broker_account_id &&
+        body.verified_broker_account_id
+      ) {
+        accountMismatch = {
+          storedAccountId: body.stored_broker_account_id,
+          verifiedAccountId: body.verified_broker_account_id,
+        };
+      }
     }
-    return { ok: res.ok, status: res.status, newVersion };
+    return { ok: res.ok, status: res.status, newVersion, accountMismatch };
   } catch {
     // Transport/abort error — the arm did not complete.
     return { ok: false, status: 0 };

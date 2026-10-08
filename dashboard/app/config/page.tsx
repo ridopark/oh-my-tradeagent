@@ -514,6 +514,11 @@ export default async function ConfigPage({
         tone: "err",
         msg: "That change is not allowed (dangerous/tighten-only).",
       };
+    } else if (errorStatus === "422-account") {
+      banner = {
+        tone: "err",
+        msg: "Not enabled — this strategy's broker account does not match your verified broker keys. Contact the operator.",
+      };
     } else if (errorStatus === "422") {
       banner = {
         tone: "err",
@@ -633,7 +638,11 @@ export default async function ConfigPage({
 
     revalidatePath("/config");
     // NEVER put config values in the redirect — only a coarse saved/error marker.
-    redirect(result.ok ? "/config?saved=1" : "/config?error=" + result.status);
+    redirect(
+      result.ok
+        ? "/config?saved=1"
+        : "/config?error=" + (result.accountMismatch ? "422-account" : result.status),
+    );
   }
 
   // account-loss-cap-db (Phase 3) server action: re-verifies the session, RECOMPUTES
