@@ -161,6 +161,16 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   private static final String CONDOR_READ_V1_WORKFLOW_ID =
       "account-killswitch-condor-read-failure-v1-legacy";
 
+  // #906: a v2 (killswitch-condor-max-loss-v1 recorded at 2) history of a plain priced book over
+  // two ticks — no condor realized read. Generated once from the pre-#906 impl; never regenerate.
+  private static final String CONDOR_V2_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-condor-v2-legacy-history.json";
+  private static final Path CONDOR_V2_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-condor-v2-legacy-history.json");
+  private static final String CONDOR_V2_WORKFLOW_ID = "account-killswitch-condor-v2-legacy";
+
   // PLAN-2026-08-12: a pre-rollover-clear in-flight history for a TRIPPED
   // (auto:account_daily_loss) execution whose trading day ROLLS OVER mid-history. Every other
   // fixture in this class pins todayEt to a single date, so none of them enters the rollover branch
@@ -1153,6 +1163,146 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         .isNotEmpty();
     Files.createDirectories(CONDOR_READ_V1_FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(CONDOR_READ_V1_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  /**
+   * #906 SENTINEL. Replays the v2 history with every recorded {@code accountOpenBook} result
+   * rewritten to carry {@code condorHoldIds: []} — the shape of a tick a NEW activity worker
+   * answered while an OLD (v2) workflow worker ran it mid-roll. (Unrewritten, the field is absent →
+   * null → the read is skipped anyway, which would make this sentinel toothless.) The recorded
+   * marker resolves to 2, so the per-strategy condor realized read ({@code v>=3}, a NEW exec
+   * activity command every tick) stays off and the stream replays byte-for-byte.
+   *
+   * <p><b>Teeth verified 2026-10-07 (observed).</b> With the read gated at {@code
+   * condorMaxLossVersion >= 2} this replay throws {@code [TMPRL1100] Failure handling event 74 of
+   * type 'EVENT_TYPE_TIMER_STARTED' ... does not match command type
+   * COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK}. Without the id rewrite the same mutant replayed clean.
+   */
+  @Test
+  void legacyCondorV2HistoryReplaysWithoutCondorRealizedRead() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(CONDOR_V2_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. It is one-shot (pre-change only); see"
+                + " regenerateCondorV2Fixture.",
+            CONDOR_V2_FIXTURE_RESOURCE)
+        .isNotNull();
+    String json =
+        new String(
+            getClass()
+                .getClassLoader()
+                .getResourceAsStream(CONDOR_V2_FIXTURE_RESOURCE)
+                .readAllBytes(),
+            StandardCharsets.UTF_8);
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode history = mapper.readTree(json);
+    Map<String, String> activityTypeByScheduledId = new LinkedHashMap<>();
+    int rewritten = 0;
+    for (JsonNode event : history.get("events")) {
+      JsonNode scheduled = event.get("activityTaskScheduledEventAttributes");
+      if (scheduled != null) {
+        activityTypeByScheduledId.put(
+            event.get("eventId").asText(), scheduled.get("activityType").get("name").asText());
+      }
+      JsonNode completed = event.get("activityTaskCompletedEventAttributes");
+      if (completed != null
+          && "AccountOpenBook"
+              .equals(activityTypeByScheduledId.get(completed.get("scheduledEventId").asText()))) {
+        ObjectNode payload = (ObjectNode) completed.get("result").get("payloads").get(0);
+        ObjectNode book =
+            (ObjectNode) mapper.readTree(Base64.getDecoder().decode(payload.get("data").asText()));
+        book.putArray("condorHoldIds");
+        payload.put("data", Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(book)));
+        rewritten++;
+      }
+    }
+    assertThat(rewritten).as("fixture must record accountOpenBook results").isPositive();
+
+    WorkflowReplayer.replayWorkflowExecution(
+        WorkflowExecutionHistory.fromJson(mapper.writeValueAsString(history)),
+        AccountKillSwitchWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot generator for {@link #legacyCondorV2HistoryReplaysWithoutCondorRealizedRead}: the
+   * PRODUCTION impl as of #918 (marker at 2), one priced position, two ticks, no trip. Regenerating
+   * after #906 fails the marker assert.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateCondorV2Fixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      DailyPnlExecActivity execPnl = Mockito.mock(DailyPnlExecActivity.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+      AccountSnapshotActivity accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
+
+      when(calendar.isMarketOpen()).thenReturn(true);
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+      when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn("alpaca-paper");
+      when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+          .thenReturn(List.of(new TenantStrategyBrokerTarget("s1", "alpaca-paper")));
+      when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+      AccountSnapshotResult snap = new AccountSnapshotResult();
+      snap.setSchemaVersion(1L);
+      snap.setEquity(new BigDecimal("5000"));
+      when(accountSnapshot.accountSnapshot(any())).thenReturn(snap);
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(
+              new AccountOpenBook(
+                  List.of(
+                      new OpenPositionValuation(
+                          "NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
+                  1,
+                  0));
+      when(optionQuote.getOptionQuote(any()))
+          .thenAnswer(
+              inv ->
+                  okQuote(
+                      inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol(),
+                      new BigDecimal("3.00")));
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.newWorker(MARKET_DATA_QUEUE).registerActivitiesImplementations(optionQuote);
+      env.newWorker("broker-alpaca-paper")
+          .registerActivitiesImplementations(accountSnapshot, execPnl);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(CONDOR_V2_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+      env.sleep(Duration.ofSeconds(75));
+      env.sleep(Duration.ofSeconds(60));
+      assertThat(wf.killswitchState().getTripped()).isFalse();
+      json = client.fetchHistory(CONDOR_V2_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    WorkflowExecutionHistory history = WorkflowExecutionHistory.fromJson(json);
+    assertThat(markerVersions(history, "killswitch-condor-max-loss-v1"))
+        .as("fixture must record killswitch-condor-max-loss-v1 at 2 (pre-#906)")
+        .containsOnly(2)
+        .isNotEmpty();
+    Files.createDirectories(CONDOR_V2_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(CONDOR_V2_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   /** Recorded versions of every {@code account-mtm-debounce-v1} marker in {@code history}. */

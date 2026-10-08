@@ -23,6 +23,7 @@ import com.ohmytradeagent.contract.ResetKillSwitchRequest;
 import com.ohmytradeagent.contract.TripKillSwitchRequest;
 import com.ohmytradeagent.contract.activities.AccountSnapshotActivity;
 import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
+import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AccountKillSwitchCascadeActivities;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook;
 import com.ohmytradeagent.orchestrator.activities.AccountOpenBook.OpenPositionValuation;
@@ -115,6 +116,8 @@ class AccountKillSwitchWorkflowImplTest {
     when(accountPnl.tenantStrategyBrokerTargets(anyString()))
         .thenReturn(List.of(new TenantStrategyBrokerTarget("s1", BROKER_TARGET)));
     when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+    when(execPnl.computeCondorRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(BigDecimal.ZERO);
     when(accountPnl.accountOpenBook(anyString())).thenReturn(new AccountOpenBook(List.of(), 0, 0));
     when(cascade.cascadeAccountRiskBreach(anyString(), anyString(), anyString(), anyString()))
         .thenReturn(0L);
@@ -489,6 +492,83 @@ class AccountKillSwitchWorkflowImplTest {
     KillSwitchState s = stub.killswitchState();
     assertThat(s.getTripped()).isTrue();
     assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // #906: once today's hold is no longer Running, its booked condor realized counts toward the cap.
+  // -2000 mirror realized + -4000 condor realized = -6000 < -5000.
+  @Test
+  void heartbeat_completedCondorRealized_countsTowardCap() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-2000"));
+    when(execPnl.computeCondorRealizedPnl("dev", "s1", LocalDate.of(2026, 5, 14)))
+        .thenReturn(new BigDecimal("-4000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-realized");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
+  // #906 handoff — the overlap tick: the closes are already booked (-4800) but today's hold is
+  // still Running, so it is charged ONLY at its max loss (-300) and its realized is not read. A
+  // double count (-5100) would trip.
+  @Test
+  void heartbeat_condorHoldStillRunning_chargedAtMaxLossOnly_realizedNotCounted() {
+    String todaysHold = WorkflowIds.condorHold("dev", "s1", "2026-05-14");
+    when(accountPnl.accountOpenBook(anyString()))
+        .thenReturn(
+            new AccountOpenBook(List.of(), 0, 0, new BigDecimal("300"), 0, 1, List.of(todaysHold)));
+    when(execPnl.computeCondorRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-4800"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-overlap");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isFalse();
+    assertThat(s.getOpenMtm()).isEqualByComparingTo("-300");
+    verify(execPnl, never()).computeCondorRealizedPnl(anyString(), anyString(), any());
+  }
+
+  // #919 review: the condor realized read is PAPER-scoped. A "-live" strategy never schedules
+  // ComputeCondorRealizedPnl (exec-alpaca-live is manually rolled and may not register it; a
+  // missing activity would defer — disarm — a real-money cap every tick).
+  @Test
+  void heartbeat_liveStrategy_neverSchedulesCondorRealizedRead() {
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget("s1", BROKER_TARGET),
+                new TenantStrategyBrokerTarget("s-live", "alpaca-live")));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-live-scope");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75 + 60));
+
+    verify(execPnl, never()).computeCondorRealizedPnl(anyString(), eq("s-live"), any());
+    verify(execPnl, atLeast(2)).computeCondorRealizedPnl(anyString(), eq("s1"), any());
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+  }
+
+  // #906: a failed condor realized read defers the tick like any per-strategy realized read (G2:
+  // never sum a partial) — no trip on the mirror's -6000 alone, and no thrown heartbeat.
+  @Test
+  void heartbeat_condorRealizedReadFails_defersNoTrip() {
+    when(execPnl.computeRealizedPnl(anyString(), anyString(), any()))
+        .thenReturn(new BigDecimal("-6000"));
+    when(execPnl.computeCondorRealizedPnl(anyString(), anyString(), any()))
+        .thenThrow(new RuntimeException("exec down"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-realized-fail");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    assertThat(stub.killswitchState().getTripped()).isFalse();
+    assertThat(countKind("KillSwitchHeartbeatError")).isEqualTo(0L);
   }
 
   // #908 (carried LOW): a condor-only book reports its holds to the cap-inactive holds-risk probe.

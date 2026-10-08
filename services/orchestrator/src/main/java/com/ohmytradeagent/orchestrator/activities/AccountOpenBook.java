@@ -33,6 +33,9 @@ import java.util.List;
  *     listed position that failed to value.
  * @param condorHolds Running {@code CondorHoldWorkflow}s listed (readable or not) — the condor
  *     count the cap-inactive holds-risk probe adds to {@code listed}.
+ * @param condorHoldIds #906: workflow ids of those Running holds. The cap reads a strategy's condor
+ *     REALIZED only when that day's hold is absent here, so a hold is never both charged at max
+ *     loss and counted realized. Null in a result recorded before the field existed.
  */
 public record AccountOpenBook(
     List<OpenPositionValuation> positions,
@@ -40,10 +43,28 @@ public record AccountOpenBook(
     int valueFailures,
     BigDecimal condorMaxLoss,
     int condorReadFailures,
-    int condorHolds) {
+    int condorHolds,
+    List<String> condorHoldIds) {
 
   public AccountOpenBook(List<OpenPositionValuation> positions, int listed, int valueFailures) {
-    this(positions, listed, valueFailures, BigDecimal.ZERO, 0, 0);
+    this(positions, listed, valueFailures, BigDecimal.ZERO, 0, 0, List.of());
+  }
+
+  public AccountOpenBook(
+      List<OpenPositionValuation> positions,
+      int listed,
+      int valueFailures,
+      BigDecimal condorMaxLoss,
+      int condorReadFailures,
+      int condorHolds) {
+    this(
+        positions,
+        listed,
+        valueFailures,
+        condorMaxLoss,
+        condorReadFailures,
+        condorHolds,
+        List.of());
   }
 
   /**

@@ -349,4 +349,98 @@ class DailyPnlExecActivityImplTest {
     assertThat(DailyPnlExecActivityImpl.realizePerSymbol(entriesAll, exitsAll, null))
         .isEqualByComparingTo("25.04");
   }
+
+  // ---------- #906: gated-condor realized for one day's attempt ----------
+
+  private static final String CONDOR_KEY = "condor-dev-condor-v1-" + DAY + "-";
+
+  private void condorRow(
+      String suffix, String side, String occ, OrderState state, Long filledQty, String price) {
+    OffsetDateTime at = DAY.atTime(18, 0).atOffset(java.time.ZoneOffset.UTC);
+    when(journal.findByIntentKey(CONDOR_KEY + suffix))
+        .thenReturn(
+            java.util.Optional.of(
+                new JournaledOrder(
+                    CONDOR_KEY + suffix,
+                    DAY.toString(),
+                    "dev",
+                    "condor-v1",
+                    "alpaca-paper",
+                    "cid-" + suffix,
+                    occ,
+                    side,
+                    filledQty == null ? 1L : filledQty,
+                    null,
+                    state,
+                    "brk-" + suffix,
+                    at,
+                    at,
+                    at,
+                    null,
+                    null,
+                    filledQty,
+                    price == null ? null : new BigDecimal(price),
+                    filledQty == null ? null : at,
+                    1L)));
+  }
+
+  /** Rung 0 missed, rung 1 filled 1 lot at a 0.80 credit (negative-is-credit notation). */
+  private void condorEntry() {
+    condorRow("r0", "SELL", "MLEG", OrderState.CANCELLED, null, null);
+    condorRow("r1", "SELL", "MLEG", OrderState.FILLED, 1L, "-0.80");
+  }
+
+  // Fully flattened: credit 0.80 - short covers (1.50 + 0.40) + long sales (0.30 + 0.05) = -0.75.
+  @Test
+  void condorRealized_completeFlatten_isCreditMinusCloseDebits() {
+    condorEntry();
+    condorRow("x0", "BUY", "XSP   261005C00601000", OrderState.FILLED, 1L, "1.50");
+    condorRow("x1", "BUY", "XSP   261005P00599000", OrderState.FILLED, 1L, "0.40");
+    condorRow("x2", "SELL", "XSP   261005C00604000", OrderState.FILLED, 1L, "0.30");
+    condorRow("x3", "SELL", "XSP   261005P00596000", OrderState.FILLED, 1L, "0.05");
+
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("-75");
+  }
+
+  @Test
+  void condorRealized_noAttemptToday_isZero() {
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("0");
+  }
+
+  // An attempt whose legs are not all closed never books the open credit as a gain.
+  @Test
+  void condorRealized_incompleteNoCloses_neverAGain() {
+    condorEntry();
+
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("0");
+  }
+
+  // Shorts covered, wings still open (worth >= 0): the partial loss is a conservative floor.
+  @Test
+  void condorRealized_incompleteShortsCovered_booksThePartialLoss() {
+    condorEntry();
+    condorRow("x0", "BUY", "XSP   261005C00601000", OrderState.FILLED, 1L, "1.50");
+    condorRow("x1", "BUY", "XSP   261005P00599000", OrderState.FILLED, 1L, "0.40");
+
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("-110");
+  }
+
+  // A close that filled fewer contracts than the entry leaves the attempt incomplete.
+  @Test
+  void condorRealized_partiallyFilledClose_isIncomplete() {
+    condorRow("r0", "SELL", "MLEG", OrderState.FILLED, 2L, "-0.80");
+    condorRow("x0", "BUY", "XSP   261005C00601000", OrderState.FILLED, 2L, "0.10");
+    condorRow("x1", "BUY", "XSP   261005P00599000", OrderState.FILLED, 2L, "0.10");
+    condorRow("x2", "SELL", "XSP   261005C00604000", OrderState.CANCELLED, 1L, "0.05");
+    condorRow("x3", "SELL", "XSP   261005P00596000", OrderState.FILLED, 2L, "0.05");
+
+    // x2 closed 1 of 2: incomplete, so the partial +135 (1.60 - 0.40 + 0.05 + 0.10, x100) is
+    // floored at zero.
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("0");
+  }
 }
