@@ -170,7 +170,8 @@ export function ManualEntryPanel({
   // a repeat entry is a SECOND PositionWorkflow — same as a repeated Discord BTO).
   heldOccs: string[];
   /**
-   * Contracts from recently ACCEPTED entry signals, newest first, offered as datalist suggestions.
+   * Contracts from recent entry signals (accepted, or received and then rejected — e.g. on
+   * MAX_POSITIONS), newest first, offered as datalist suggestions.
    * Suggestions only — the input still accepts anything typed by hand, which is the whole point of
    * a manual entry box. Empty when the signals read failed or the BFF predates /api/signals.
    */

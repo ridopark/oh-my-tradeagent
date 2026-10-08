@@ -1,5 +1,6 @@
 import "server-only";
 import { auth } from "@/auth";
+import { occFromParts } from "@/lib/occ";
 
 // Server-ONLY client for the off-ingress tenant-dashboard BFF. Never import this from a client
 // component. It reads the verified tenant_id from the session and injects it as X-Tenant-Id behind
@@ -656,8 +657,9 @@ function finite(v: unknown): number | null {
 }
 
 /**
- * An ACCEPTED entry signal — the system resolved a contract and decided to buy it, whether or not
- * the entry ever filled. Backs the /live manual-entry contract picker.
+ * An entry signal — received (whether or not it passed the risk gates) or accepted (the system
+ * resolved a contract and decided to buy it, whether or not the entry ever filled). Backs the /live
+ * manual-entry contract picker.
  */
 export interface Signal {
   occurred_at: string;
@@ -691,10 +693,18 @@ export function tradePnl(t: Trade): number | null {
   return (f.avg_fill_price - basis) * f.qty * 100;
 }
 
-/** The resolved contract on an accepted signal, or null when the subject carries none. */
+/**
+ * The contract a signal names, or null. A SignalAccepted subject carries the resolved
+ * `option_symbol`; a SignalReceived one (e.g. a BTO rejected on MAX_POSITIONS before resolution)
+ * carries only ticker/expiry/strike/right, so the OCC is derived from those.
+ */
 export function signalOcc(s: Signal): string | null {
-  const occ = parseSubject(s.subject).option_symbol;
-  return typeof occ === "string" && occ.trim() ? occ : null;
+  const subj = parseSubject(s.subject);
+  const occ = subj.option_symbol;
+  if (typeof occ === "string" && occ.trim()) {
+    return occ;
+  }
+  return occFromParts(subj.ticker, subj.expiry, subj.strike, subj.right);
 }
 
 export interface Order {

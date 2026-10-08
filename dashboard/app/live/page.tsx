@@ -325,7 +325,8 @@ export default async function LivePage() {
   // the dashboard and the BFF roll independently. If the dashboard lands first, this 404s — and
   // inside that Promise.all a 404 would reject the whole thing and render LiveUnavailable, taking
   // the operator page down for a convenience feature. Degrade to a plain text box instead.
-  const recentSignalOccs: RecentContract[] = await getSignals(50)
+  // 100 rows: an accepted signal appears twice in the feed (received, then accepted).
+  const recentSignalOccs: RecentContract[] = await getSignals(100)
     .then((r) => signalContractOptions(r.items))
     .catch(() => []);
 
@@ -944,9 +945,11 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// The contract list behind the manual-entry box: newest accepted signals first, one entry per
-// contract, and nothing already expired (offering an expired OCC guarantees a failed quote). Capped
-// because this is a type-ahead, not a history — the full feed lives on /trades.
+// The contract list behind the manual-entry box: newest entry signals first — accepted OR merely
+// received, so a BTO the risk gates turned away (e.g. MAX_POSITIONS) can still be entered by hand —
+// one entry per contract, and nothing already expired (offering an expired OCC guarantees a failed
+// quote). Newest-first dedupe keeps an accepted signal's row (it follows its own SignalReceived), so
+// its sized `contracts` survives. Capped because this is a type-ahead, not a history.
 function signalContractOptions(signals: Signal[]): RecentContract[] {
   const today = new Date().toISOString().slice(0, 10);
   const seen = new Set<string>();
@@ -967,7 +970,8 @@ function signalContractOptions(signals: Signal[]): RecentContract[] {
     seen.add(key);
     out.push({
       occ: occ.replace(/\s+/g, " ").trim(),
-      refPremium: signalNumber(s, "ref_premium"),
+      // A received-only signal has no ref_premium; its `price` is the same author-posted premium.
+      refPremium: signalNumber(s, "ref_premium") ?? signalNumber(s, "price"),
       contracts: signalNumber(s, "contracts"),
       // MM-DD: the year is noise at this width, and these are all recent by construction.
       on: s.occurred_at.slice(5, 10),
