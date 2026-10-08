@@ -31,16 +31,19 @@ import java.util.List;
  * @param condorReadFailures Running holds whose start input could not be read or is not a valid
  *     condor; charged nothing here — the workflow folds each one into the fail-close bound as a
  *     listed position that failed to value.
+ * @param condorHolds Running {@code CondorHoldWorkflow}s listed (readable or not) — the condor
+ *     count the cap-inactive holds-risk probe adds to {@code listed}.
  */
 public record AccountOpenBook(
     List<OpenPositionValuation> positions,
     int listed,
     int valueFailures,
     BigDecimal condorMaxLoss,
-    int condorReadFailures) {
+    int condorReadFailures,
+    int condorHolds) {
 
   public AccountOpenBook(List<OpenPositionValuation> positions, int listed, int valueFailures) {
-    this(positions, listed, valueFailures, BigDecimal.ZERO, 0);
+    this(positions, listed, valueFailures, BigDecimal.ZERO, 0, 0);
   }
 
   /**

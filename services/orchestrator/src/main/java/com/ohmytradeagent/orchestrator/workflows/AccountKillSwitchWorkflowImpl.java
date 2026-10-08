@@ -286,6 +286,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * {@code accountOpenBook} was answered by a new activity worker while an old workflow worker
    * ignored the field (mid-roll) must replay as the recorded no-trip. Read appended LAST (marker
    * order preserved).
+   *
+   * <p>#908: WIDENED to maxSupported=2 — at v&gt;=2 a tick with an unreadable condor hold pages
+   * {@code AccountKillSwitchMtmDeferred} ({@code source=condor_read}) once per streak, a NEW {@code
+   * audit.log} command. A history recorded at 1 replays as 1 (no page).
    */
   static final String VERSION_ACCOUNT_CONDOR_MAX_LOSS = "killswitch-condor-max-loss-v1";
 
@@ -545,6 +549,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   /** #899 gate, resolved once per heartbeat like {@link #expiredWorthZeroVersion}. */
   private int condorMaxLossVersion;
 
+  /**
+   * #908: true while consecutive ticks keep reporting an unreadable condor hold, so the page fires
+   * once per streak. Not carried across continue-as-new (a still-open streak re-pages once).
+   */
+  private boolean condorReadFailureStreak;
+
   @WorkflowInit
   public AccountKillSwitchWorkflowImpl(AccountKillSwitchWorkflowInput in) {
     if (in.getSchemaVersion() == null || in.getSchemaVersion() > 7L) {
@@ -718,7 +728,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
   private Integer probeOpenPositions() {
     try {
       AccountOpenBook book = accountPnl.accountOpenBook(input.getTenantId());
-      return book.listed();
+      return book.listed() + book.condorHolds();
     } catch (RuntimeException e) {
       return null;
     }
@@ -888,7 +898,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
     // #899: appended last (see the change-id javadoc).
     this.condorMaxLossVersion =
-        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 1);
+        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 2);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -1042,7 +1052,9 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       // DEFAULT_VERSION: legacy audit_log path — byte-identical to the pre-Phase-2 replay stream.
       realized = accountPnl.computeTenantRealizedPnl(input.getTenantId(), tradingDay);
     }
-    AccountOpenBook book = foldCondorReadFailures(accountPnl.accountOpenBook(input.getTenantId()));
+    AccountOpenBook rawBook = accountPnl.accountOpenBook(input.getTenantId());
+    pageCondorReadFailures(rawBook);
+    AccountOpenBook book = foldCondorReadFailures(rawBook);
 
     OpenBookMtm valued = valueOpenBook(book);
     // PLAN-2026-07-22 (#591): cache the pre-trip exposure so a later reset banner can surface it.
@@ -1217,6 +1229,39 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * the cap silently under-charging or the heartbeat throwing and disarming. Pure; no command. At
    * DEFAULT_VERSION the book is returned unchanged.
    */
+  /**
+   * #908 (v&gt;=2): pages an unreadable condor hold once per streak REGARDLESS of book size. On a
+   * large priced book one such hold stays under the fail-close bound — uncharged and otherwise
+   * silent — so the debounce's own deferred page never fires for it.
+   */
+  private void pageCondorReadFailures(AccountOpenBook book) {
+    if (condorMaxLossVersion < 2) {
+      return;
+    }
+    int failures = book.condorMaxLoss() == null ? 1 : book.condorReadFailures();
+    if (failures == 0) {
+      condorReadFailureStreak = false;
+      return;
+    }
+    if (condorReadFailureStreak) {
+      return;
+    }
+    condorReadFailureStreak = true;
+    auditLog(
+        KIND_ACCOUNT_MTM_DEFERRED,
+        subject(
+            "trading_day",
+            tradingDay,
+            "source",
+            "condor_read",
+            "condor_read_failures",
+            failures,
+            "listed",
+            book.listed(),
+            "scope",
+            "account"));
+  }
+
   private AccountOpenBook foldCondorReadFailures(AccountOpenBook book) {
     if (condorMaxLossVersion < 1) {
       return book;
@@ -1227,7 +1272,12 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
       return book;
     }
     return new AccountOpenBook(
-        book.positions(), book.listed() + failures, book.valueFailures() + failures, maxLoss, 0);
+        book.positions(),
+        book.listed() + failures,
+        book.valueFailures() + failures,
+        maxLoss,
+        0,
+        book.condorHolds());
   }
 
   /**

@@ -239,6 +239,7 @@ class AccountPnlActivitiesImplTest {
     AccountOpenBook book = activities.accountOpenBook("dev");
 
     assertThat(book.condorMaxLoss()).isEqualByComparingTo("740");
+    assertThat(book.condorHolds()).isEqualTo(2);
     assertThat(book.positions()).isEmpty();
     assertThat(book.listed()).isZero();
     assertThat(book.valueFailures()).isZero();
@@ -273,6 +274,7 @@ class AccountPnlActivitiesImplTest {
 
     assertThat(book.condorMaxLoss()).isEqualByComparingTo("440");
     assertThat(book.condorReadFailures()).isEqualTo(2);
+    assertThat(book.condorHolds()).isEqualTo(3);
   }
 
   // ----- helpers (mirror VisibilityPortfolioSnapshotTest) -----

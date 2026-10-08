@@ -149,6 +149,18 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
   private static final String LARGE_BOOK_TRIP_WORKFLOW_ID =
       "account-killswitch-largebook-trip-v2-legacy";
 
+  // #908: a v1 (killswitch-condor-max-loss-v1 recorded at 1) history in which a LARGE priced book
+  // carried one unreadable condor hold for two ticks — under the fail-close bound, so no page and
+  // no trip. Generated once from the pre-#908 impl; must never be regenerated.
+  private static final String CONDOR_READ_V1_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-condor-read-failure-v1-legacy-history.json";
+  private static final Path CONDOR_READ_V1_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-condor-read-failure-v1-legacy-history.json");
+  private static final String CONDOR_READ_V1_WORKFLOW_ID =
+      "account-killswitch-condor-read-failure-v1-legacy";
+
   // PLAN-2026-08-12: a pre-rollover-clear in-flight history for a TRIPPED
   // (auto:account_daily_loss) execution whose trading day ROLLS OVER mid-history. Every other
   // fixture in this class pins todayEt to a single date, so none of them enters the rollover branch
@@ -1026,8 +1038,130 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
     Files.writeString(LARGE_BOOK_TRIP_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
+  /**
+   * #908 SENTINEL. Replays the v1 condor-read-failure history under the widened {@code
+   * killswitch-condor-max-loss-v1} gate: the recorded marker resolves to 1, so the condor-read page
+   * ({@code v>=2}, a NEW {@code audit.log} command) stays off and the recorded no-page stream
+   * replays byte-for-byte.
+   *
+   * <p><b>Teeth verified 2026-10-07 (observed).</b> With the page gated at {@code
+   * condorMaxLossVersion < 1} this replay throws {@code [TMPRL1100] Failure handling event 67 of
+   * type 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' ... on check activityId}.
+   */
+  @Test
+  void legacyCondorReadFailureV1HistoryReplaysWithoutPage() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(CONDOR_READ_V1_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. It is one-shot (pre-change only); see"
+                + " regenerateCondorReadFailureV1Fixture.",
+            CONDOR_READ_V1_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        CONDOR_READ_V1_FIXTURE_RESOURCE, AccountKillSwitchWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot generator for {@link #legacyCondorReadFailureV1HistoryReplaysWithoutPage}: the
+   * PRODUCTION impl as of #907 (marker at 1), a 3-position priced book (no loss) plus one
+   * unreadable condor hold, two ticks. Regenerating after #908 fails the marker assert.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateCondorReadFailureV1Fixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      DailyPnlExecActivity execPnl = Mockito.mock(DailyPnlExecActivity.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+      AccountSnapshotActivity accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
+
+      when(calendar.isMarketOpen()).thenReturn(true);
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+      when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn("alpaca-paper");
+      when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+          .thenReturn(List.of(new TenantStrategyBrokerTarget("s1", "alpaca-paper")));
+      when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+      AccountSnapshotResult snap = new AccountSnapshotResult();
+      snap.setSchemaVersion(1L);
+      snap.setEquity(new BigDecimal("5000"));
+      when(accountSnapshot.accountSnapshot(any())).thenReturn(snap);
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(
+              new AccountOpenBook(
+                  List.of(
+                      new OpenPositionValuation(
+                          "NVDA  261218C00140000", new BigDecimal("3.00"), 5L),
+                      new OpenPositionValuation(
+                          "AAPL  261218C00200000", new BigDecimal("5.00"), 5L),
+                      new OpenPositionValuation(
+                          "TSLA  261218C00300000", new BigDecimal("4.00"), 5L)),
+                  3,
+                  0,
+                  BigDecimal.ZERO,
+                  1,
+                  1));
+      when(optionQuote.getOptionQuote(any()))
+          .thenAnswer(
+              inv -> {
+                String occ = inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol();
+                return okQuote(
+                    occ,
+                    occ.startsWith("NVDA")
+                        ? new BigDecimal("3.00")
+                        : occ.startsWith("AAPL") ? new BigDecimal("5.00") : new BigDecimal("4.00"));
+              });
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.newWorker(MARKET_DATA_QUEUE).registerActivitiesImplementations(optionQuote);
+      env.newWorker("broker-alpaca-paper")
+          .registerActivitiesImplementations(accountSnapshot, execPnl);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(CONDOR_READ_V1_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+      env.sleep(Duration.ofSeconds(75));
+      env.sleep(Duration.ofSeconds(60));
+      assertThat(wf.killswitchState().getTripped()).isFalse();
+      json = client.fetchHistory(CONDOR_READ_V1_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    WorkflowExecutionHistory history = WorkflowExecutionHistory.fromJson(json);
+    assertThat(markerVersions(history, "killswitch-condor-max-loss-v1"))
+        .as("fixture must record killswitch-condor-max-loss-v1 at 1 (pre-#908)")
+        .containsOnly(1)
+        .isNotEmpty();
+    Files.createDirectories(CONDOR_READ_V1_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(CONDOR_READ_V1_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
   /** Recorded versions of every {@code account-mtm-debounce-v1} marker in {@code history}. */
   private static List<Integer> mtmDebounceMarkerVersions(WorkflowExecutionHistory history) {
+    return markerVersions(history, AccountKillSwitchWorkflowImpl.VERSION_ACCOUNT_MTM_DEBOUNCE);
+  }
+
+  /** Recorded versions of every {@code changeId} marker in {@code history}. */
+  private static List<Integer> markerVersions(WorkflowExecutionHistory history, String changeId) {
     DataConverter dc = DefaultDataConverter.STANDARD_INSTANCE;
     return history.getEvents().stream()
         .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
@@ -1035,7 +1169,7 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         .filter(
             d ->
                 d.containsKey("changeId")
-                    && AccountKillSwitchWorkflowImpl.VERSION_ACCOUNT_MTM_DEBOUNCE.equals(
+                    && changeId.equals(
                         dc.fromPayloads(
                             0, Optional.of(d.get("changeId")), String.class, String.class)))
         .map(d -> dc.fromPayloads(0, Optional.of(d.get("version")), Integer.class, Integer.class))
