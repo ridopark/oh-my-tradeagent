@@ -386,6 +386,11 @@ public final class AuditEventKinds {
           // consecutive ticks (RED: pre-trade checks fail closed). Pages via OrderFailureAlerter.
           // Observability-only — in ALL_KINDS only.
           "KillSwitchWorkflowDown",
+          // #910: emitted by CondorTaskFailureWatchdog (not workflow code) when a running
+          // CondorSessionWorkflow / CondorHoldWorkflow's pending workflow task has failed
+          // repeatedly — its code is not executing, so none of its own audits can fire. Pages RED
+          // via OrderFailureAlerter. Observability-only — in ALL_KINDS only.
+          "CondorWorkflowTaskFailing",
           // Phase 2b (PLAN-2026-07-15, risk C1): emitted by AccountKillSwitchWorkflowImpl on the
           // bounded PERIODIC re-page while the account cap stays tripped AND market-open AND
           // holding

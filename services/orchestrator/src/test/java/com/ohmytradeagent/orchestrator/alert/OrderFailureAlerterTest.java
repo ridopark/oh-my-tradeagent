@@ -852,6 +852,30 @@ class OrderFailureAlerterTest {
   }
 
   @Test
+  void condorWorkflowTaskFailing_pagesRed_nullSafe() {
+    // #910: a condor workflow stuck failing its workflow task runs no code — RED, and the page must
+    // render even with every subject key missing (a throw upstream loses the only signal).
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> subject = new java.util.LinkedHashMap<>();
+    subject.put("workflow_type", "CondorSessionWorkflow");
+    subject.put("attempt", 57);
+    subject.put("run_id", "run-1");
+    alerter.onAuditEvent(event("CondorWorkflowTaskFailing", "t-x/s-y/condor-session/1", subject));
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(AlertColors.RED);
+    assertThat(embed.title()).contains("CondorSessionWorkflow");
+    assertThat(field(embed, "attempt")).isEqualTo("57");
+    assertThat(embed.footer()).contains("t-x/s-y/condor-session/1");
+
+    WebhookClient webhook2 = mock(WebhookClient.class);
+    new OrderFailureAlerter(webhook2, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true)
+        .onAuditEvent(event("CondorWorkflowTaskFailing", null, new java.util.LinkedHashMap<>()));
+    assertThat(capture(webhook2).color()).isEqualTo(AlertColors.RED);
+  }
+
+  @Test
   void trailDisarmed_rendersYellowEmbed_nullSafe() {
     // #825: the disarm page must render (protection was just removed — losing this page silently
     // is the worst outcome) and must carry the prior anchor + operator identity.
