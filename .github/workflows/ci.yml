@@ -141,8 +141,9 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         # deploy.yml decides which pods a merge rolls, from a `case` on the changed files.
         # Nothing else checks it, and a mis-scoped pattern is invisible until a real merge
-        # rolls the wrong pods — one of which is market-data, where a restart permanently
-        # disarms every ARMED trailing stop (see the ⚠ block in 53-market-data.yaml).
+        # rolls the wrong pods — one of which is market-data, where a restart drops every live
+        # feed until boot recovery re-subscribes armed trails (only once RTH is open) and
+        # watchlist legs re-attach after 5 min of silence (see the ⚠ block in 53-market-data.yaml).
         #
         # That fired on 2026-08-17: a one-line docstring change under contract/python/
         # rolled market-data (#704), free only because it was pre-open with nothing armed.
