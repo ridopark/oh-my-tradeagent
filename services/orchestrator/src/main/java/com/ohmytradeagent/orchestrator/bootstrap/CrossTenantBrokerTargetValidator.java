@@ -26,13 +26,14 @@ import java.util.Set;
  * multitenant.broker-accounts.enabled=true} the rule generalizes to the brokerage-account identity:
  * many tenants MAY share a {@code broker_target} provided each declares a non-blank,
  * mutually-distinct {@code broker_account_id} (and a single tenant's strategies on one {@code
- * broker_target} declare a consistent account). Any absent or duplicated account fails boot closed
- * — an account that can't be proven distinct can't prove cap isolation. This mode is INERT by
- * default and MUST stay so until P4-c-b makes the runtime account-wide reads (AccountSnapshot /
- * PreTradeCheck / Reconciliation) per-tenant and cross-checks the declared {@code
- * broker_account_id} against the creds' authenticated account; relaxing the boot guard before the
- * runtime is per-tenant would re-open the very cap-loosening this validator exists to prevent. The
- * flag is the structural gate that keeps the relaxation unreachable until then.
+ * broker_target} declare a consistent account). Strategies with an explicit {@code enabled=false}
+ * are not counted (#871). Any absent or duplicated account fails boot closed — an account that
+ * can't be proven distinct can't prove cap isolation. This mode is INERT by default and MUST stay
+ * so until P4-c-b makes the runtime account-wide reads (AccountSnapshot / PreTradeCheck /
+ * Reconciliation) per-tenant and cross-checks the declared {@code broker_account_id} against the
+ * creds' authenticated account; relaxing the boot guard before the runtime is per-tenant would
+ * re-open the very cap-loosening this validator exists to prevent. The flag is the structural gate
+ * that keeps the relaxation unreachable until then.
  *
  * <p>Wired on the boot path (see {@link CrossTenantBrokerTargetBootstrapper}), enumerating pairs
  * from {@link StrategyRegistry#list()}. Strategies with an absent {@code broker_target} are skipped
@@ -120,6 +121,13 @@ public final class CrossTenantBrokerTargetValidator {
       StrategyConfig cfg = registry.get(ts.tenantId(), ts.strategyId());
       String brokerTarget = brokerTargetOf(cfg);
       if (brokerTarget == null) {
+        continue;
+      }
+      // #871: an explicitly DISABLED row is not counted. It opens nothing, and it is the normal
+      // state between onboarding's create and enable — before any verified account exists to
+      // declare. Every arm route binds the exec-verified broker_account_id, so the rows that can
+      // trade are still all proven here. (Absent enabled is schema-default ARMED and is counted.)
+      if (Boolean.FALSE.equals(cfg.getEnabled())) {
         continue;
       }
       String account = trimToNull(cfg.getBrokerAccountId());
