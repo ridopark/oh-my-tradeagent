@@ -825,10 +825,24 @@ class OrderFailureAlerterTest {
             webhook2, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
     Map<String, Object> recreated = new java.util.LinkedHashMap<>(down);
     recreated.put("recreated", true);
+    recreated.put("tripped", false);
+    recreated.put("state_unknown", false);
     alerter2.onAuditEvent(event("KillSwitchWorkflowDown", "wf", recreated));
     WebhookEmbed yellow = capture(webhook2);
     assertThat(yellow.color()).isEqualTo(AlertColors.YELLOW);
     assertThat(yellow.title()).contains("RECREATED");
+    assertThat(field(yellow, "tripped")).isEqualTo("false");
+
+    // #911 R1: the closed run's state was unreadable, so the switch came back TRIPPED — RED.
+    WebhookClient webhook4 = mock(WebhookClient.class);
+    Map<String, Object> unknown = new java.util.LinkedHashMap<>(recreated);
+    unknown.put("tripped", true);
+    unknown.put("state_unknown", true);
+    new OrderFailureAlerter(webhook4, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true)
+        .onAuditEvent(event("KillSwitchWorkflowDown", "wf", unknown));
+    WebhookEmbed unknownEmbed = capture(webhook4);
+    assertThat(unknownEmbed.color()).isEqualTo(AlertColors.RED);
+    assertThat(unknownEmbed.title()).contains("TRIPPED");
 
     // All-keys-absent render must survive (a throw is swallowed upstream and loses the page).
     WebhookClient webhook3 = mock(WebhookClient.class);

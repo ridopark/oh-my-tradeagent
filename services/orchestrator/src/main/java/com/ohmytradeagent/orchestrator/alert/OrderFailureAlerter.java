@@ -190,7 +190,8 @@ public class OrderFailureAlerter {
   private static final String TRAIL_DISARMED_KIND = "TrailDisarmed";
 
   // #911: a kill-switch workflow found not running by KillSwitchBootstrapper. RED while it stays
-  // down (pre-trade checks fail closed); YELLOW once recreated (any manual trip was reset).
+  // down (pre-trade checks fail closed) or when recreated TRIPPED on unreadable prior state;
+  // YELLOW once recreated with its prior state carried forward.
   private static final String KILL_SWITCH_WORKFLOW_DOWN_KIND = "KillSwitchWorkflowDown";
 
   private final WebhookClient webhookClient;
@@ -320,24 +321,41 @@ public class OrderFailureAlerter {
     return new WebhookEmbed(title, null, AlertColors.RED, buildFooter(event), fields);
   }
 
-  /** #911: the kill-switch-down page. Every key null-safe; an absent flag reads as still down. */
+  /**
+   * #911: the kill-switch-down page. RED while down, and when recreated TRIPPED because the closed
+   * run's state was unreadable; YELLOW for a recreate that carried the prior state forward. Every
+   * key null-safe; an absent flag reads as still down.
+   */
   private WebhookEmbed buildKillSwitchWorkflowDownEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
     boolean recreated = "true".equals(rawSubject(subject, "recreated"));
-    String title =
-        recreated
-            ? ":warning: Kill switch was down and has been RECREATED — any manual trip was reset"
-            : ":rotating_light: Kill switch DOWN — pre-trade checks are failing closed";
+    boolean stateUnknown = "true".equals(rawSubject(subject, "state_unknown"));
+    String title;
+    if (!recreated) {
+      title = ":rotating_light: Kill switch DOWN — pre-trade checks are failing closed";
+    } else if (stateUnknown) {
+      title =
+          ":rotating_light: Kill switch RECREATED TRIPPED — prior state unreadable; reset via the"
+              + " audited path once verified";
+    } else {
+      title = ":warning: Kill switch was down and has been RECREATED with its prior state";
+    }
     List<WebhookEmbed.Field> fields = new ArrayList<>();
     fields.add(new WebhookEmbed.Field("scope", subjectStr(subject, "scope"), false));
     fields.add(new WebhookEmbed.Field("prior_status", subjectStr(subject, "prior_status"), false));
-    if (!recreated) {
+    if (recreated) {
+      fields.add(new WebhookEmbed.Field("tripped", subjectStr(subject, "tripped"), false));
+    } else {
       fields.add(
           new WebhookEmbed.Field(
               "consecutive_failures", subjectStr(subject, "consecutive_failures"), false));
     }
     return new WebhookEmbed(
-        title, null, recreated ? AlertColors.YELLOW : AlertColors.RED, buildFooter(event), fields);
+        title,
+        null,
+        recreated && !stateUnknown ? AlertColors.YELLOW : AlertColors.RED,
+        buildFooter(event),
+        fields);
   }
 
   /**

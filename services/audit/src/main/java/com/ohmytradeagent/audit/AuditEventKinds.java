@@ -381,9 +381,10 @@ public final class AuditEventKinds {
           "AccountKillSwitchCapInactive",
           "AccountKillSwitchCapReArmed",
           // #911: emitted by KillSwitchBootstrapper (not workflow code) when a kill-switch workflow
-          // is found closed and recreated (YELLOW: any manual trip was reset) or stays not-running
-          // for N consecutive ensures (RED: pre-trade checks fail closed). Pages via
-          // OrderFailureAlerter. Observability-only — in ALL_KINDS only.
+          // is found closed and recreated with its prior trip state carried (YELLOW), recreated
+          // TRIPPED because that state was unreadable (RED), or stays not-running for N
+          // consecutive ticks (RED: pre-trade checks fail closed). Pages via OrderFailureAlerter.
+          // Observability-only — in ALL_KINDS only.
           "KillSwitchWorkflowDown",
           // Phase 2b (PLAN-2026-07-15, risk C1): emitted by AccountKillSwitchWorkflowImpl on the
           // bounded PERIODIC re-page while the account cap stays tripped AND market-open AND

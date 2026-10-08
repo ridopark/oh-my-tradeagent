@@ -3,7 +3,9 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 import com.ohmytradeagent.orchestrator.platform.StrategyRegistry;
 import com.ohmytradeagent.orchestrator.platform.TenantStrategy;
 import io.temporal.client.schedules.ScheduleClient;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -146,9 +148,11 @@ public class TenantReconcileLoop implements ApplicationRunner {
 
     ScheduleClient scheduleClient = null;
     int ensured = 0;
+    // The account switch is per TENANT: ensure it once per tick, not once per strategy.
+    Map<String, Boolean> accountOk = new HashMap<>();
     for (TenantStrategy ts : desired) {
       if (seen.contains(ts)) {
-        reassertKillSwitches(ts);
+        reassertKillSwitches(ts, accountOk);
         continue;
       }
       // A pair is marked seen ONLY once both ensures report success, so a transient failure
@@ -161,8 +165,9 @@ public class TenantReconcileLoop implements ApplicationRunner {
           // Lazily build the ScheduleClient only when there is at least one new pair to ensure.
           scheduleClient = reconciliationScheduleBootstrapper.newScheduleClient();
         }
-        boolean killSwitchOk =
-            killSwitchBootstrapper.ensureForTenantStrategy(ts.tenantId(), ts.strategyId());
+        boolean strategyOk =
+            killSwitchBootstrapper.ensureStrategyKillSwitch(ts.tenantId(), ts.strategyId());
+        boolean killSwitchOk = ensureAccountOnce(ts.tenantId(), accountOk) && strategyOk;
         boolean reconOk =
             reconciliationScheduleBootstrapper.ensureForTenantStrategy(
                 scheduleClient, ts.tenantId(), ts.strategyId());
@@ -200,9 +205,10 @@ public class TenantReconcileLoop implements ApplicationRunner {
    * AFTER its first ensure (operator terminate), and latching it would leave it down until a
    * restart. The ensure is a describe when RUNNING, and owns its own logging and paging.
    */
-  private void reassertKillSwitches(TenantStrategy ts) {
+  private void reassertKillSwitches(TenantStrategy ts, Map<String, Boolean> accountOk) {
     try {
-      killSwitchBootstrapper.ensureForTenantStrategy(ts.tenantId(), ts.strategyId());
+      killSwitchBootstrapper.ensureStrategyKillSwitch(ts.tenantId(), ts.strategyId());
+      ensureAccountOnce(ts.tenantId(), accountOk);
     } catch (RuntimeException e) {
       log.error(
           "tenant reconcile: kill-switch re-assert failed tenant={} strategy={}",
@@ -210,5 +216,9 @@ public class TenantReconcileLoop implements ApplicationRunner {
           ts.strategyId(),
           e);
     }
+  }
+
+  private boolean ensureAccountOnce(String tenantId, Map<String, Boolean> accountOk) {
+    return accountOk.computeIfAbsent(tenantId, killSwitchBootstrapper::ensureAccountKillSwitch);
   }
 }

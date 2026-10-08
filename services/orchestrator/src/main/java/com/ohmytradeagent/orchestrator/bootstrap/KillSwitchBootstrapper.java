@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.bootstrap;
 
 import com.ohmytradeagent.contract.AccountKillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.KillSwitchState;
 import com.ohmytradeagent.contract.KillSwitchWorkflowInput;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
@@ -29,6 +30,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -48,9 +51,12 @@ import org.springframework.stereotype.Component;
  * stayed down. {@code ALLOW_DUPLICATE} still refuses a second CONCURRENT run (the default id
  * conflict policy is FAIL), so a warm boot never disturbs a running switch.
  *
- * <p>A recreate starts the switch fresh (a manual trip held by the terminated run is gone), and an
- * ensure that fails {@link #DOWN_PAGE_AFTER_FAILURES} times in a row leaves pre-trade checks
- * failing closed — both page via {@value #KIND_KILL_SWITCH_WORKFLOW_DOWN}.
+ * <p>A recreate never fails open: the closed run's trip state is QUERIED (Temporal serves queries
+ * on a closed run by replaying its history) and carried into the new run's input — the same
+ * carry-forward fields continue-as-new uses, hydrated without re-running the trip cascade. If that
+ * query fails, the new run starts TRIPPED ({@value #REASON_STATE_UNKNOWN}) for the operator to
+ * reset through the audited path. Recreates, and ensures that fail {@link
+ * #DOWN_PAGE_AFTER_FAILURES} times in a row, page via {@value #KIND_KILL_SWITCH_WORKFLOW_DOWN}.
  */
 @Component
 @Profile("!test")
@@ -62,6 +68,7 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
 
   static final String KIND_KILL_SWITCH_WORKFLOW_DOWN = "KillSwitchWorkflowDown";
   static final String ACTOR = "killswitch-bootstrapper";
+  static final String REASON_STATE_UNKNOWN = "recreated_state_unknown";
 
   /** Consecutive failed ensures of one kill switch before it pages (once per episode). */
   static final int DOWN_PAGE_AFTER_FAILURES = 3;
@@ -89,35 +96,22 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
     }
     Set<String> tenantIds = new LinkedHashSet<>();
     for (TenantStrategy ts : TenantStrategyScanner.scan(tenantsDir)) {
-      startKillSwitch(ts.tenantId(), ts.strategyId());
+      ensureStrategyKillSwitch(ts.tenantId(), ts.strategyId());
       tenantIds.add(ts.tenantId());
     }
     // Phase 6: one account-level kill switch per distinct tenant, alongside the per-strategy loop
-    // above. Inert until the tenant sets account_daily_loss_threshold in tenant.yaml. (Both this
-    // and the per-strategy start are exposed per-pair via ensureForTenantStrategy for the
-    // restart-free reconcile loop.)
+    // above. Inert until the tenant sets account_daily_loss_threshold in tenant.yaml.
     for (String tenantId : tenantIds) {
-      startAccountKillSwitch(tenantId);
+      ensureAccountKillSwitch(tenantId);
     }
   }
 
   /**
-   * Idempotent per-{@code (tenant, strategy)} ensure of the per-strategy {@link KillSwitchWorkflow}
-   * and the per-tenant {@link AccountKillSwitchWorkflow}: a RUNNING switch is left alone, a missing
-   * or closed one is started. Shared by the boot {@link #run} path and {@code TenantReconcileLoop},
-   * which re-asserts it every tick.
-   *
-   * <p>Returns {@code true} only when BOTH kill-switches are confirmed RUNNING; {@code false}
-   * otherwise, so the reconcile loop retries next tick. Both ensures are always attempted (no
-   * short-circuit).
+   * Idempotent ensure of the per-{@code (tenant, strategy)} {@link KillSwitchWorkflow}: a RUNNING
+   * switch is left alone, a missing or closed one is started. Returns {@code true} only when it is
+   * confirmed RUNNING, so the reconcile loop retries a {@code false} next tick. Never throws.
    */
-  public boolean ensureForTenantStrategy(String tenantId, String strategyId) {
-    boolean perStrategy = startKillSwitch(tenantId, strategyId);
-    boolean perAccount = startAccountKillSwitch(tenantId);
-    return perStrategy && perAccount;
-  }
-
-  private boolean startKillSwitch(String tenantId, String strategyId) {
+  public boolean ensureStrategyKillSwitch(String tenantId, String strategyId) {
     String wfId = WorkflowIds.killswitch(tenantId, strategyId);
     Map<String, Object> sa = new HashMap<>();
     sa.put("TenantStrategy", WorkflowIds.tenantStrategy(tenantId, strategyId));
@@ -131,17 +125,35 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
             .setSearchAttributes(sa)
             .build();
 
-    KillSwitchWorkflow stub = workflowClient.newWorkflowStub(KillSwitchWorkflow.class, opts);
-    KillSwitchWorkflowInput input = new KillSwitchWorkflowInput();
-    input.setSchemaVersion(1L);
-    input.setTenantId(tenantId);
-    input.setStrategyId(strategyId);
-
     return ensureRunning(
-        wfId, tenantId, strategyId, "strategy", () -> WorkflowClient.start(stub::run, input));
+        wfId,
+        tenantId,
+        strategyId,
+        "strategy",
+        () -> workflowClient.newWorkflowStub(KillSwitchWorkflow.class, wfId).killswitchState(),
+        carried -> {
+          KillSwitchWorkflowInput input = new KillSwitchWorkflowInput();
+          input.setSchemaVersion(carried == null ? 1L : 2L);
+          input.setTenantId(tenantId);
+          input.setStrategyId(strategyId);
+          if (carried != null) {
+            input.setTripped(carried.getTripped());
+            input.setReason(carried.getReason());
+            input.setActor(carried.getActor());
+            input.setTrippedAt(carried.getTrippedAt());
+            input.setCoolingDownUntil(carried.getCoolingDownUntil());
+            input.setTradingDay(carried.getTradingDay());
+          }
+          KillSwitchWorkflow stub = workflowClient.newWorkflowStub(KillSwitchWorkflow.class, opts);
+          WorkflowClient.start(stub::run, input);
+        });
   }
 
-  private boolean startAccountKillSwitch(String tenantId) {
+  /**
+   * Idempotent ensure of the per-tenant {@link AccountKillSwitchWorkflow}; same contract as {@link
+   * #ensureStrategyKillSwitch}.
+   */
+  public boolean ensureAccountKillSwitch(String tenantId) {
     String wfId = WorkflowIds.accountKillswitch(tenantId);
 
     WorkflowOptions opts =
@@ -152,43 +164,83 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
                 WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE)
             .build();
 
-    AccountKillSwitchWorkflow stub =
-        workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, opts);
-    AccountKillSwitchWorkflowInput input = new AccountKillSwitchWorkflowInput();
-    input.setSchemaVersion(1L);
-    input.setTenantId(tenantId);
-
     return ensureRunning(
         wfId,
         tenantId,
         AccountKillSwitchWorkflowImpl.ACCOUNT_SCOPE,
         "account",
-        () -> WorkflowClient.start(stub::run, input));
+        () ->
+            workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, wfId).killswitchState(),
+        carried -> {
+          AccountKillSwitchWorkflowInput input = new AccountKillSwitchWorkflowInput();
+          input.setSchemaVersion(carried == null ? 1L : 2L);
+          input.setTenantId(tenantId);
+          if (carried != null) {
+            input.setTripped(carried.getTripped());
+            input.setReason(carried.getReason());
+            input.setActor(carried.getActor());
+            input.setTrippedAt(carried.getTrippedAt());
+            input.setCoolingDownUntil(carried.getCoolingDownUntil());
+            input.setTradingDay(carried.getTradingDay());
+          }
+          AccountKillSwitchWorkflow stub =
+              workflowClient.newWorkflowStub(AccountKillSwitchWorkflow.class, opts);
+          WorkflowClient.start(stub::run, input);
+        });
   }
 
-  /** Describe, start if not RUNNING, and record the outcome. Never throws. */
+  /**
+   * Describe; if not RUNNING, start (carrying a closed run's state forward); record the outcome.
+   * {@code start} receives {@code null} for a first-ever start. Never throws.
+   */
   private boolean ensureRunning(
-      String wfId, String tenantId, String strategyId, String scope, Runnable start) {
+      String wfId,
+      String tenantId,
+      String strategyId,
+      String scope,
+      Supplier<KillSwitchState> queryClosedRun,
+      Consumer<KillSwitchState> start) {
     WorkflowExecutionStatus prior = null;
     boolean running;
     try {
       prior = describeStatus(wfId);
       if (prior == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING) {
         running = true;
+      } else if (prior == null) {
+        running = start(wfId, start, null);
+        if (running) {
+          log.info("started kill switch wf_id={}", wfId);
+        }
       } else {
+        boolean stateUnknown = false;
+        KillSwitchState carried;
         try {
-          start.run();
-          running = true;
-          if (prior == null) {
-            log.info("started kill switch wf_id={}", wfId);
-          } else {
-            log.warn("kill switch wf_id={} was {}; recreated it", wfId, prior);
-            page(wfId, tenantId, strategyId, scope, prior, true, 0);
+          carried = queryClosedRun.get();
+          if (carried == null) {
+            throw new IllegalStateException("closed run returned no state");
           }
-        } catch (WorkflowExecutionAlreadyStarted raced) {
-          // Another starter won between the describe and the start; trust only a re-describe.
-          running =
-              describeStatus(wfId) == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING;
+        } catch (RuntimeException e) {
+          log.error(
+              "kill switch wf_id={} closed run state unreadable; recreating TRIPPED", wfId, e);
+          stateUnknown = true;
+          carried = new KillSwitchState();
+          carried.setTripped(true);
+          carried.setReason(REASON_STATE_UNKNOWN);
+          carried.setActor(ACTOR);
+          carried.setTrippedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        }
+        running = start(wfId, start, carried);
+        if (running) {
+          log.warn(
+              "kill switch wf_id={} was {}; recreated it (tripped={}, state_unknown={})",
+              wfId,
+              prior,
+              carried.getTripped(),
+              stateUnknown);
+          Map<String, Object> extra = new LinkedHashMap<>();
+          extra.put("tripped", Boolean.TRUE.equals(carried.getTripped()));
+          extra.put("state_unknown", stateUnknown);
+          page(wfId, tenantId, strategyId, scope, prior, true, 0, extra);
         }
       }
     } catch (RuntimeException e) {
@@ -203,9 +255,21 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
     int failures = consecutiveFailures.merge(wfId, 1, Integer::sum);
     log.warn("kill switch wf_id={} not running (prior={}, failures={})", wfId, prior, failures);
     if (failures == DOWN_PAGE_AFTER_FAILURES) {
-      page(wfId, tenantId, strategyId, scope, prior, false, failures);
+      page(wfId, tenantId, strategyId, scope, prior, false, failures, Map.of());
     }
     return false;
+  }
+
+  /**
+   * Starts; a start that lost a race to another starter counts only if a re-describe is RUNNING.
+   */
+  private boolean start(String wfId, Consumer<KillSwitchState> start, KillSwitchState carried) {
+    try {
+      start.accept(carried);
+      return true;
+    } catch (WorkflowExecutionAlreadyStarted raced) {
+      return describeStatus(wfId) == WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING;
+    }
   }
 
   /** Latest-run status of {@code wfId}, or {@code null} when no run has ever existed. */
@@ -238,7 +302,8 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
       String scope,
       WorkflowExecutionStatus prior,
       boolean recreated,
-      int failures) {
+      int failures,
+      Map<String, Object> extra) {
     try {
       Map<String, Object> subject = new LinkedHashMap<>();
       subject.put("scope", scope);
@@ -247,6 +312,7 @@ public class KillSwitchBootstrapper implements ApplicationRunner {
           prior == null ? null : prior.name().replace("WORKFLOW_EXECUTION_STATUS_", ""));
       subject.put("recreated", recreated);
       subject.put("consecutive_failures", failures);
+      subject.putAll(extra);
 
       AuditEvent event = new AuditEvent();
       event.setSchemaVersion(1L);

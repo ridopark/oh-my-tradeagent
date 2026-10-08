@@ -30,8 +30,10 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInit;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,8 +54,21 @@ class KillSwitchBootstrapperTest {
   private final AuditActivities audit = audits::add;
   private KillSwitchBootstrapper bootstrapper;
 
-  /** Minimal stand-in: runs forever, like the real impl, with no activities. */
+  /** Makes the NEXT killswitch_state query throw (a closed run whose history cannot replay). */
+  static final AtomicBoolean FAIL_NEXT_QUERY = new AtomicBoolean();
+
+  /**
+   * Minimal stand-in: runs forever, like the real impl, with no activities. Its query echoes the
+   * carried input, so a test can see what a recreate started the new run with.
+   */
   public static class ParkedKillSwitch implements KillSwitchWorkflow {
+    private final KillSwitchWorkflowInput input;
+
+    @WorkflowInit
+    public ParkedKillSwitch(KillSwitchWorkflowInput input) {
+      this.input = input;
+    }
+
     @Override
     public String run(KillSwitchWorkflowInput input) {
       Workflow.await(() -> false);
@@ -80,11 +95,18 @@ class KillSwitchBootstrapperTest {
 
     @Override
     public KillSwitchState killswitchState() {
-      return null;
+      if (FAIL_NEXT_QUERY.getAndSet(false)) {
+        throw new IllegalStateException("history replay failed");
+      }
+      KillSwitchState s = new KillSwitchState();
+      s.setTripped(Boolean.TRUE.equals(input.getTripped()));
+      s.setReason(input.getReason());
+      s.setActor(input.getActor());
+      return s;
     }
   }
 
-  /** Minimal stand-in for the account cap. */
+  /** Minimal stand-in for the account cap (never tripped). */
   public static class ParkedAccountKillSwitch implements AccountKillSwitchWorkflow {
     @Override
     public String run(AccountKillSwitchWorkflowInput input) {
@@ -106,12 +128,15 @@ class KillSwitchBootstrapperTest {
 
     @Override
     public KillSwitchState killswitchState() {
-      return null;
+      KillSwitchState s = new KillSwitchState();
+      s.setTripped(false);
+      return s;
     }
   }
 
   @BeforeEach
   void setUp() {
+    FAIL_NEXT_QUERY.set(false);
     env = TestWorkflowEnvironment.newInstance();
     env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
     Worker worker = env.newWorker(KillSwitchBootstrapper.KILLSWITCH_TASK_QUEUE);
@@ -134,13 +159,14 @@ class KillSwitchBootstrapperTest {
    */
   @Test
   void terminatedAccountKillSwitchIsRecreatedAndPaged() {
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
     String accountWf = WorkflowIds.accountKillswitch(TENANT);
+    settle();
     client.newUntypedWorkflowStub(accountWf).terminate("operator roll onto new marker");
     assertThat(status(accountWf))
         .isEqualTo(WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_TERMINATED);
 
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
 
     assertThat(status(accountWf))
         .isEqualTo(WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING);
@@ -152,17 +178,48 @@ class KillSwitchBootstrapperTest {
     assertThat(page.getSubject())
         .containsEntry("recreated", true)
         .containsEntry("prior_status", "TERMINATED")
-        .containsEntry("scope", "account");
+        .containsEntry("scope", "account")
+        .containsEntry("tripped", false)
+        .containsEntry("state_unknown", false);
+  }
+
+  /**
+   * (c) The closed run's state cannot be read → the new run starts TRIPPED ({@code
+   * recreated_state_unknown}) and the recreate page says the state was unknown. Never fail open.
+   */
+  @Test
+  void unreadableClosedRunStateRecreatesTrippedAndPages() {
+    assertThat(ensureBoth(bootstrapper)).isTrue();
+    String wf = WorkflowIds.killswitch(TENANT, STRATEGY);
+    settle();
+    client.newUntypedWorkflowStub(wf).terminate("operator");
+    FAIL_NEXT_QUERY.set(true);
+
+    assertThat(ensureBoth(bootstrapper)).isTrue();
+
+    KillSwitchState now = client.newWorkflowStub(KillSwitchWorkflow.class, wf).killswitchState();
+    assertThat(now.getTripped()).isTrue();
+    assertThat(now.getReason()).isEqualTo(KillSwitchBootstrapper.REASON_STATE_UNKNOWN);
+    assertThat(now.getActor()).isEqualTo(KillSwitchBootstrapper.ACTOR);
+    assertThat(audits)
+        .singleElement()
+        .satisfies(
+            e ->
+                assertThat(e.getSubject())
+                    .containsEntry("recreated", true)
+                    .containsEntry("tripped", true)
+                    .containsEntry("state_unknown", true));
   }
 
   /** Same for the per-strategy switch (whose manual trip a recreate resets — hence the page). */
   @Test
   void terminatedStrategyKillSwitchIsRecreatedAndPaged() {
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
     String wf = WorkflowIds.killswitch(TENANT, STRATEGY);
+    settle();
     client.newUntypedWorkflowStub(wf).terminate("operator");
 
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
 
     assertThat(status(wf)).isEqualTo(WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING);
     assertThat(audits)
@@ -177,12 +234,12 @@ class KillSwitchBootstrapperTest {
   /** Already RUNNING is a benign no-op: same run kept, nothing paged. */
   @Test
   void alreadyRunningIsABenignNoOp() {
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
     String accountWf = WorkflowIds.accountKillswitch(TENANT);
     String runId = describe(accountWf).getWorkflowExecutionInfo().getExecution().getRunId();
 
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
-    assertThat(bootstrapper.ensureForTenantStrategy(TENANT, STRATEGY)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
+    assertThat(ensureBoth(bootstrapper)).isTrue();
 
     assertThat(describe(accountWf).getWorkflowExecutionInfo().getExecution().getRunId())
         .isEqualTo(runId);
@@ -204,11 +261,11 @@ class KillSwitchBootstrapperTest {
     KillSwitchBootstrapper down = new KillSwitchBootstrapper(unreachable, audit, "does-not-exist");
 
     for (int i = 1; i < KillSwitchBootstrapper.DOWN_PAGE_AFTER_FAILURES; i++) {
-      assertThat(down.ensureForTenantStrategy(TENANT, STRATEGY)).isFalse();
+      assertThat(ensureBoth(down)).isFalse();
     }
     assertThat(audits).isEmpty();
 
-    assertThat(down.ensureForTenantStrategy(TENANT, STRATEGY)).isFalse();
+    assertThat(ensureBoth(down)).isFalse();
     assertThat(audits).hasSize(2); // one per kill switch (strategy + account)
     assertThat(audits)
         .allSatisfy(
@@ -220,7 +277,7 @@ class KillSwitchBootstrapperTest {
                       "consecutive_failures", KillSwitchBootstrapper.DOWN_PAGE_AFTER_FAILURES);
             });
 
-    assertThat(down.ensureForTenantStrategy(TENANT, STRATEGY)).isFalse();
+    assertThat(ensureBoth(down)).isFalse();
     assertThat(audits).hasSize(2); // no re-page every tick
   }
 
@@ -243,6 +300,26 @@ class KillSwitchBootstrapperTest {
         .isInstanceOf(WorkflowExecutionAlreadyStarted.class);
     start(wf, WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE);
     assertThat(status(wf)).isEqualTo(WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING);
+  }
+
+  /**
+   * Queries both running switches so their first workflow task has completed before a terminate —
+   * the SDK cannot replay a history whose first task never completed, so a query of that closed run
+   * fails (which the bootstrapper rightly treats as unknown state).
+   */
+  private void settle() {
+    client
+        .newWorkflowStub(KillSwitchWorkflow.class, WorkflowIds.killswitch(TENANT, STRATEGY))
+        .killswitchState();
+    client
+        .newWorkflowStub(AccountKillSwitchWorkflow.class, WorkflowIds.accountKillswitch(TENANT))
+        .killswitchState();
+  }
+
+  private static boolean ensureBoth(KillSwitchBootstrapper b) {
+    boolean perStrategy = b.ensureStrategyKillSwitch(TENANT, STRATEGY);
+    boolean perAccount = b.ensureAccountKillSwitch(TENANT);
+    return perStrategy && perAccount;
   }
 
   private void start(String wfId, WorkflowIdReusePolicy policy) {

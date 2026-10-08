@@ -44,7 +44,8 @@ class TenantReconcileLoopTest {
     when(recon.newScheduleClient()).thenReturn(scheduleClient);
     // Default: both ensures succeed, so a pair is marked seen and not re-ensured. Tests that
     // exercise the failure/retry path override these for specific args.
-    when(killSwitch.ensureForTenantStrategy(any(), any())).thenReturn(true);
+    when(killSwitch.ensureStrategyKillSwitch(any(), any())).thenReturn(true);
+    when(killSwitch.ensureAccountKillSwitch(any())).thenReturn(true);
     when(recon.ensureForTenantStrategy(any(), any(), any())).thenReturn(true);
     loop = new TenantReconcileLoop(registry, killSwitch, recon);
   }
@@ -58,23 +59,23 @@ class TenantReconcileLoopTest {
     // Tick 1: registry knows only A → A becomes the running/seen set.
     when(registry.list()).thenReturn(List.of(A));
     loop.reconcileTick();
-    verify(killSwitch).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch).ensureStrategyKillSwitch("acme", "strat-a");
     verify(recon).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
 
     // Tick 2: a new pair B appears (simulating a UI-written strategy_config row).
     when(registry.list()).thenReturn(List.of(A, B));
     loop.reconcileTick();
-    verify(killSwitch).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch).ensureStrategyKillSwitch("beta", "strat-b");
     verify(recon).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
     // A's recon schedule must NOT be re-ensured — it was already seen on tick 1. (Its kill
     // switches are re-asserted every tick — issue #911.)
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
 
     // Tick 3: desired unchanged → no further recon-schedule ensure calls.
     loop.reconcileTick();
-    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(3)).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
   }
@@ -91,9 +92,41 @@ class TenantReconcileLoopTest {
     loop.reconcileTick();
     loop.reconcileTick();
 
-    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(3)).ensureStrategyKillSwitch("acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).newScheduleClient();
+  }
+
+  /**
+   * The ACCOUNT switch is per tenant: ensured once per tick however many strategies the tenant has,
+   * so its failure counter counts ticks, not strategies.
+   */
+  @Test
+  void accountKillSwitchIsEnsuredOncePerTenantPerTick() {
+    TenantStrategy a2 = new TenantStrategy("acme", "strat-a2");
+    when(registry.list()).thenReturn(List.of(A, a2, B));
+
+    loop.reconcileTick(); // first pass: all new
+    verify(killSwitch, times(1)).ensureAccountKillSwitch("acme");
+    verify(killSwitch, times(1)).ensureAccountKillSwitch("beta");
+
+    loop.reconcileTick(); // second pass: all seen
+    verify(killSwitch, times(2)).ensureAccountKillSwitch("acme");
+    verify(killSwitch, times(2)).ensureAccountKillSwitch("beta");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a2");
+  }
+
+  /** A new pair whose ACCOUNT switch is not running is not latched (retried next tick). */
+  @Test
+  void accountKillSwitchFailureKeepsThePairUnseen() {
+    when(registry.list()).thenReturn(List.of(A));
+    when(killSwitch.ensureAccountKillSwitch("acme")).thenReturn(false);
+    loop.reconcileTick();
+    when(killSwitch.ensureAccountKillSwitch("acme")).thenReturn(true);
+    loop.reconcileTick();
+
+    verify(recon, times(2)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
   }
 
   /** A throwing re-assert of one seen pair does not starve the others. */
@@ -101,12 +134,12 @@ class TenantReconcileLoopTest {
   void seenPairReassertFailureDoesNotStarveOtherPairs() {
     when(registry.list()).thenReturn(List.of(A, B));
     loop.reconcileTick();
-    when(killSwitch.ensureForTenantStrategy("acme", "strat-a"))
+    when(killSwitch.ensureStrategyKillSwitch("acme", "strat-a"))
         .thenThrow(new RuntimeException("boom"));
 
     loop.reconcileTick();
 
-    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("beta", "strat-b");
   }
 
   /**
@@ -117,13 +150,13 @@ class TenantReconcileLoopTest {
   void desiredEqualsRunningMakesNoMutatingCalls() {
     when(registry.list()).thenReturn(List.of(A, B));
     loop.reconcileTick(); // first tick seeds the seen-set with A and B
-    verify(killSwitch).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch).ensureStrategyKillSwitch("beta", "strat-b");
 
     // Second tick, identical desired set → nothing new to ensure.
     loop.reconcileTick();
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
   }
@@ -143,7 +176,7 @@ class TenantReconcileLoopTest {
     // UI inserts a strategy_config row at runtime → enumerated on the next tick.
     when(registry.list()).thenReturn(List.of(B));
     loop.reconcileTick();
-    verify(killSwitch, times(1)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(1)).ensureStrategyKillSwitch("beta", "strat-b");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
   }
 
@@ -158,19 +191,19 @@ class TenantReconcileLoopTest {
     when(registry.list()).thenReturn(List.of(A));
 
     // Tick 1: kill-switch ensure transiently fails → A must NOT be marked seen.
-    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(false);
+    when(killSwitch.ensureStrategyKillSwitch("acme", "strat-a")).thenReturn(false);
     loop.reconcileTick();
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(1)).ensureStrategyKillSwitch("acme", "strat-a");
 
     // Tick 2: still not seen → retried; now it succeeds → marked seen.
-    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(true);
+    when(killSwitch.ensureStrategyKillSwitch("acme", "strat-a")).thenReturn(true);
     loop.reconcileTick();
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
 
     // Tick 3: now seen → no further recon-schedule ensure (kill switches re-assert, #911).
     loop.reconcileTick();
     verify(recon, times(2)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
-    verify(killSwitch, times(3)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(3)).ensureStrategyKillSwitch("acme", "strat-a");
   }
 
   /** A failing registry.list() must not throw out of the tick (loop stays alive). */
@@ -200,9 +233,9 @@ class TenantReconcileLoopTest {
 
     loop.run(null);
 
-    verify(killSwitch).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch).ensureForTenantStrategy("beta", "strat-b");
-    verify(killSwitch).ensureForTenantStrategy("prod-jinchul", "copytrade-v1");
+    verify(killSwitch).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch).ensureStrategyKillSwitch("beta", "strat-b");
+    verify(killSwitch).ensureStrategyKillSwitch("prod-jinchul", "copytrade-v1");
     verify(recon).ensureForTenantStrategy(scheduleClient, "prod-jinchul", "copytrade-v1");
   }
 
@@ -219,22 +252,22 @@ class TenantReconcileLoopTest {
 
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "acme", "strat-a");
     verify(recon, times(1)).ensureForTenantStrategy(scheduleClient, "beta", "strat-b");
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
-    verify(killSwitch, times(2)).ensureForTenantStrategy("beta", "strat-b");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("beta", "strat-b");
   }
 
   /** A startup pass that fails a pair must not latch it — the scheduled tick still retries. */
   @Test
   void startupPassFailureIsRetriedByTheScheduledTick() {
     when(registry.list()).thenReturn(List.of(A));
-    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(false);
+    when(killSwitch.ensureStrategyKillSwitch("acme", "strat-a")).thenReturn(false);
 
     loop.run(null);
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(1)).ensureStrategyKillSwitch("acme", "strat-a");
 
-    when(killSwitch.ensureForTenantStrategy("acme", "strat-a")).thenReturn(true);
+    when(killSwitch.ensureStrategyKillSwitch("acme", "strat-a")).thenReturn(true);
     loop.reconcileTick();
-    verify(killSwitch, times(2)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(2)).ensureStrategyKillSwitch("acme", "strat-a");
   }
 
   /** A registry failure during the startup pass must not abort boot. */
@@ -286,6 +319,6 @@ class TenantReconcileLoopTest {
 
     // registry.list() ran exactly ONCE: the tick skipped rather than starting a second pass.
     verify(registry, times(1)).list();
-    verify(killSwitch, times(1)).ensureForTenantStrategy("acme", "strat-a");
+    verify(killSwitch, times(1)).ensureStrategyKillSwitch("acme", "strat-a");
   }
 }
