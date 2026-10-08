@@ -70,17 +70,30 @@ class SignalsReaderIT {
   }
 
   @Test
-  void scopesToRequestedTenantAndStrategyAndAcceptedSignalsOnly() {
+  void scopesToRequestedTenantAndStrategyAndEntrySignalsOnly() {
     insert("dev", "s1", "SignalAccepted", "2026-05-14T14:00:00Z");
     insert("other", "s1", "SignalAccepted", "2026-05-14T14:00:00Z"); // different tenant
     insert("dev", "s2", "SignalAccepted", "2026-05-14T14:00:00Z"); // strategy not requested
-    insert("dev", "s1", "SignalReceived", "2026-05-14T14:00:00Z"); // carries no option_symbol
     insert("dev", "s1", "EntryFilled", "2026-05-14T14:00:00Z"); // a fill, not a signal
+    insertReceived("other", "s1", "BTO", "2026-05-14T14:00:00Z"); // different tenant
 
     List<Map<String, Object>> items = reader.signals("dev", List.of("s1"), 100);
 
     assertThat(items).hasSize(1);
     assertThat(items.get(0).get("strategy_id")).isEqualTo("s1");
+  }
+
+  @Test
+  void includesReceivedBtoSignalsButNotExitSignals() {
+    // A BTO rejected before contract resolution (e.g. MAX_POSITIONS_EXCEEDED) leaves ONLY a
+    // SignalReceived row — it must still reach the manual-entry picker.
+    insertReceived("dev", "s1", "BTO", "2026-05-14T15:00:00Z");
+    insertReceived("dev", "s1", "STC", "2026-05-14T16:00:00Z"); // an exit, never a BUY candidate
+
+    List<Map<String, Object>> items = reader.signals("dev", List.of("s1"), 100);
+
+    assertThat(items).hasSize(1);
+    assertThat(items.get(0).get("subject").toString()).contains("\"action\": \"BTO\"");
   }
 
   @Test
@@ -111,6 +124,19 @@ class SignalsReaderIT {
     insert("dev", "s1", "SignalAccepted", "2026-05-14T14:00:00Z");
 
     assertThat(reader.signals("dev", List.of(), 100)).isEmpty();
+  }
+
+  private void insertReceived(String tenant, String strategy, String action, String occurredAtIso) {
+    dsl.execute(
+        "INSERT INTO audit_log (tenant_id, strategy_id, event_id, occurred_at, kind, subject)"
+            + " VALUES (?, ?, ?, ?::timestamptz, 'SignalReceived', jsonb_build_object("
+            + " 'action', ?::text, 'ticker', 'NBIS', 'expiry', '2026-10-16', 'strike', '250',"
+            + " 'right', 'C', 'price', '4.10'))",
+        tenant,
+        strategy,
+        UUID.randomUUID(),
+        occurredAtIso,
+        action);
   }
 
   private void insert(String tenant, String strategy, String kind, String occurredAtIso) {

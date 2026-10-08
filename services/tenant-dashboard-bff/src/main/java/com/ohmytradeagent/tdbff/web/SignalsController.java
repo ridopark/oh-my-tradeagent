@@ -13,9 +13,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * {@code GET /api/signals?limit=} — recently ACCEPTED entry signals for the tenant, newest first,
- * so the /live manual-entry box can offer contracts the system has actually signalled instead of
- * requiring a hand-typed 19-character OCC. Read-only; mirrors {@link TradesController}.
+ * {@code GET /api/signals?limit=} — recently received and accepted entry signals for the tenant,
+ * newest first, so the /live manual-entry box can offer contracts the system has actually signalled
+ * instead of requiring a hand-typed 19-character OCC. Read-only; mirrors {@link TradesController}.
  */
 @RestController
 @RequestMapping("/api/signals")
