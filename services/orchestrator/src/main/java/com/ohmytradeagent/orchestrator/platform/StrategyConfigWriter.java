@@ -37,10 +37,11 @@ import org.springframework.stereotype.Component;
  *       equal stored.
  *   <li><b>DANGEROUS / hard-block</b> ({@code broker_target}, {@code broker_account_id}, {@code
  *       notional_cap_pct_of_capital_base}) — must equal stored; deferred to P3. ({@code
- *       broker_account_id} routes real orders to a brokerage account.) (single-account-loss-rule
- *       Phase 4a: the per-strategy {@code daily_loss_threshold} is a dead field — the account cap
- *       {@code account_daily_loss_pct} is the sole daily-loss breaker — so it is no longer
- *       DANGEROUS; it falls through to SAFE and is freely writable.)
+ *       broker_account_id} routes real orders to a brokerage account; #871: it may be set once
+ *       while absent, then never changed or cleared.) (single-account-loss-rule Phase 4a: the
+ *       per-strategy {@code daily_loss_threshold} is a dead field — the account cap {@code
+ *       account_daily_loss_pct} is the sole daily-loss breaker — so it is no longer DANGEROUS; it
+ *       falls through to SAFE and is freely writable.)
  *   <li><b>EXPOSURE / tighten-only</b> ({@code max_contracts}, {@code min_contracts}, {@code
  *       max_positions}, {@code capital_weight}) — must not increase vs stored. ({@code
  *       max_notional_per_signal} / {@code max_daily_notional_deployed} were removed in #649 — caps
@@ -612,10 +613,15 @@ public class StrategyConfigWriter {
     // daily-loss breaker — so it is NO LONGER DANGEROUS and a write may change/clear it freely.)
     requireDangerousUnchanged("broker_target", stored.getBrokerTarget(), next.getBrokerTarget());
     // P4-c: broker_account_id routes real orders to a specific brokerage account; a runtime change
-    // would re-route live orders to a different account. Same DANGEROUS class as broker_target.
-    // Objects.equals tolerates null==null (absent on both sides → allowed), rejects null→value.
-    requireDangerousUnchanged(
-        "broker_account_id", stored.getBrokerAccountId(), next.getBrokerAccountId());
+    // would re-route live orders to a different account. Same DANGEROUS class as broker_target,
+    // except that an ABSENT id may be set (#871): there is no prior account to move orders away
+    // from, and a shared broker_target fail-closes boot until every tenant on it declares one.
+    // Once set it is immutable (change and clear are both rejected). Which value is legitimate
+    // (the exec-verified account) is decided by the api-gateway arm routes, not here.
+    if (stored.getBrokerAccountId() != null) {
+      requireDangerousUnchanged(
+          "broker_account_id", stored.getBrokerAccountId(), next.getBrokerAccountId());
+    }
     requireDangerousUnchanged(
         "notional_cap_pct_of_capital_base",
         stored.getNotionalCapPctOfCapitalBase(),

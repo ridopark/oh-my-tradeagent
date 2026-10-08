@@ -83,6 +83,15 @@ class OperatorStrategyEnableControllerTest {
         .thenReturn(Optional.of(new StrategyConfigReader.Stored(stored, 3L)));
   }
 
+  private void stubStoredDisabledWithAccount(String account) {
+    StrategyConfig stored = new StrategyConfig();
+    stored.setEnabled(false);
+    stored.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_PAPER);
+    stored.setBrokerAccountId(account);
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(Optional.of(new StrategyConfigReader.Stored(stored, 3L)));
+  }
+
   private static StrategyConfigUpdateResult resultOf(
       StrategyConfigUpdateResult.Outcome outcome, Long newVersion) {
     StrategyConfigUpdateResult r = new StrategyConfigUpdateResult();
@@ -96,7 +105,7 @@ class OperatorStrategyEnableControllerTest {
   void verifiedAccount_startsUpdateWorkflow_withEnabledTrue_andExpectedVersion() {
     stubStoredDisabled();
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.ALLOW);
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
     when(stub.update(any(StrategyConfigUpdateRequest.class)))
         .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
 
@@ -116,11 +125,61 @@ class OperatorStrategyEnableControllerTest {
     assertThat(req.getActor()).contains(OPERATOR);
   }
 
+  /**
+   * #871 outage shape: the stored row has NO broker_account_id (onboarding never wrote one). Enable
+   * binds the exec-verified account, so the row can no longer fail-close boot on a shared target.
+   */
+  @Test
+  void enable_bindsVerifiedAccount_whenStoredHasNone_871() {
+    stubStoredDisabled();
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+
+    controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null);
+
+    ArgumentCaptor<StrategyConfigUpdateRequest> captor =
+        ArgumentCaptor.forClass(StrategyConfigUpdateRequest.class);
+    verify(stub).update(captor.capture());
+    assertThat(captor.getValue().getConfig().getBrokerAccountId()).isEqualTo("380083820");
+  }
+
+  @Test
+  void enable_keepsStoredAccount_whenItMatchesTheVerifiedOne() {
+    stubStoredDisabledWithAccount("380083820");
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+
+    controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null);
+
+    ArgumentCaptor<StrategyConfigUpdateRequest> captor =
+        ArgumentCaptor.forClass(StrategyConfigUpdateRequest.class);
+    verify(stub).update(captor.capture());
+    assertThat(captor.getValue().getConfig().getBrokerAccountId()).isEqualTo("380083820");
+  }
+
+  /** Stored account disagrees with the creds' verified account → refuse to arm (never re-route). */
+  @Test
+  void enable_storedAccountMismatch_is422_noWorkflowStarted() {
+    stubStoredDisabledWithAccount("111111111");
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+
+    assertResponseStatus(
+        () -> controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null),
+        HttpStatus.UNPROCESSABLE_ENTITY);
+    verify(workflowClient, never()).newWorkflowStub(any(Class.class), any(WorkflowOptions.class));
+  }
+
   @Test
   void noVerifiedAccount_is422_noWorkflowStarted() {
     stubStoredDisabled();
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED);
+        .thenReturn(
+            VerifiedAccountGuard.Verification.of(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED));
 
     assertResponseStatus(
         () -> controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null),
@@ -132,7 +191,7 @@ class OperatorStrategyEnableControllerTest {
   void guardFault_is503_noWorkflowStarted() {
     stubStoredDisabled();
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.FAULT);
+        .thenReturn(VerifiedAccountGuard.Verification.of(VerifiedAccountGuard.Decision.FAULT));
 
     assertResponseStatus(
         () -> controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null),
@@ -148,7 +207,9 @@ class OperatorStrategyEnableControllerTest {
     when(reader.read(TENANT, STRATEGY))
         .thenReturn(Optional.of(new StrategyConfigReader.Stored(stored, 3L)));
     when(guard.evaluate(eq(TENANT), eq("alpaca-live")))
-        .thenReturn(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
+        .thenReturn(
+            VerifiedAccountGuard.Verification.of(
+                VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET));
 
     assertResponseStatus(
         () -> controller.enable(reqWithOperator(OPERATOR), TENANT, STRATEGY, null),
@@ -188,7 +249,7 @@ class OperatorStrategyEnableControllerTest {
   void workflowFailure_is503() {
     stubStoredDisabled();
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.ALLOW);
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
     when(stub.update(any(StrategyConfigUpdateRequest.class)))
         .thenThrow(new TestWorkflowException());
 

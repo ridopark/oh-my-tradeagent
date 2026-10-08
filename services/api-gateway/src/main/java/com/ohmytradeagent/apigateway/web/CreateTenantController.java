@@ -1,5 +1,6 @@
 package com.ohmytradeagent.apigateway.web;
 
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.StrategyConfigCreateRequest;
 import com.ohmytradeagent.contract.StrategyConfigCreateResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
@@ -12,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,9 +64,14 @@ public class CreateTenantController {
   private final WorkflowClient workflowClient;
   private final TenantContext ctx;
 
-  public CreateTenantController(WorkflowClient workflowClient, TenantContext ctx) {
+  /** Absent when neither arm route is enabled (the guard bean is conditional on them). */
+  private final Optional<VerifiedAccountGuard> guard;
+
+  public CreateTenantController(
+      WorkflowClient workflowClient, TenantContext ctx, Optional<VerifiedAccountGuard> guard) {
     this.workflowClient = workflowClient;
     this.ctx = ctx;
+    this.guard = guard;
   }
 
   @PostMapping("/{tenant}/strategies/{strategy}")
@@ -91,6 +98,12 @@ public class CreateTenantController {
     // bypassing the arm-guard entirely. Force enabled=false here so arming can ONLY happen through
     // the guarded enable route (POST /admin/tenants/{tenant}/strategies/{strategy}/enable).
     body.config().setEnabled(false);
+
+    // #871: broker_account_id is the exec-verified account or nothing — never the caller's value.
+    // An existing tenant adding a strategy already has one, and binding it here keeps the new row
+    // from sitting on a shared broker_target without an id (which fail-closes orchestrator boot for
+    // every tenant). A brand-new tenant has none yet; the guarded enable route binds it.
+    body.config().setBrokerAccountId(verifiedAccount(tenant, body.config()));
 
     String correlationId =
         (body.correlationId() != null && !body.correlationId().isBlank())
@@ -133,6 +146,15 @@ public class CreateTenantController {
       throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
     }
     return mapOutcome(result);
+  }
+
+  private String verifiedAccount(String tenant, StrategyConfig config) {
+    if (guard.isEmpty() || config.getBrokerTarget() == null) {
+      return null;
+    }
+    VerifiedAccountGuard.Verification v =
+        guard.get().evaluate(tenant, config.getBrokerTarget().value());
+    return v.decision() == VerifiedAccountGuard.Decision.ALLOW ? v.account() : null;
   }
 
   /**

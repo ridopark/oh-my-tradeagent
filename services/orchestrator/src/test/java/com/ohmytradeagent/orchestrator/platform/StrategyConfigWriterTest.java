@@ -180,12 +180,42 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
-    // P4-c: broker_account_id routes real orders to a brokerage account; a runtime change would
-    // re-route live orders. DANGEROUS (must equal stored): setting it from null is rejected.
+  void allowsBrokerAccountIdSetFromNull_871() {
+    // #871: onboarding never wrote broker_account_id, and the writer refused null→value, so a row
+    // created without it could never acquire it — a shared broker_target then fail-closed boot
+    // estate-wide. Populating an ABSENT account id re-routes nothing (there is no prior account).
     StrategyConfig stored = liveSafeStored();
+    assertThat(stored.getBrokerAccountId()).isNull();
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId("380083820");
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
+  }
+
+  @Test
+  void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
+    // P4-c: once set, broker_account_id routes real orders to a brokerage account; changing it
+    // would re-route live orders. Immutable once set.
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("380083820");
     StrategyConfig next = copy(stored);
     next.setBrokerAccountId("847309116");
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("broker_account_id");
+    verify(audit, never()).log(any());
+  }
+
+  @Test
+  void rejectsBrokerAccountIdCleared() {
+    // Clearing a set account id would re-open the #871 boot hazard. Immutable once set.
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("380083820");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId(null);
     assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class)
         .hasMessageContaining("broker_account_id");

@@ -1,6 +1,7 @@
 package com.ohmytradeagent.apigateway.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -17,9 +18,11 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowException;
 import io.temporal.client.WorkflowOptions;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.server.ResponseStatusException;
@@ -89,6 +92,71 @@ class StrategyConfigControllerTest {
     r.setOutcome(outcome);
     r.setNewVersion(newVersion);
     return r;
+  }
+
+  /** #871: arming through /config binds the verified account; a client-sent value is ignored. */
+  @Test
+  void arming_bindsVerifiedAccount_ignoringClientValue_871() {
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+    StrategyConfigWriteRequest body = armingBody();
+    body.config().setBrokerAccountId("999999999");
+
+    controller.write(reqWithTenant(TENANT), body);
+
+    ArgumentCaptor<StrategyConfigUpdateRequest> captor =
+        ArgumentCaptor.forClass(StrategyConfigUpdateRequest.class);
+    verify(stub).update(captor.capture());
+    assertThat(captor.getValue().getConfig().getBrokerAccountId()).isEqualTo("380083820");
+  }
+
+  /**
+   * #871 security: the writer now accepts null→value, so a NON-arming tenant edit must not be able
+   * to self-declare an account id (a duplicate would fail-close boot for every tenant). The gateway
+   * pins it to the stored value.
+   */
+  @Test
+  void nonArmingEdit_cannotSelfDeclareAccount_pinnedToStored_871() {
+    StrategyConfig stored = storedDisabled();
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(Optional.of(new StrategyConfigReader.Stored(stored, 3L)));
+    when(stub.update(any(StrategyConfigUpdateRequest.class)))
+        .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
+    StrategyConfig proposed = new StrategyConfig();
+    proposed.setEnabled(false);
+    proposed.setBrokerAccountId("999999999");
+
+    controller.write(
+        reqWithTenant(TENANT),
+        new StrategyConfigWriteRequest(TENANT, STRATEGY, proposed, 3L, "corr-edit"));
+
+    ArgumentCaptor<StrategyConfigUpdateRequest> captor =
+        ArgumentCaptor.forClass(StrategyConfigUpdateRequest.class);
+    verify(stub).update(captor.capture());
+    assertThat(captor.getValue().getConfig().getBrokerAccountId()).isNull();
+    org.mockito.Mockito.verifyNoInteractions(guard);
+  }
+
+  @Test
+  void arming_storedAccountMismatch_is422_noWorkflowStarted() {
+    StrategyConfig stored = storedDisabled();
+    stored.setBrokerAccountId("111111111");
+    when(reader.read(TENANT, STRATEGY))
+        .thenReturn(Optional.of(new StrategyConfigReader.Stored(stored, 3L)));
+    when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+
+    assertThatThrownBy(() -> controller.write(reqWithTenant(TENANT), armingBody()))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(
+            e ->
+                assertThat(((ResponseStatusException) e).getStatusCode())
+                    .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY));
+    verify(stub, never()).update(any());
   }
 
   @Test
@@ -164,7 +232,8 @@ class StrategyConfigControllerTest {
     when(reader.read(TENANT, STRATEGY))
         .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED);
+        .thenReturn(
+            VerifiedAccountGuard.Verification.of(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED));
 
     assertResponseStatus(
         () -> controller.write(reqWithTenant(TENANT), armingBody()),
@@ -177,7 +246,7 @@ class StrategyConfigControllerTest {
     when(reader.read(TENANT, STRATEGY))
         .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.ALLOW);
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
     when(stub.update(any(StrategyConfigUpdateRequest.class)))
         .thenReturn(resultOf(StrategyConfigUpdateResult.Outcome.UPDATED, 4L));
 
@@ -192,7 +261,7 @@ class StrategyConfigControllerTest {
     when(reader.read(TENANT, STRATEGY))
         .thenReturn(java.util.Optional.of(new StrategyConfigReader.Stored(storedDisabled(), 3L)));
     when(guard.evaluate(eq(TENANT), eq("alpaca-paper")))
-        .thenReturn(VerifiedAccountGuard.Decision.FAULT);
+        .thenReturn(VerifiedAccountGuard.Verification.of(VerifiedAccountGuard.Decision.FAULT));
 
     assertResponseStatus(
         () -> controller.write(reqWithTenant(TENANT), armingBody()),
