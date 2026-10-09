@@ -1331,6 +1331,47 @@ class AlpacaPaperBrokerTest {
   }
 
   @Test
+  void getAccount_mapsFundingDetail_forRejectionForensics() throws Exception {
+    // #874: the fields that explain an "insufficient options buying power" rejection (unsettled
+    // funds vs options approval too low vs cash account) are read through. Alpaca sends numbers as
+    // strings; informational only, not a gate input.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"1000.00\",\"cash\":\"1000.00\","
+                    + "\"options_buying_power\":\"0\",\"options_approved_level\":2,"
+                    + "\"options_trading_level\":1,\"multiplier\":\"1\","
+                    + "\"pending_transfer_in\":\"1000.00\"}"));
+
+    OptionsBroker.FundingDetail funding = broker.getAccount().funding();
+
+    assertThat(funding.optionsBuyingPower()).isEqualByComparingTo("0");
+    assertThat(funding.optionsApprovedLevel()).isEqualTo(2);
+    assertThat(funding.optionsTradingLevel()).isEqualTo(1);
+    assertThat(funding.multiplier()).isEqualByComparingTo("1");
+    assertThat(funding.pendingTransferIn()).isEqualByComparingTo("1000.00");
+  }
+
+  @Test
+  void getAccount_missingFundingFields_areNullNotAProtocolError() {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"id\":\"acct-1\",\"equity\":\"1000.00\",\"cash\":\"1000.00\"}"));
+
+    OptionsBroker.FundingDetail funding = broker.getAccount().funding();
+
+    assertThat(funding.optionsBuyingPower()).isNull();
+    assertThat(funding.optionsApprovedLevel()).isNull();
+    assertThat(funding.optionsTradingLevel()).isNull();
+    assertThat(funding.multiplier()).isNull();
+    assertThat(funding.pendingTransferIn()).isNull();
+  }
+
+  @Test
   void preTradeCheck_marginAccount_gatesOnCash_notOptionsBuyingPower() throws Exception {
     // The point of this change: the affordability gate reads AVAILABLE CASH, not margin/options
     // buying power. On a Reg-T margin account options_buying_power (4000) is 2-4x the account's

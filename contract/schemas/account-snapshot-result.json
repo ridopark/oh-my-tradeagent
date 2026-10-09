@@ -32,6 +32,26 @@
     "last_equity": {
       "type": "number",
       "description": "Prior market-close net-liquidation equity in dollars (Alpaca /v2/account 'last_equity'). The dashboard's live intraday 'today' P&L is equity - last_equity. Informational only — NOT a credential and NOT used by any risk gate. Optional/absent for broker adapters or records that predate this field or a response that omits it; a null/absent value leaves the dashboard's 'today' figure to fall back to the last completed daily bar (never fabricated)."
+    },
+    "options_buying_power": {
+      "type": "number",
+      "description": "Options buying power in dollars (Alpaca /v2/account 'options_buying_power') — the figure a broker 'insufficient options buying power' rejection is measured against. Issue #874: informational funding detail that explains a broker 'insufficient options buying power' rejection (unsettled funds under T+1 vs options approval too low vs cash account). NOT used by any risk gate. Optional/absent for broker adapters that do not expose it or records that predate this field."
+    },
+    "options_approved_level": {
+      "type": "integer",
+      "description": "Options level the broker has APPROVED for the account (Alpaca /v2/account 'options_approved_level'; 1 = covered only, 2 = long calls/puts, 3 = spreads). Issue #874: informational funding detail that explains a broker 'insufficient options buying power' rejection (unsettled funds under T+1 vs options approval too low vs cash account). NOT used by any risk gate. Optional/absent for broker adapters that do not expose it or records that predate this field."
+    },
+    "options_trading_level": {
+      "type": "integer",
+      "description": "Options level currently in EFFECT for trading (Alpaca /v2/account 'options_trading_level'); may be lower than the approved level. Issue #874: informational funding detail that explains a broker 'insufficient options buying power' rejection (unsettled funds under T+1 vs options approval too low vs cash account). NOT used by any risk gate. Optional/absent for broker adapters that do not expose it or records that predate this field."
+    },
+    "multiplier": {
+      "type": "number",
+      "description": "Buying-power multiplier (Alpaca /v2/account 'multiplier'): 1 = cash account (T+1 settlement applies to options buying power), 2/4 = margin. Issue #874: informational funding detail that explains a broker 'insufficient options buying power' rejection (unsettled funds under T+1 vs options approval too low vs cash account). NOT used by any risk gate. Optional/absent for broker adapters that do not expose it or records that predate this field."
+    },
+    "pending_transfer_in": {
+      "type": "number",
+      "description": "Inbound transfer not yet credited, in dollars (Alpaca /v2/account 'pending_transfer_in'). A freshly funded account shows its deposit here before it reaches buying power. Issue #874: informational funding detail that explains a broker 'insufficient options buying power' rejection (unsettled funds under T+1 vs options approval too low vs cash account). NOT used by any risk gate. Optional/absent for broker adapters that do not expose it or records that predate this field."
     }
   }
 }

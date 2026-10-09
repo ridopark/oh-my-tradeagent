@@ -58,6 +58,20 @@ public class AccountSnapshotExecActivityImpl implements AccountSnapshotActivity 
     // Informational account identity for the tenant dashboard (not used by any gate). Null-safe: a
     // null accountNumber simply leaves the optional field absent.
     result.setAccountNumber(account.accountNumber());
+    // #874: funding detail that explains a broker "insufficient options buying power" rejection.
+    // Observability only — no gate reads it; a broker without it leaves every field absent.
+    OptionsBroker.FundingDetail funding = account.funding();
+    if (funding != null) {
+      result.setOptionsBuyingPower(funding.optionsBuyingPower());
+      result.setOptionsApprovedLevel(toLong(funding.optionsApprovedLevel()));
+      result.setOptionsTradingLevel(toLong(funding.optionsTradingLevel()));
+      result.setMultiplier(funding.multiplier());
+      result.setPendingTransferIn(funding.pendingTransferIn());
+    }
     return result;
+  }
+
+  private static Long toLong(Integer v) {
+    return v == null ? null : v.longValue();
   }
 }

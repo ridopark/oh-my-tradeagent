@@ -203,7 +203,11 @@ public interface OptionsBroker {
    * unavailable.
    */
   record AccountSummary(
-      BigDecimal equity, BigDecimal cash, String accountNumber, BigDecimal lastEquity) {
+      BigDecimal equity,
+      BigDecimal cash,
+      String accountNumber,
+      BigDecimal lastEquity,
+      FundingDetail funding) {
 
     /**
      * Back-compat convenience for brokers/tests that carry no {@code lastEquity} — delegates with a
@@ -213,7 +217,32 @@ public interface OptionsBroker {
     public AccountSummary(BigDecimal equity, BigDecimal cash, String accountNumber) {
       this(equity, cash, accountNumber, null);
     }
+
+    /** Back-compat convenience for brokers/tests that carry no {@link FundingDetail}. */
+    public AccountSummary(
+        BigDecimal equity, BigDecimal cash, String accountNumber, BigDecimal lastEquity) {
+      this(equity, cash, accountNumber, lastEquity, null);
+    }
   }
+
+  /**
+   * Issue #874: the account fields that explain a broker "insufficient options buying power"
+   * rejection — unsettled funds under T+1 vs options approval too low vs a cash account. Every
+   * component is nullable and informational: observability only, NOT read by any gate.
+   *
+   * @param optionsBuyingPower Alpaca {@code options_buying_power}, dollars
+   * @param optionsApprovedLevel Alpaca {@code options_approved_level} (1 covered, 2 long, 3
+   *     spreads)
+   * @param optionsTradingLevel Alpaca {@code options_trading_level}, the level in effect
+   * @param multiplier Alpaca {@code multiplier}: 1 = cash account, 2/4 = margin
+   * @param pendingTransferIn Alpaca {@code pending_transfer_in}, dollars not yet credited
+   */
+  record FundingDetail(
+      BigDecimal optionsBuyingPower,
+      Integer optionsApprovedLevel,
+      Integer optionsTradingLevel,
+      BigDecimal multiplier,
+      BigDecimal pendingTransferIn) {}
 
   /**
    * Trading days in {@code [start, end]} inclusive, per the broker's market calendar. Used by the

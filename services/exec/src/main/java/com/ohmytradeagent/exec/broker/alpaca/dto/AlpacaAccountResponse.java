@@ -50,6 +50,10 @@ public record AlpacaAccountResponse(
      * simply leaves the downstream {@code today_pl} unavailable (never fabricated).
      */
     @JsonProperty("last_equity") BigDecimal lastEquity,
+    /** Issue #874: informational funding detail; see {@code OptionsBroker.FundingDetail}. */
+    @JsonProperty("options_approved_level") Integer optionsApprovedLevel,
+    @JsonProperty("options_trading_level") Integer optionsTradingLevel,
+    @JsonProperty("pending_transfer_in") BigDecimal pendingTransferIn,
     /**
      * Informational brokerage account identity for the tenant dashboard (Alpaca {@code
      * account_number}). NOT a credential and NOT used by any gate.
