@@ -1349,12 +1349,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * {@code trailingState} query arriving in the gap between run start and {@code run()}'s first
    * statement observes the carried trail, not zeroes. {@code @WorkflowInit} emits no commands, so
    * this is replay-neutral for every in-flight history (precedent: {@code
-   * AccountKillSwitchWorkflowImpl}). Fields NOT hydrated here are exactly the ones {@link
-   * #rollBarrierHolds()} proves are at their zero value at the moment of the roll — each exclusion
-   * is justified by a specific barrier conjunct, and pinned by the barrier tests. Timers are
-   * deliberately not carried: eod/expiry/flatten-lead durations derive from the OCC expiry plus
-   * config, so {@link #run} recomputes them correctly from the current clock — that is a property,
-   * not an omission.
+   * AccountKillSwitchWorkflowImpl}). What happens to each field NOT hydrated here (proven zero by
+   * {@link #rollBarrierHolds()}, watchlist-only, rebuilt by {@link #run}, or reset and accepted) is
+   * classified in {@code PositionWorkflowCarryForwardClassificationTest}, which fails the build on
+   * an unclassified field. Timers are deliberately not carried: eod/expiry/flatten-lead durations
+   * derive from the OCC expiry plus config, so {@link #run} recomputes them correctly from the
+   * current clock — that is a property, not an omission.
+   *
+   * <p>A carried run starts with an EMPTY history, so every {@code Workflow.getVersion} — the
+   * top-of-run fields and every in-method gate alike — resolves to MAX, not to the version the
+   * ORIGINAL run recorded. A position that started below a gate silently switches to the gated
+   * behaviour at the roll (PLAN-2026-10-08 §3 G1). Accepted today: every running position
+   * post-dates {@link #VERSION_CHANDELIER_BREAKEVEN_FLOOR} and {@link
+   * #VERSION_CHANDELIER_TRAIL_ON_BID} (verified 2026-10-08), and both only tighten a stop. A gate
+   * that LOOSENS a stop must carry the original version and take {@code min(carried, resolved)} in
+   * {@link #run}.
    */
   @WorkflowInit
   public PositionWorkflowImpl(PositionWorkflowInput in) {
@@ -1423,8 +1432,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * order, every pending deque empty, nothing latched, no armed retry timer, and not a
    * watchlist-exit position (whose ~10 extra fields and first-fill-relative timers are a larger
    * carry surface for zero coverage gain: those strategies run a 25-45 minute time stop and can
-   * never approach the watermark). Every field {@code buildCarryForwardInput} does NOT carry is
-   * proven zero by a conjunct here; the pairing is pinned by the barrier tests.
+   * never approach the watermark). Which fields {@code buildCarryForwardInput} does NOT carry are
+   * proven zero by a conjunct here — and which are instead watchlist-only, rebuilt per run, or
+   * reset and accepted — is classified in {@code PositionWorkflowCarryForwardClassificationTest},
+   * the source of truth for that pairing (this comment once claimed full coverage and had drifted).
    *
    * <p>{@code !retryFlattenArmed}, {@code partialPlaceRetryPending == null} and {@code
    * !partialPlaceRetryArmed} are load-bearing beyond signal-loss: each means a Temporal timer is
