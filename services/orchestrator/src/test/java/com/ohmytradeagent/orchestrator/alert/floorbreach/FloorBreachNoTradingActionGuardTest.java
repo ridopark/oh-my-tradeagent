@@ -41,9 +41,20 @@ class FloorBreachNoTradingActionGuardTest {
 
   @Test
   void floorBreachPackageContainsNoTradingActionTokens() throws IOException {
-    Path dir = findFloorBreachSourceDir();
+    assertNoTradingActionTokens("floorbreach", 4);
+  }
+
+  /** #747: the overnight-trail notice is held to the same ALERT-ONLY invariant. */
+  @Test
+  void overnightTrailPackageContainsNoTradingActionTokens() throws IOException {
+    assertNoTradingActionTokens("overnighttrail", 1);
+  }
+
+  private static void assertNoTradingActionTokens(String alertPackage, int minFiles)
+      throws IOException {
+    Path dir = findAlertSourceDir(alertPackage);
     assertThat(dir)
-        .as("alert/floorbreach source dir must exist — the guard must never silently skip")
+        .as("alert/" + alertPackage + " source dir must exist — the guard must never silently skip")
         .isNotNull();
 
     List<String> violations = new ArrayList<>();
@@ -64,19 +75,22 @@ class FloorBreachNoTradingActionGuardTest {
     }
 
     assertThat(filesScanned)
-        .as("expected the floorbreach package to contain source files; 0 means the scan broke")
-        .isGreaterThanOrEqualTo(4);
+        .as("expected alert/" + alertPackage + " to contain source files; 0 means the scan broke")
+        .isGreaterThanOrEqualTo(minFiles);
     assertThat(violations)
         .as(
-            "HARD INVARIANT (#779): alert/floorbreach/ is ALERT-ONLY and must contain no "
-                + "order-placement/cancellation or workflow signal/update/start token. Violations: %s",
+            "HARD INVARIANT (#779): alert/"
+                + alertPackage
+                + "/ is ALERT-ONLY and must contain no order-placement/cancellation or workflow"
+                + " signal/update/start token. Violations: %s",
             violations)
         .isEmpty();
   }
 
-  private static Path findFloorBreachSourceDir() {
+  private static Path findAlertSourceDir(String alertPackage) {
     // Surefire runs with cwd = the module dir; fall back to walking up for IDE runners.
-    Path relative = Path.of("src/main/java/com/ohmytradeagent/orchestrator/alert/floorbreach");
+    Path relative =
+        Path.of("src/main/java/com/ohmytradeagent/orchestrator/alert/").resolve(alertPackage);
     Path p = Path.of("").toAbsolutePath();
     while (p != null) {
       Path candidate = p.resolve(relative);

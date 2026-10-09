@@ -4,6 +4,7 @@ import static com.ohmytradeagent.orchestrator.alert.AlertSubjects.rawSubject;
 
 import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.identity.YahooOptionLink;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -139,7 +140,8 @@ public class OrderFailureAlerter {
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
           + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed,"
-          + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing,ReconAdoptionLoop";
+          + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing,ReconAdoptionLoop,"
+          + "OvernightTrailHeld";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -188,6 +190,10 @@ public class OrderFailureAlerter {
   // visible (real-money protection just went away). Subject shape (contract_symbol /
   // prior_peak_premium / prior_giveback_pct / operator) gets its own small embed.
   private static final String TRAIL_DISARMED_KIND = "TrailDisarmed";
+
+  // #747: the 15:40 ET notice for an armed trail held overnight (OvernightTrailNoticeLoop).
+  // Informational, not a failure — YELLOW; the operator flattens, tightens or accepts.
+  private static final String OVERNIGHT_TRAIL_HELD_KIND = "OvernightTrailHeld";
 
   // #911: a kill-switch workflow found not running by KillSwitchBootstrapper. RED while it stays
   // down (pre-trade checks fail closed) or when recreated TRIPPED on unreadable prior state;
@@ -275,6 +281,8 @@ public class OrderFailureAlerter {
         embed = buildLotCorrectedEmbed(event);
       } else if (TRAIL_DISARMED_KIND.equals(event.getKind())) {
         embed = buildTrailDisarmedEmbed(event);
+      } else if (OVERNIGHT_TRAIL_HELD_KIND.equals(event.getKind())) {
+        embed = buildOvernightTrailHeldEmbed(event);
       } else if (KILL_SWITCH_WORKFLOW_DOWN_KIND.equals(event.getKind())) {
         embed = buildKillSwitchWorkflowDownEmbed(event);
       } else if (CONDOR_WORKFLOW_TASK_FAILING_KIND.equals(event.getKind())) {
@@ -412,6 +420,45 @@ public class OrderFailureAlerter {
    * #825: the trail-disarm page. YELLOW; every key null-safe (a throwing render is swallowed
    * upstream and would silently lose the very page that says protection was removed).
    */
+  private WebhookEmbed buildOvernightTrailHeldEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "contract_symbol");
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(
+        new WebhookEmbed.Field("remaining_qty", subjectStr(subject, "remaining_qty"), false));
+    fields.add(new WebhookEmbed.Field("bid", subjectStr(subject, "bid"), false));
+    fields.add(new WebhookEmbed.Field("stop", subjectStr(subject, "threshold"), false));
+    fields.add(new WebhookEmbed.Field("distance to stop", percent(subject, "distance_pct"), false));
+    fields.add(new WebhookEmbed.Field("giveback", subjectStr(subject, "giveback_pct"), false));
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    String note = rawSubject(subject, "note");
+    return new WebhookEmbed(
+        ":crescent_moon: Armed trail held overnight — " + orNa(symbolRaw),
+        (note == null ? "The trailing stop is best-effort across the overnight gap." : note)
+            + " Flatten, tighten or accept before the close.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
+        fields);
+  }
+
+  /** A fraction subject value as a percent (2 dp), or {@code n/a}; never throws. */
+  private static String percent(Map<String, Object> subject, String key) {
+    String raw = rawSubject(subject, key);
+    if (raw == null) {
+      return "n/a";
+    }
+    try {
+      return new BigDecimal(raw)
+              .movePointRight(2)
+              .setScale(2, java.math.RoundingMode.HALF_UP)
+              .toPlainString()
+          + "%";
+    } catch (NumberFormatException e) {
+      return raw;
+    }
+  }
+
   private WebhookEmbed buildTrailDisarmedEmbed(AuditEvent event) {
     Map<String, Object> subject = event.getSubject();
     String symbolRaw = rawSubject(subject, "contract_symbol");
