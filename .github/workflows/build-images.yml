@@ -194,5 +194,11 @@ jobs:
           tags: |
             ${{ steps.refs.outputs.tag_latest }}
             ${{ steps.refs.outputs.tag_sha }}
+          # #951: the commit this image was built from, readable from the registry without a
+          # pull. scripts/ops/check_image_current.py (and deploy.yml) compare it to main so a
+          # re-run of an OLD build that re-tags :latest backwards is caught before a roll. On a
+          # re-run github.sha is the old run's commit, which is exactly what must be visible.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.cache_scope }}
           cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
