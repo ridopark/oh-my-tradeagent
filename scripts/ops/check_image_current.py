@@ -14,6 +14,8 @@ downgrades that service. This check reads the commit an image was built from (th
                    is not on main at all
     UNVERIFIABLE   no revision label (an image built before #951), or the registry/GitHub read
                    failed — fail closed: an unknown image is not a verified one
+    SKIPPED        a Docker Hub reference (no registry host, e.g. the `postgres:16` init
+                   containers): this repo only pushes to GHCR, so there is no build to compare
 
 Read-only: anonymous GHCR pulls of manifests + config blobs (no image layers), and GitHub's
 compare API (GH_TOKEN/GITHUB_TOKEN used if set, else anonymous: 60 requests/hour). The
@@ -68,6 +70,12 @@ def parse_image_ref(ref: str) -> tuple[str, str, str]:
         raise ValueError(f"digest references are already pinned, nothing to check: {ref!r}")
     repo, _, tag = rest.partition(":")
     return registry, repo, tag or "latest"
+
+
+def is_docker_hub(ref: str) -> bool:
+    """True for a ref with no registry host (`postgres:16`, `cloudflare/cloudflared:x`)."""
+    first, _, rest = ref.partition("/")
+    return not rest or ("." not in first and ":" not in first and first != "localhost")
 
 
 def build_paths(workflow_text: str) -> list[str]:
@@ -191,6 +199,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", default="ridopark/oh-my-tradeagent", help="GitHub owner/repo")
     p.add_argument("--branch", default="main")
     a = p.parse_args(argv)
+    for ref in [r for r in a.images if is_docker_hub(r)]:
+        print(f"{'SKIPPED':<13} {ref}: Docker Hub image, not built by this repo")
+    a.images = [r for r in a.images if not is_docker_hub(r)]
+    if not a.images:
+        return 0
     for ref in a.images:
         try:
             parse_image_ref(ref)

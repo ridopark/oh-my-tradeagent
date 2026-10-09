@@ -42,6 +42,12 @@ class ParseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cic.parse_image_ref(bad)
 
+    def test_docker_hub_refs(self):
+        for hub in ("postgres:16", "redis:7-alpine", "cloudflare/cloudflared:2026.6.0"):
+            self.assertTrue(cic.is_docker_hub(hub), hub)
+        for own in ("ghcr.io/o/n:latest", "localhost:5000/n", "localhost/n:x"):
+            self.assertFalse(cic.is_docker_hub(own), own)
+
     def test_build_paths_from_the_real_workflow(self):
         paths = cic.build_paths(BUILD_WORKFLOW.read_text())
         self.assertIn("services/**", paths)
@@ -158,6 +164,24 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("STALE         ghcr.io/o/a:latest", out)
         self.assertIn("UNVERIFIABLE  ghcr.io/o/b:latest", out)
+
+    def test_docker_hub_init_image_is_skipped_not_a_usage_error(self):
+        rc, out, calls = self.run_main(
+            {"postgres:16": None, "ghcr.io/o/a:latest": "r1"},
+            {"r1": {"status": "identical"}},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("SKIPPED       postgres:16", out)
+        self.assertIn("CURRENT       ghcr.io/o/a:latest", out)
+        self.assertEqual(calls, ["r1"])
+
+    def test_docker_hub_skip_does_not_hide_a_stale_own_image(self):
+        rc, out, _ = self.run_main(
+            {"postgres:16": None, "ghcr.io/o/a:latest": "old"},
+            {"old": {"status": "ahead", "files": files("services/x.py")}},
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("STALE", out)
 
 
 if __name__ == "__main__":
