@@ -11,6 +11,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
 import com.ohmytradeagent.contract.ForceCloseResult;
+import com.ohmytradeagent.contract.OptionQuoteResult;
 import com.ohmytradeagent.contract.OrderIntent;
 import com.ohmytradeagent.contract.OrderIntentResult;
 import com.ohmytradeagent.contract.PartialCloseRequest;
@@ -19,13 +20,20 @@ import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.RiskBreachPayload;
+import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
+import com.ohmytradeagent.orchestrator.activities.ExecActivities;
+import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.api.enums.v1.IndexedValueType;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.SearchAttributeKey;
+import io.temporal.common.SearchAttributes;
 import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
@@ -396,6 +404,205 @@ class PositionWorkflowImplLegacyReplayTest {
     assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
     Files.createDirectories(FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Issue #752 G3: carried (post-continue-as-new) run
+  // ---------------------------------------------------------------------------
+
+  private static final String CARRIED_FIXTURE_RESOURCE =
+      "temporal/replay/position-carried-run-history.json";
+  private static final Path CARRIED_FIXTURE_SOURCE_PATH =
+      Path.of("src/test/resources/temporal/replay/position-carried-run-history.json");
+  private static final String CARRIED_WORKFLOW_ID = "carried-run-position";
+  private static final String CARRIED_OCC = "NVDA  281215C00140000";
+
+  /**
+   * The SECOND run of a rolled position: carried input with an armed trail, the carried-run search
+   * attribute upsert, neutral ticks, one ratchet, and a chandelier fire with its filled flatten.
+   * The {@code if (carriedRun)} upsert and the {@code !carriedRun} first-fill bypass in {@code
+   * run()} are un-gated because "a carried history is always fresh" — true only until the first
+   * real roll. This fixture is the tripwire for an un-gated edit to either branch afterwards.
+   *
+   * <p>NEVER re-record this fixture after merge: a change that breaks it needs a version gate, not
+   * a new fixture (PLAN-2026-10-08 Phase 2). Falsified both ways when added — deleting the upsert
+   * block, or dropping {@code !carriedRun} from the first-fill await, each fails this test.
+   */
+  @Test
+  void carriedRunHistoryReplaysAgainstCurrentImplWithoutNonDeterminism() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(CARRIED_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. Record ONCE with"
+                + " `mvn -pl services/orchestrator test -Dgenerate.carried.fixture=true"
+                + " -Dtest=PositionWorkflowImplLegacyReplayTest#regenerateCarriedRunFixture`",
+            CARRIED_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowExecutionHistory history;
+    try (var in = getClass().getClassLoader().getResourceAsStream(CARRIED_FIXTURE_RESOURCE)) {
+      history =
+          WorkflowExecutionHistory.fromJson(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+    }
+    var started = history.getEvents().get(0).getWorkflowExecutionStartedEventAttributes();
+    // A fixture without the carried marker replays the PARENT path and proves nothing.
+    assertThat(started.getContinuedExecutionRunId()).as("recorded run is a roll").isNotEmpty();
+    assertThat(started.getInput().getPayloads(0).getData().toStringUtf8())
+        .contains("\"carried_remaining_qty\"")
+        .contains("\"carried_trailing_armed\":true");
+
+    WorkflowReplayer.replayWorkflowExecution(history, PositionWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot recorder for {@link #CARRIED_FIXTURE_RESOURCE}, run against the REAL {@link
+   * PositionWorkflowImpl}. Lowers the watermark (the {@code PositionWorkflowImplContinueAsNewTest}
+   * technique) so neutral ticks roll an armed position, restores it so the carried run cannot roll
+   * again, then drives ticks, a ratchet and a fire on the carried run and records ITS history.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.carried.fixture", matches = "true")
+  void regenerateCarriedRunFixture() throws Exception {
+    Field watermark = PositionWorkflowImpl.class.getDeclaredField("historyLengthWatermark");
+    watermark.setAccessible(true);
+    long originalWatermark = watermark.getLong(null);
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker coreWorker = env.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(PositionWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      ExecActivities exec = Mockito.mock(ExecActivities.class);
+      SubscribePremiumActivity marketData = Mockito.mock(SubscribePremiumActivity.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+      when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+      when(calendar.durationUntilExpiryFlattenEt(any(), Mockito.anyLong(), any()))
+          .thenReturn(Duration.ZERO);
+      when(exec.placeOrder(any())).thenReturn(submitted());
+      SubscribePremiumResult subscribed = new SubscribePremiumResult();
+      subscribed.setSchemaVersion(1L);
+      subscribed.setSubscriptionId("sub-carried");
+      subscribed.setSubscribedAt(OffsetDateTime.now());
+      subscribed.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
+      when(marketData.subscribePremium(any())).thenReturn(subscribed);
+      OptionQuoteResult quote = new OptionQuoteResult();
+      quote.setSchemaVersion(1L);
+      quote.setContractSymbol(CARRIED_OCC);
+      quote.setBid(new BigDecimal("2.50"));
+      quote.setMid(new BigDecimal("2.55"));
+      quote.setAsk(new BigDecimal("2.60"));
+      quote.setRetrievedAt(OffsetDateTime.now());
+      quote.setStatus(OptionQuoteResult.Status.OK);
+      when(optionQuote.getOptionQuote(any())).thenReturn(quote);
+
+      coreWorker.registerActivitiesImplementations(audit, calendar);
+      env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER)
+          .registerActivitiesImplementations(exec);
+      env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE)
+          .registerActivitiesImplementations(marketData, optionQuote);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      PositionWorkflow wf =
+          client.newWorkflowStub(
+              PositionWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(CARRIED_WORKFLOW_ID)
+                  .setTypedSearchAttributes(
+                      SearchAttributes.newBuilder()
+                          .set(
+                              SearchAttributeKey.forKeyword("TenantStrategy"),
+                              "t-dev/s-copytrade-v1")
+                          .set(SearchAttributeKey.forKeyword("ContractSymbol"), CARRIED_OCC)
+                          .build())
+                  .build());
+      PositionWorkflowInput in = input();
+      in.setEntrySignalId("carried-entry-1");
+      in.setContractSymbol(CARRIED_OCC);
+      in.setExitFloorPct(new BigDecimal("0.50"));
+      watermark.setLong(null, 60L);
+      WorkflowStub.fromTyped(wf).start(in);
+      wf.onFill(fill("brk-entry", 5L, "2.30"));
+      ArmChandelierPayload arm = new ArmChandelierPayload();
+      arm.setSchemaVersion(1L);
+      arm.setTenantId("dev");
+      arm.setStrategyId("copytrade-v1");
+      arm.setPositionWorkflowId(CARRIED_WORKFLOW_ID);
+      arm.setSourceSignalId("carried-src-1");
+      arm.setPeakPremium(new BigDecimal("3.00"));
+      arm.setGivebackPct(new BigDecimal("0.20"));
+      wf.armChandelier(arm);
+      awaitCondition(() -> wf.trailingState().armed(), "trail armed");
+
+      // Neutral ticks (above threshold 2.40, below peak 3.00) until the run rolls.
+      awaitCondition(
+          () -> {
+            wf.chandelierTick(carriedTick("2.50"));
+            return !client
+                .fetchHistory(CARRIED_WORKFLOW_ID)
+                .getEvents()
+                .get(0)
+                .getWorkflowExecutionStartedEventAttributes()
+                .getContinuedExecutionRunId()
+                .isEmpty();
+          },
+          "continue-as-new");
+      watermark.setLong(null, originalWatermark);
+
+      // Carried run: neutral tick, ratchet 3.00 -> 3.20 (threshold 2.56), neutral, fire at 2.50.
+      wf.chandelierTick(carriedTick("2.60"));
+      wf.chandelierTick(carriedTick("3.20"));
+      wf.chandelierTick(carriedTick("2.70"));
+      wf.chandelierTick(carriedTick("2.50"));
+      awaitCondition(
+          () ->
+              Mockito.mockingDetails(exec).getInvocations().stream()
+                  .anyMatch(i -> i.getMethod().getName().equals("placeOrder")),
+          "chandelier flatten placed");
+      wf.onFill(fill("brk-exit", 5L, "2.50"));
+      client.newUntypedWorkflowStub(CARRIED_WORKFLOW_ID).getResult(String.class);
+
+      json = client.fetchHistory(CARRIED_WORKFLOW_ID).toJson(true);
+    } finally {
+      watermark.setLong(null, originalWatermark);
+      env.close();
+    }
+
+    Files.createDirectories(CARRIED_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(CARRIED_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  private static PremiumTick carriedTick(String premium) {
+    PremiumTick t = new PremiumTick();
+    t.setSchemaVersion(1L);
+    t.setContractSymbol(CARRIED_OCC);
+    t.setPremium(new BigDecimal(premium));
+    t.setRetrievedAt(OffsetDateTime.now());
+    return t;
+  }
+
+  private static FillSignalPayload fill(String brokerOrderId, long qty, String avg) {
+    return new FillSignalPayload()
+        .withBrokerOrderId(brokerOrderId)
+        .withFilledQty(qty)
+        .withAvgFillPrice(new BigDecimal(avg))
+        .withFilledAt(OffsetDateTime.now());
+  }
+
+  private static void awaitCondition(java.util.function.BooleanSupplier cond, String what)
+      throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 50_000;
+    while (!cond.getAsBoolean()) {
+      if (System.currentTimeMillis() > deadline) {
+        throw new AssertionError("timed out waiting for " + what);
+      }
+      Thread.sleep(50);
+    }
   }
 
   // ---------------------------------------------------------------------------

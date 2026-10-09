@@ -1254,7 +1254,10 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   /**
    * Workflow-clock time a tick was last DRAINED, stamped at the route fork regardless of what is
    * armed — distinct from {@link #lastTickAt}, which is the quote's own timestamp and is only
-   * written while the trail is armed. Observation-only: nothing reads it yet. See {@link
+   * written while the trail is armed. Observation-only: no workflow reader; the BFF /trail-liveness
+   * passes it through but nothing branches on it. NOT carried across continue-as-new, so it reads
+   * null until the first post-roll tick — a reader that ages it must first carry it, or treat null
+   * with {@code ticksReceived > 0} as "rolled, awaiting tick". See {@link
    * TrailingState#lastTickObservedAt()} for why the age must be computed by the caller.
    */
   private OffsetDateTime lastTickObservedAt;
