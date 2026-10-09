@@ -56,6 +56,13 @@ orchestrator:
     # Env/ConfigMap override (ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED) flips it live; only set
     # true once exec services the broker-<broker_target> pre-trade check.
     routing-enabled: ${ORCHESTRATOR_PRE_TRADE_CHECK_ROUTING_ENABLED:false}
+  condor:
+    # #921 K3c: when true, the account cap also reads gated-condor REALIZED P&L
+    # (ComputeCondorRealizedPnl) for NON-paper strategies. IMAGE default is false (paper-only).
+    # OPERATOR STEP: set ORCHESTRATOR_CONDOR_LIVE_REALIZED_READ_ENABLED=true only AFTER
+    # exec-alpaca-live has been manually rolled onto a build that registers that activity — flipping
+    # it first makes every live cap tick defer (cap not armed) until the roll.
+    live-realized-read-enabled: ${ORCHESTRATOR_CONDOR_LIVE_REALIZED_READ_ENABLED:false}
 
 # Watchlist-trigger ingest discriminator. WatchlistMirrorActivitiesImpl fans a clean watchlist parse
 # out to a WatchlistTriggerSessionWorkflow ONLY for the strategy_id named here. Setting it makes the

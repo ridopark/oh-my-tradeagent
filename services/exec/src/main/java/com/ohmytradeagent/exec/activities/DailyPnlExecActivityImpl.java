@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.activities;
 
 import com.ohmytradeagent.contract.activities.DailyPnlExecActivity;
 import com.ohmytradeagent.exec.broker.MidWalkExecutor;
+import com.ohmytradeagent.exec.journal.ComboIntent;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import java.math.BigDecimal;
@@ -9,11 +10,14 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -49,6 +53,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
+
+  private static final Logger log = LoggerFactory.getLogger(DailyPnlExecActivityImpl.class);
 
   // US equity options standard contract multiplier — matches the BFF RealizedPnlCalculator.
   static final BigDecimal MULTIPLIER = new BigDecimal("100");
@@ -112,6 +118,7 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
         MidWalkExecutor.CONDOR_PREFIX + tenantId + "-" + strategyId + "-" + tradingDay + "-";
     BigDecimal cash = BigDecimal.ZERO;
     long entryQty = 0;
+    String filledRungKey = null;
     for (int step = 0; ; step++) {
       Optional<JournaledOrder> rung = journal.findByIntentKey(attemptKey + "r" + step);
       if (rung.isEmpty()) {
@@ -122,12 +129,14 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
         // Combo fills are in the broker's negative-is-credit notation (MidWalkExecutor#filled).
         cash = cash.add(r.avgFillPrice().abs().multiply(BigDecimal.valueOf(r.filledQty())));
         entryQty += r.filledQty();
+        filledRungKey = r.intentKey();
       }
     }
     if (entryQty == 0) {
       return BigDecimal.ZERO;
     }
     boolean complete = true;
+    Map<String, Long> closedQty = new LinkedHashMap<>();
     for (int leg = 0; leg < CONDOR_LEGS; leg++) {
       JournaledOrder c = journal.findByIntentKey(attemptKey + "x" + leg).orElse(null);
       if (c == null || c.filledQty() == null || c.avgFillPrice() == null) {
@@ -137,9 +146,68 @@ public class DailyPnlExecActivityImpl implements DailyPnlExecActivity {
       BigDecimal proceeds = c.avgFillPrice().multiply(BigDecimal.valueOf(c.filledQty()));
       cash = "BUY".equalsIgnoreCase(c.side()) ? cash.subtract(proceeds) : cash.add(proceeds);
       complete &= c.filledQty() == entryQty;
+      closedQty.merge(c.optionSymbol(), c.filledQty(), Long::sum);
     }
-    BigDecimal realized = cash.multiply(MULTIPLIER);
-    return complete ? realized : realized.min(BigDecimal.ZERO);
+    if (complete) {
+      return cash.multiply(MULTIPLIER);
+    }
+    List<ComboIntent.Leg> legs = journal.findComboLegs(filledRungKey);
+    if (legs.isEmpty()) {
+      log.warn(
+          "condor attempt {} incomplete with no journaled combo legs; remaining risk unpriced",
+          attemptKey);
+      return cash.multiply(MULTIPLIER).min(BigDecimal.ZERO);
+    }
+    return cash.subtract(worstSettlementDebit(legs, entryQty, closedQty)).multiply(MULTIPLIER);
+  }
+
+  /**
+   * #921 K3a: the largest per-share settlement debit the still-open legs can owe (short intrinsic
+   * minus long intrinsic, × remaining contracts), never below zero. The payoff is piecewise linear
+   * in the settlement price, so the maximum over the index at 0, every strike, and 2× the top
+   * strike bounds it: exact for a defined-risk remainder; for a naked short call (unbounded in
+   * theory) the 2× point charges roughly one full strike of index, the same order as a naked short
+   * put at 0.
+   */
+  static BigDecimal worstSettlementDebit(
+      List<ComboIntent.Leg> legs, long entryQty, Map<String, Long> closedQty) {
+    List<BigDecimal> candidates = new ArrayList<>(List.of(BigDecimal.ZERO));
+    BigDecimal top = BigDecimal.ZERO;
+    for (ComboIntent.Leg leg : legs) {
+      BigDecimal strike = occStrike(leg.optionSymbol());
+      candidates.add(strike);
+      top = top.max(strike);
+    }
+    candidates.add(top.multiply(BigDecimal.valueOf(2)));
+    BigDecimal worst = BigDecimal.ZERO;
+    for (BigDecimal spot : candidates) {
+      BigDecimal debit = BigDecimal.ZERO;
+      for (ComboIntent.Leg leg : legs) {
+        long open =
+            Math.max(
+                0L, leg.ratioQty() * entryQty - closedQty.getOrDefault(leg.optionSymbol(), 0L));
+        BigDecimal strike = occStrike(leg.optionSymbol());
+        BigDecimal intrinsic =
+            (occIsCall(leg.optionSymbol()) ? spot.subtract(strike) : strike.subtract(spot))
+                .max(BigDecimal.ZERO)
+                .multiply(BigDecimal.valueOf(open));
+        debit =
+            "SELL".equalsIgnoreCase(leg.side()) ? debit.add(intrinsic) : debit.subtract(intrinsic);
+      }
+      worst = worst.max(debit);
+    }
+    return worst;
+  }
+
+  // OCC: <root><yyMMdd><C|P><strike x 1000, 8 digits>, root space-padded or not.
+  private static BigDecimal occStrike(String occ) {
+    String s = occ.replace(" ", "");
+    return new BigDecimal(s.substring(s.length() - 8)).movePointLeft(3);
+  }
+
+  private static boolean occIsCall(String occ) {
+    String s = occ.replace(" ", "");
+    return s.charAt(s.length() - 9) == 'C';
   }
 
   // Buckets the lookback-bounded FILLED journal rows for one side by option_symbol (grouping on the

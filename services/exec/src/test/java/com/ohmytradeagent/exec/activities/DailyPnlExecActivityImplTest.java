@@ -8,6 +8,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.exec.activities.DailyPnlExecActivityImpl.Lot;
+import com.ohmytradeagent.exec.journal.ComboIntent;
 import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
@@ -388,6 +389,22 @@ class DailyPnlExecActivityImplTest {
   private void condorEntry() {
     condorRow("r0", "SELL", "MLEG", OrderState.CANCELLED, null, null);
     condorRow("r1", "SELL", "MLEG", OrderState.FILLED, 1L, "-0.80");
+    condorLegs("r1");
+  }
+
+  /** The journaled combo legs of rung {@code suffix}: 601C/599P short, 604C/596P wings (3 wide). */
+  private void condorLegs(String suffix) {
+    when(journal.findComboLegs(CONDOR_KEY + suffix))
+        .thenReturn(
+            List.of(
+                comboLeg("XSP   261005C00601000", "SELL"),
+                comboLeg("XSP   261005P00599000", "SELL"),
+                comboLeg("XSP   261005C00604000", "BUY"),
+                comboLeg("XSP   261005P00596000", "BUY")));
+  }
+
+  private static ComboIntent.Leg comboLeg(String occ, String side) {
+    return new ComboIntent.Leg(occ, side, 1L, null, null, null);
   }
 
   // Fully flattened: credit 0.80 - short covers (1.50 + 0.40) + long sales (0.30 + 0.05) = -0.75.
@@ -409,10 +426,35 @@ class DailyPnlExecActivityImplTest {
         .isEqualByComparingTo("0");
   }
 
-  // An attempt whose legs are not all closed never books the open credit as a gain.
+  // #921 K3a: an attempt with nothing closed (e.g. its hold failed) is charged realized-so-far
+  // (+0.80 credit) minus the open legs' worst-case settlement debit (the 3-wide wing): -220, the
+  // condor's full defined max loss — never the open credit as a gain.
   @Test
-  void condorRealized_incompleteNoCloses_neverAGain() {
+  void condorRealized_incompleteNoCloses_chargedAtFullMaxLoss() {
     condorEntry();
+
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("-220");
+  }
+
+  // #921 K3a: wings closed but both shorts still open (naked) — the worst case is the index at 0
+  // (short put 599) or at 2x the top strike (short call 1208 - 601 = 607): charge (1.15 - 607) x
+  // 100.
+  @Test
+  void condorRealized_nakedShortsRemaining_chargedAtTheirWorstCase() {
+    condorEntry();
+    condorRow("x2", "SELL", "XSP   261005C00604000", OrderState.FILLED, 1L, "0.30");
+    condorRow("x3", "SELL", "XSP   261005P00596000", OrderState.FILLED, 1L, "0.05");
+
+    assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
+        .isEqualByComparingTo("-60585");
+  }
+
+  // Without the journaled combo legs the remaining risk cannot be priced: fall back to never
+  // booking a gain (WARN-logged).
+  @Test
+  void condorRealized_incompleteWithoutComboLegs_neverAGain() {
+    condorRow("r0", "SELL", "MLEG", OrderState.FILLED, 1L, "-0.80");
 
     assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
         .isEqualByComparingTo("0");
@@ -431,16 +473,17 @@ class DailyPnlExecActivityImplTest {
 
   // A close that filled fewer contracts than the entry leaves the attempt incomplete.
   @Test
-  void condorRealized_partiallyFilledClose_isIncomplete() {
+  void condorRealized_partiallyFilledClose_remainingWingAddsNoRisk() {
     condorRow("r0", "SELL", "MLEG", OrderState.FILLED, 2L, "-0.80");
+    condorLegs("r0");
     condorRow("x0", "BUY", "XSP   261005C00601000", OrderState.FILLED, 2L, "0.10");
     condorRow("x1", "BUY", "XSP   261005P00599000", OrderState.FILLED, 2L, "0.10");
     condorRow("x2", "SELL", "XSP   261005C00604000", OrderState.CANCELLED, 1L, "0.05");
     condorRow("x3", "SELL", "XSP   261005P00596000", OrderState.FILLED, 2L, "0.05");
 
-    // x2 closed 1 of 2: incomplete, so the partial +135 (1.60 - 0.40 + 0.05 + 0.10, x100) is
-    // floored at zero.
+    // x2 closed 1 of 2: one long call remains, worth >= 0, so its worst-case debit is 0 and the
+    // realized-so-far +135 (1.60 - 0.40 + 0.05 + 0.10, x100) stands.
     assertThat(activity.computeCondorRealizedPnl("dev", "condor-v1", DAY))
-        .isEqualByComparingTo("0");
+        .isEqualByComparingTo("135");
   }
 }

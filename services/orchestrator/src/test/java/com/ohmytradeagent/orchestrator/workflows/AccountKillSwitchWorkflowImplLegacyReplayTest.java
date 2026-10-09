@@ -171,6 +171,18 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
               + "account-killswitch-condor-v2-legacy-history.json");
   private static final String CONDOR_V2_WORKFLOW_ID = "account-killswitch-condor-v2-legacy";
 
+  // #921: a v3 (killswitch-condor-max-loss-v1 recorded at 3) history of a MIXED tenant (paper s1 +
+  // live s-live) over two ticks — the condor realized read runs for s1 only. Generated once from
+  // the pre-#921 impl; never regenerate.
+  private static final String CONDOR_V3_MIXED_FIXTURE_RESOURCE =
+      "temporal/replay/account-killswitch-condor-v3-mixed-legacy-history.json";
+  private static final Path CONDOR_V3_MIXED_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "account-killswitch-condor-v3-mixed-legacy-history.json");
+  private static final String CONDOR_V3_MIXED_WORKFLOW_ID =
+      "account-killswitch-condor-v3-mixed-legacy";
+
   // PLAN-2026-08-12: a pre-rollover-clear in-flight history for a TRIPPED
   // (auto:account_daily_loss) execution whose trading day ROLLS OVER mid-history. Every other
   // fixture in this class pins todayEt to a single date, so none of them enters the rollover branch
@@ -1303,6 +1315,153 @@ class AccountKillSwitchWorkflowImplLegacyReplayTest {
         .isNotEmpty();
     Files.createDirectories(CONDOR_V2_FIXTURE_SOURCE_PATH.getParent());
     Files.writeString(CONDOR_V2_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  /**
+   * #921 SENTINEL. Replays the v3 mixed-tenant history with every recorded {@code
+   * tenantStrategyBrokerTargets} row rewritten to carry {@code liveCondorRealizedRead: true} — the
+   * shape a NEW activity worker (operator flag ON) returns to an OLD (v3) workflow worker mid-roll.
+   * The recorded marker resolves to 3, so the live condor realized read ({@code v>=4}, a NEW exec
+   * activity command on broker-alpaca-live) stays off and the stream replays byte-for-byte.
+   *
+   * <p><b>Teeth verified 2026-10-08 (observed).</b> With the live read gated at {@code
+   * condorMaxLossVersion >= 3} this replay throws {@code [TMPRL1100] Failure handling event 86 of
+   * type 'EVENT_TYPE_TIMER_STARTED'}.
+   */
+  @Test
+  void legacyCondorV3MixedHistoryReplaysWithoutLiveCondorRead() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(CONDOR_V3_MIXED_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture resource %s. It is one-shot (pre-change only); see"
+                + " regenerateCondorV3MixedFixture.",
+            CONDOR_V3_MIXED_FIXTURE_RESOURCE)
+        .isNotNull();
+    String json =
+        new String(
+            getClass()
+                .getClassLoader()
+                .getResourceAsStream(CONDOR_V3_MIXED_FIXTURE_RESOURCE)
+                .readAllBytes(),
+            StandardCharsets.UTF_8);
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode history = mapper.readTree(json);
+    Map<String, String> activityTypeByScheduledId = new LinkedHashMap<>();
+    int rewritten = 0;
+    for (JsonNode event : history.get("events")) {
+      JsonNode scheduled = event.get("activityTaskScheduledEventAttributes");
+      if (scheduled != null) {
+        activityTypeByScheduledId.put(
+            event.get("eventId").asText(), scheduled.get("activityType").get("name").asText());
+      }
+      JsonNode completed = event.get("activityTaskCompletedEventAttributes");
+      if (completed != null
+          && "TenantStrategyBrokerTargets"
+              .equals(activityTypeByScheduledId.get(completed.get("scheduledEventId").asText()))) {
+        ObjectNode payload = (ObjectNode) completed.get("result").get("payloads").get(0);
+        JsonNode rows = mapper.readTree(Base64.getDecoder().decode(payload.get("data").asText()));
+        for (JsonNode row : rows) {
+          ((ObjectNode) row).put("liveCondorRealizedRead", true);
+        }
+        payload.put("data", Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(rows)));
+        rewritten++;
+      }
+    }
+    assertThat(rewritten)
+        .as("fixture must record tenantStrategyBrokerTargets results")
+        .isPositive();
+
+    WorkflowReplayer.replayWorkflowExecution(
+        WorkflowExecutionHistory.fromJson(mapper.writeValueAsString(history)),
+        AccountKillSwitchWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot generator for the #921 v3 mixed-tenant fixture: the PRODUCTION impl as of #919/#935
+   * (marker at 3), paper s1 + live s-live, one priced position, two ticks, no trip. Regenerating
+   * after #921 fails the marker assert.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
+  void regenerateCondorV3MixedFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      Worker worker = env.newWorker(CORE_QUEUE);
+      worker.registerWorkflowImplementationTypes(AccountKillSwitchWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      TenantConfigActivities tenantConfig = Mockito.mock(TenantConfigActivities.class);
+      AccountPnlActivities accountPnl = Mockito.mock(AccountPnlActivities.class);
+      DailyPnlExecActivity execPnl = Mockito.mock(DailyPnlExecActivity.class);
+      AccountKillSwitchCascadeActivities cascade =
+          Mockito.mock(AccountKillSwitchCascadeActivities.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+      AccountSnapshotActivity accountSnapshot = Mockito.mock(AccountSnapshotActivity.class);
+
+      when(calendar.isMarketOpen()).thenReturn(true);
+      when(calendar.todayEt()).thenReturn(LocalDate.of(2026, 5, 14));
+      when(tenantConfig.accountDailyLossThreshold(anyString())).thenReturn(new BigDecimal("5000"));
+      when(tenantConfig.accountDailyLossPct(anyString())).thenReturn(null);
+      when(tenantConfig.tenantBrokerTarget(anyString())).thenReturn("alpaca-paper");
+      when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+          .thenReturn(
+              List.of(
+                  new TenantStrategyBrokerTarget("s1", "alpaca-paper"),
+                  new TenantStrategyBrokerTarget("s-live", "alpaca-live")));
+      when(execPnl.computeRealizedPnl(anyString(), anyString(), any())).thenReturn(BigDecimal.ZERO);
+      when(execPnl.computeCondorRealizedPnl(anyString(), anyString(), any()))
+          .thenReturn(BigDecimal.ZERO);
+      AccountSnapshotResult snap = new AccountSnapshotResult();
+      snap.setSchemaVersion(1L);
+      snap.setEquity(new BigDecimal("5000"));
+      when(accountSnapshot.accountSnapshot(any())).thenReturn(snap);
+      when(accountPnl.accountOpenBook(anyString()))
+          .thenReturn(
+              new AccountOpenBook(
+                  List.of(
+                      new OpenPositionValuation(
+                          "NVDA  261218C00140000", new BigDecimal("3.00"), 5L)),
+                  1,
+                  0));
+      when(optionQuote.getOptionQuote(any()))
+          .thenAnswer(
+              inv ->
+                  okQuote(
+                      inv.<GetOptionQuoteRequest>getArgument(0).getContractSymbol(),
+                      new BigDecimal("3.00")));
+
+      worker.registerActivitiesImplementations(audit, calendar, tenantConfig, accountPnl, cascade);
+      env.newWorker(MARKET_DATA_QUEUE).registerActivitiesImplementations(optionQuote);
+      env.newWorker("broker-alpaca-paper")
+          .registerActivitiesImplementations(accountSnapshot, execPnl);
+      env.newWorker("broker-alpaca-live").registerActivitiesImplementations(execPnl);
+      env.start();
+
+      WorkflowClient client = env.getWorkflowClient();
+      AccountKillSwitchWorkflow wf =
+          client.newWorkflowStub(
+              AccountKillSwitchWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(CONDOR_V3_MIXED_WORKFLOW_ID)
+                  .build());
+      WorkflowStub.fromTyped(wf).start(input());
+      env.sleep(Duration.ofSeconds(75));
+      env.sleep(Duration.ofSeconds(60));
+      assertThat(wf.killswitchState().getTripped()).isFalse();
+      json = client.fetchHistory(CONDOR_V3_MIXED_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    WorkflowExecutionHistory history = WorkflowExecutionHistory.fromJson(json);
+    assertThat(markerVersions(history, "killswitch-condor-max-loss-v1"))
+        .as("fixture must record killswitch-condor-max-loss-v1 at 3 (pre-#921)")
+        .containsOnly(3)
+        .isNotEmpty();
+    Files.createDirectories(CONDOR_V3_MIXED_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(CONDOR_V3_MIXED_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
   }
 
   /** Recorded versions of every {@code account-mtm-debounce-v1} marker in {@code history}. */

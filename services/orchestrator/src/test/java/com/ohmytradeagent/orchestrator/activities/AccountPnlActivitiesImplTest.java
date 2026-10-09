@@ -100,6 +100,21 @@ class AccountPnlActivitiesImplTest {
             new TenantStrategyBrokerTarget("s-live", "alpaca-live"));
   }
 
+  // #921 K3c: the operator's live condor realized-read flag rides on every strategy row.
+  @Test
+  void tenantStrategyBrokerTargets_carriesTheLiveCondorRealizedReadFlag() {
+    when(strategyRegistry.get("dev", "s-live"))
+        .thenReturn(cfgWithBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE));
+
+    assertThat(
+            new AccountPnlActivitiesImpl(
+                    dailyPnl, tenantId -> List.of("s-live"), client, strategyRegistry, true)
+                .tenantStrategyBrokerTargets("dev"))
+        .containsExactly(new TenantStrategyBrokerTarget("s-live", "alpaca-live", true));
+    assertThat(forStrategies(List.of("s-live")).tenantStrategyBrokerTargets("dev"))
+        .containsExactly(new TenantStrategyBrokerTarget("s-live", "alpaca-live", false));
+  }
+
   // Phase 2 (G2): a strategy whose config read throws is returned with a null broker_target — the
   // workflow fails CLOSED on it rather than the activity silently dropping it (under-count).
   @Test
