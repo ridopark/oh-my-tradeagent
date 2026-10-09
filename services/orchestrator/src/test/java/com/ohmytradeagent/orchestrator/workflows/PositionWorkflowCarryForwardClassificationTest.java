@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -11,6 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
@@ -87,7 +91,8 @@ class PositionWorkflowCarryForwardClassificationTest {
           "expiryFired",
           "expiryLeadFired",
           "closeReason",
-          // written only by flatten bookkeeping; every flatten path sets closeReason first
+          // written only by flatten bookkeeping; every flatten path first sets closeReason or an
+          // eod/expiry fired flag, none of which is ever reset
           "flattenBookedKey",
           "flattenBookedQty");
 
@@ -123,9 +128,12 @@ class PositionWorkflowCarryForwardClassificationTest {
           "initGatesResolved");
 
   /**
-   * Reset to null at the roll and accepted. lastTickObservedAt is display-only today ("nothing
-   * reads it yet"); the PR that gives it a reader (e.g. a feed-staleness backstop) must carry it or
-   * prove it zero, because a null right after a roll reads as "never heard a tick".
+   * Reset to null at the roll and accepted. lastTickObservedAt has no workflow reader; the BFF
+   * /trail-liveness passes it through, but nothing branches on it (feed_status comes from
+   * market-data's subscriptions, the pulse from the carried ticksReceived). A reader that AGES it
+   * (e.g. a feed-staleness backstop, or a badge) must first carry it, or treat null with
+   * ticksReceived &gt; 0 as "rolled, awaiting tick" — a null right after a roll otherwise reads as
+   * "never heard a tick".
    */
   private static final Set<String> RESETS_AT_ROLL_ACCEPTED = Set.of("lastTickObservedAt");
 
@@ -134,6 +142,9 @@ class PositionWorkflowCarryForwardClassificationTest {
    * run that started below a gate silently switches to the gated behaviour at the roll (G1).
    * Accepted today: every running position post-dates breakeven-floor and trail-on-bid (verified
    * 2026-10-08), and both of those only tighten a stop.
+   *
+   * <p>HARD RULE: a gate that LOOSENS a stop must NOT go in this set as-is. Carry the original
+   * run's version in the carry-forward input and take {@code min(carried, resolved)} in run().
    */
   private static final Set<String> VERSION_RESOLVES_MAX_ON_CARRIED_RUN =
       Set.of(
@@ -182,6 +193,9 @@ class PositionWorkflowCarryForwardClassificationTest {
           "VERSION_CHANDELIER_TRAIL_ON_BID",
           "VERSION_BUFFERED_OPERATOR_AUDIT",
           "VERSION_RISK_BREACH_EXEMPT_LONG_DATED");
+
+  private static final Path IMPL_SOURCE =
+      Path.of("src/main/java/com/ohmytradeagent/orchestrator/workflows/PositionWorkflowImpl.java");
 
   private static final Map<String, Set<String>> CLASSES = new LinkedHashMap<>();
 
@@ -239,6 +253,25 @@ class PositionWorkflowCarryForwardClassificationTest {
     assertThat(gates)
         .as("a new getVersion gate resolves to MAX on a carried run — " + CLASSIFY_HINT)
         .containsExactlyInAnyOrderElementsOf(VERSION_GATES_ACKNOWLEDGED);
+  }
+
+  /**
+   * Closes the bypass of {@link #versionGateConstantsAreAcknowledged}: a {@code getVersion} keyed
+   * on an inline literal (or any non-constant) declares no {@code VERSION_*} field for that check
+   * to see. Every changeId must be a {@code VERSION_*} constant.
+   */
+  @Test
+  void everyGetVersionCallIsKeyedOnAVersionConstant() throws Exception {
+    String src = Files.readString(IMPL_SOURCE);
+    Matcher m = Pattern.compile("getVersion\\(\\s*([^,)]+?)\\s*,").matcher(src);
+    List<String> keys = new ArrayList<>();
+    while (m.find()) {
+      keys.add(m.group(1));
+    }
+    assertThat(keys).as("getVersion call sites found in %s", IMPL_SOURCE).isNotEmpty();
+    assertThat(keys)
+        .as("every getVersion changeId must be a VERSION_* constant — " + CLASSIFY_HINT)
+        .allMatch(k -> k.matches("VERSION_[A-Z0-9_]+"));
   }
 
   @Test
