@@ -39,18 +39,20 @@ spec:
   # trade at replicas:1 — the surge bought no availability anyway, since one replica means the old
   # pod is going away regardless, and the 406 leaves the NEW pod believing it is subscribed.
   #
-  # ⚠ ROLLING THIS POD IS NOT FREE, AND Recreate IS NOT WHY. The premium subscription registry is
-  # in-process (`AlpacaMarketData.bySymbol` / `premiumPolls`, :75 / :82) and `subscribePremium` is
-  # called ONCE at arm time from three sites in PositionWorkflowImpl (:2077, :2207, :2459). Nothing
-  # re-subscribes on boot. So after ANY market-data restart — under either strategy — every ARMED
-  # trailing stop on every open position stops receiving ticks permanently, while the workflow
-  # still reports `trailingArmed=true` and a stop price. The one-shot staleness timer (:2422) only
-  # asks "did the feed ever start?", is watchlist-only, and its window closes 90s after arm.
-  #
-  # Until a re-subscribe sweep or a rolling staleness backstop ships, roll market-data ONLY
-  # pre-open or with no armed trails on the book. Downtime is also longer than it looks: there is
-  # no readiness probe, so `kubectl rollout status` reports success as soon as the process starts,
-  # before the Temporal worker or the WS is up.
+  # ⚠ ROLLING THIS POD IS NOT FREE, AND Recreate IS NOT WHY. Subscription registries are
+  # in-process, so a restart drops every live feed; what brings them back is RECOVERY, not the
+  # rollout:
+  #   - Premium (armed trailing stops): `recovery/PremiumSubscriptionRecovery` (#776/#784) sweeps
+  #     running PositionWorkflows on boot and re-subscribes every armed trail — but only once
+  #     regular trading hours are open (outside RTH it sleeps to the open; no holiday calendar).
+  #     Bounded: up to 5 attempts, 30s apart; giving up alerts Discord (log-only without the
+  #     webhook below). Until the sweep lands the trail is NOT protecting the position.
+  #   - Equity (watchlist legs): each WatchlistTriggerWorkflow leg re-subscribes itself after 5 min
+  #     of feed silence (#851/#852, audited), so a roll costs up to ~5 min of blind entry window.
+  # So an RTH roll is recoverable, not free (#848, #849). Prefer rolling pre-open or with nothing
+  # armed. Downtime is also longer than it looks: there is no readiness probe, so
+  # `kubectl rollout status` reports success as soon as the process starts, before the Temporal
+  # worker or the WS is up.
   strategy:
     type: Recreate
   selector:
