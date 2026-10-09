@@ -27,10 +27,13 @@ import com.ohmytradeagent.tdbff.config.BrokerDataSourceRouter;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -44,6 +47,7 @@ public class RealizedPnlCalculator {
   private static final Logger log = LoggerFactory.getLogger(RealizedPnlCalculator.class);
   static final BigDecimal MULTIPLIER = new BigDecimal("100");
   private static final String NO_SYMBOL_BUCKET = "";
+  private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
   private final BrokerDataSourceRouter router;
   private final DbStrategyConfigReader strategyRegistry;
@@ -87,7 +91,7 @@ public class RealizedPnlCalculator {
 
     Map<String, Deque<Lot>> entriesBySymbol = fetchLots(dsl, tenantId, strategyId, "BUY");
     Map<String, Deque<Lot>> exitsBySymbol = fetchLots(dsl, tenantId, strategyId, "SELL");
-    return realizeBoth(entriesBySymbol, exitsBySymbol, tradingDay);
+    return realizeBoth(entriesBySymbol, exitsBySymbol, tradingDay, LocalDate.now(MARKET_TZ));
   }
 
   /** Today's realized P&L for one (tenant, strategy). Thin delegate to {@link #computeRealized}. */
@@ -110,13 +114,58 @@ public class RealizedPnlCalculator {
   static RealizedPnl realizeBoth(
       Map<String, Deque<Lot>> entriesBySymbol,
       Map<String, Deque<Lot>> exitsBySymbol,
-      LocalDate tradingDay) {
+      LocalDate tradingDay,
+      LocalDate asOf) {
     Acc acc = new Acc();
-    for (Map.Entry<String, Deque<Lot>> e : exitsBySymbol.entrySet()) {
-      Deque<Lot> entries = entriesBySymbol.getOrDefault(e.getKey(), new ArrayDeque<>());
-      accumulate(entries, e.getValue(), tradingDay, acc);
+    Set<String> symbols = new LinkedHashSet<>(exitsBySymbol.keySet());
+    symbols.addAll(entriesBySymbol.keySet());
+    for (String symbol : symbols) {
+      Deque<Lot> entries = entriesBySymbol.getOrDefault(symbol, new ArrayDeque<>());
+      accumulate(entries, exitsBySymbol.getOrDefault(symbol, new ArrayDeque<>()), tradingDay, acc);
+      realizeWorthlessExpiry(symbol, entries, tradingDay, asOf, acc);
     }
     return new RealizedPnl(acc.today.multiply(MULTIPLIER), acc.allTime.multiply(MULTIPLIER));
+  }
+
+  // #931: a worthless expiry leaves no SELL row, so the lots still un-exited after the FIFO walk
+  // would sit open forever. Once the contract's OCC expiry date is strictly BEFORE {@code asOf}
+  // (the expiry session is over; on the expiry day itself the remainder can still be sold), realize
+  // each remaining lot at 0 — a total loss of its basis — attributed to the expiry date. Same
+  // "physically expired => worth zero" rule the account cap's open-book valuation uses
+  // (AccountKillSwitchWorkflowImpl#hasPhysicallyExpired). Known overstatement: an ITM lot
+  // auto-exercised into shares, or a lot closed at the broker with no journal row, is also booked
+  // at 0. An undatable symbol (legacy NULL bucket, malformed OCC) never expires. Display-only:
+  // the exec kill-switch FIFO (DailyPnlExecActivityImpl) deliberately does NOT do this — the cap
+  // already charges an expired lot's full basis through its open-book valuation, so realizing it
+  // there too would double-count the loss into a false trip.
+  private static void realizeWorthlessExpiry(
+      String symbol, Deque<Lot> remaining, LocalDate tradingDay, LocalDate asOf, Acc acc) {
+    LocalDate expiry = occExpiry(symbol);
+    if (expiry == null || !expiry.isBefore(asOf)) {
+      return;
+    }
+    boolean countToday = expiry.equals(tradingDay);
+    for (Lot lot : remaining) {
+      BigDecimal loss = lot.price.negate().multiply(BigDecimal.valueOf(lot.qty));
+      acc.allTime = acc.allTime.add(loss);
+      if (countToday) {
+        acc.today = acc.today.add(loss);
+      }
+    }
+  }
+
+  // Expiry date of an OCC symbol (padded or compact: root, yyMMdd, C|P, 8-digit strike), or null.
+  static LocalDate occExpiry(String symbol) {
+    String occ = symbol == null ? "" : symbol.replace(" ", "");
+    if (!occ.matches("[A-Z0-9.]{1,6}\\d{6}[CP]\\d{8}")) {
+      return null;
+    }
+    String yymmdd = occ.substring(occ.length() - 15, occ.length() - 9);
+    try {
+      return LocalDate.parse("20" + yymmdd, java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+    } catch (java.time.format.DateTimeParseException e) {
+      return null;
+    }
   }
 
   // Package-private for direct unit testing of the FIFO match (no Postgres needed). Consumes ALL
@@ -164,6 +213,11 @@ public class RealizedPnlCalculator {
           acc.today = acc.today.add(residual);
         }
       }
+    }
+    // Put the partially-consumed current lot back so {@code entries} holds exactly the un-exited
+    // remainder (#931 realizes it at a worthless expiry).
+    if (entry != null) {
+      entries.addFirst(entry);
     }
   }
 
