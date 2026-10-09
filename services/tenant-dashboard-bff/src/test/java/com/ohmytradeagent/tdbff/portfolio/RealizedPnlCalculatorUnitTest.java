@@ -149,7 +149,7 @@ class RealizedPnlCalculatorUnitTest {
 
     RealizedPnl both =
         RealizedPnlCalculator.realizeBoth(
-            Map.of(occ, lots(entry("1.99", 50))), Map.of(occ, exits), D2);
+            Map.of(occ, lots(entry("1.99", 50))), Map.of(occ, exits), D2, D2);
 
     assertThat(both.today()).isEqualByComparingTo("-121"); // FIFO loss, NOT the +2068 phantom
     assertThat(both.allTime()).isEqualByComparingTo("2504"); // 25.04 ×100, the full sum
@@ -171,5 +171,71 @@ class RealizedPnlCalculatorUnitTest {
     var exits = lots(exit("1.84", 2, D1));
     var realized = RealizedPnlCalculator.realizePerSymbol(entries, exits, null);
     assertThat(realized).isEqualByComparingTo("-1.0266"); // ×100 later -> -102.66
+  }
+
+  // --- #931: a worthless expiry has no SELL row; past expiry its un-exited basis is realized ---
+
+  private static final String AMZN = "AMZN  261002C00265000"; // padded OCC, expires 2026-10-02
+  private static final LocalDate AMZN_EXPIRY = LocalDate.of(2026, 10, 2);
+  private static final LocalDate AFTER = LocalDate.of(2026, 10, 8);
+
+  // The 2026-10-02 incident shape: 36 entered, 31 exited, 5 rode to a worthless expiry.
+  private static Deque<Lot> amznExits() {
+    return lots(exit("2.50", 20, AMZN_EXPIRY), exit("1.20", 11, AMZN_EXPIRY));
+  }
+
+  @Test
+  void worthlessExpiry_pastExpiry_realizesTheUnexitedBasisAsATotalLoss_incidentReproduction() {
+    // Real exits: 20*(2.50-2.00) + 11*(1.20-2.00) = 10.00 - 8.80 = 1.20. The 5 expired lots add
+    // 5*(0 - 2.00) = -10.00 -> -8.80, x100 -> -$880 (was +$120: the expired basis never realized).
+    RealizedPnl r =
+        RealizedPnlCalculator.realizeBoth(
+            Map.of(AMZN, lots(entry("2.00", 36))), Map.of(AMZN, amznExits()), AFTER, AFTER);
+
+    assertThat(r.allTime()).isEqualByComparingTo("-880");
+    assertThat(r.today()).isEqualByComparingTo("0"); // the loss belongs to the expiry day
+  }
+
+  @Test
+  void worthlessExpiry_isAttributedToTheExpiryDay() {
+    RealizedPnl r =
+        RealizedPnlCalculator.realizeBoth(
+            Map.of(AMZN, lots(entry("2.00", 36))), Map.of(AMZN, amznExits()), AMZN_EXPIRY, AFTER);
+
+    assertThat(r.today()).isEqualByComparingTo("-880");
+  }
+
+  @Test
+  void onTheExpiryDayItself_theRemainderIsNotRealized_itCanStillBeSold() {
+    RealizedPnl r =
+        RealizedPnlCalculator.realizeBoth(
+            Map.of(AMZN, lots(entry("2.00", 36))),
+            Map.of(AMZN, amznExits()),
+            AMZN_EXPIRY,
+            AMZN_EXPIRY);
+
+    assertThat(r.allTime()).isEqualByComparingTo("120");
+  }
+
+  @Test
+  void expiredEntryWithNoExitsAtAll_isRealized() {
+    RealizedPnl r =
+        RealizedPnlCalculator.realizeBoth(
+            Map.of(AMZN, lots(entry("1.50", 2), entry("2.50", 1))), Map.of(), AFTER, AFTER);
+
+    assertThat(r.allTime()).isEqualByComparingTo("-550"); // -(1.50*2 + 2.50) x100
+  }
+
+  @Test
+  void unexpiredOrUndatableRemainder_contributesNothing() {
+    String future = "AMZN  261016C00265000";
+    RealizedPnl r =
+        RealizedPnlCalculator.realizeBoth(
+            Map.of(future, lots(entry("2.00", 5)), "", lots(entry("2.00", 5))),
+            Map.of(),
+            AFTER,
+            AFTER);
+
+    assertThat(r.allTime()).isEqualByComparingTo("0");
   }
 }

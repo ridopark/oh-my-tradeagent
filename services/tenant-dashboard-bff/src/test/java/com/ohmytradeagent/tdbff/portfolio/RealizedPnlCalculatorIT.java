@@ -94,8 +94,10 @@ class RealizedPnlCalculatorIT {
     insert("SELL", dram, 2, "ERRORED", null, null, null);
     insert("SELL", dram, 1, "RECORDED", null, null, null);
 
-    // All-time: the 2 sold FIFO-match the 2.3533 basis -> 2 * (1.84 - 2.3533) * 100 = -102.66.
-    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-102.66");
+    // All-time: the 2 sold FIFO-match the 2.3533 basis -> 2 * (1.84 - 2.3533) * 100 = -102.66,
+    // plus (#931) the 1 un-exited lot, past its 2026-07-17 expiry with no SELL, realized at 0:
+    // -2.3533 * 100 = -235.33 -> -337.99.
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-337.99");
 
     // Day-scoped on the exit day (6/29 America/New_York = 18:00Z). The buy was a PRIOR day, but the
     // day-scoped calc now fetches full history and FIFO-matches the cross-day exit against the real
@@ -117,7 +119,24 @@ class RealizedPnlCalculatorIT {
 
     assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 6, 29)))
         .isEqualByComparingTo("-102.66");
-    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-102.66");
+    // #931: the expired un-exited lot adds -235.33 to all-time (attributed to 2026-07-17).
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-337.99");
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 7, 17)))
+        .isEqualByComparingTo("-235.33");
+  }
+
+  @Test
+  void worthlessExpiry_amznIncidentShape_realizesTheExpiredRemainder() {
+    // #931, the 2026-10-02 AMZN 261002C265 shape: 36 entered, 31 exited, 5 expired worthless (no
+    // SELL row). 20*(2.50-2.00) + 11*(1.20-2.00) + 5*(0-2.00) = 1.20 - 10.00 -> x100 = -880.
+    String amzn = "AMZN  261002C00265000";
+    insert("BUY", amzn, 36, "FILLED", 36, "2.00", "2026-10-02T14:00:00Z");
+    insert("SELL", amzn, 20, "FILLED", 20, "2.50", "2026-10-02T15:00:00Z");
+    insert("SELL", amzn, 11, "FILLED", 11, "1.20", "2026-10-02T19:00:00Z");
+
+    assertThat(svc.computeRealizedPnlAllTime(TENANT, STRATEGY)).isEqualByComparingTo("-880.00");
+    assertThat(svc.computeRealizedPnl(TENANT, STRATEGY, LocalDate.of(2026, 10, 2)))
+        .isEqualByComparingTo("-880.00");
   }
 
   @Test
