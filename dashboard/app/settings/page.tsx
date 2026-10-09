@@ -3,7 +3,9 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
 import { SubmitButton } from "@/components/SubmitButton";
-import { getBrokerCredentialStatus } from "@/lib/bff";
+import { getBrokerCredentialStatus, getPortfolio, getStrategyConfig } from "@/lib/bff";
+import { OptionsLevelNotice } from "@/components/FundingBanners";
+import { levelShortfalls } from "@/lib/funding";
 import { postBrokerCredential } from "@/lib/apiGateway";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +31,12 @@ export default async function SettingsPage({
     auth(),
     getBrokerCredentialStatus(),
   ]);
+
+  // Onboarding readiness: once the broker is connected, flag an options level too low for the
+  // tenant's strategies. Advisory and fail-soft — either read failing just drops the notice.
+  const shortfalls = await Promise.all([getPortfolio(), getStrategyConfig()])
+    .then(([p, c]) => levelShortfalls(p.account_equity, c.items))
+    .catch(() => []);
 
   // Hidden anti-replay/trace token minted per render — emitted into the form and round-tripped as the
   // request's correlation_id. Never derived from or containing any secret.
@@ -106,6 +114,12 @@ export default async function SettingsPage({
             }
           >
             {banner.msg}
+          </div>
+        )}
+
+        {shortfalls.length > 0 && (
+          <div className="mb-4">
+            <OptionsLevelNotice shortfalls={shortfalls} />
           </div>
         )}
 

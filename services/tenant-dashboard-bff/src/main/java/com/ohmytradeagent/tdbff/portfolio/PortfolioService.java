@@ -295,6 +295,13 @@ public class PortfolioService {
           (acct.equity() != null && lastEquity != null)
               ? acct.equity().subtract(lastEquity)
               : null);
+      // #874/#942 funding detail, passed through as-is: null when the snapshot lacks it (absent
+      // until the live exec rolls past #942), so the dashboard can hide it rather than show 0.
+      m.put("options_buying_power", acct.optionsBuyingPower());
+      m.put("options_approved_level", acct.optionsApprovedLevel());
+      m.put("options_trading_level", acct.optionsTradingLevel());
+      m.put("multiplier", acct.multiplier());
+      m.put("pending_transfer_in", acct.pendingTransferIn());
       // Informational account identity, dev-gated. Never exposed in prod (flag defaults false) and
       // omitted when the broker adapter / degraded snapshot carries no account number.
       if (exposeBrokerAccountNumber && acct.accountNumber() != null) {

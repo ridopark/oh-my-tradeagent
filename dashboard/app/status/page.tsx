@@ -10,11 +10,14 @@ import {
   NotAuthenticatedError,
   type Portfolio,
   type AccountKillSwitch,
+  getStrategyConfig,
 } from "@/lib/bff";
 import { brokerMode, brokerProvider } from "@/lib/mode";
 import { Pnl, fmtCurrency } from "@/components/Pnl";
 import { AccountKillSwitchReset } from "@/components/AccountKillSwitchReset";
 import { PositionsUnavailable } from "@/components/PositionsUnavailable";
+import { OptionsLevelNotice, fundingClauses } from "@/components/FundingBanners";
+import { levelShortfalls } from "@/lib/funding";
 
 export const dynamic = "force-dynamic";
 
@@ -94,6 +97,21 @@ export default async function StatusPage({
   const accounts = p.account_equity;
   const anyLive = accounts.some((a) => brokerMode(a.broker_target) === "live");
   const showAccount = accounts.some((a) => a.account_number);
+  // #942 funding detail, one line per account under the table (a column would push Status off a
+  // phone screen). Accounts with no funding fields yet (exec not rolled) get no line at all.
+  const fundingLines = accounts
+    .map((a) => ({
+      target: a.broker_target,
+      label: `${brokerProvider(a.broker_target)} ${brokerMode(a.broker_target).toUpperCase()}`,
+      clauses: fundingClauses(a),
+    }))
+    .filter((l) => l.clauses.length > 0);
+
+  // Fail-soft and outside the reads above: the readiness notice is advisory, so a strategy-config
+  // outage drops the notice rather than the page.
+  const shortfalls = await getStrategyConfig()
+    .then((r) => levelShortfalls(accounts, r.items))
+    .catch(() => []);
 
   const rows = accounts.map((a) => {
     const mode = brokerMode(a.broker_target);
@@ -150,6 +168,12 @@ export default async function StatusPage({
 
         <KillSwitchPanel state={killSwitch} />
 
+        {shortfalls.length > 0 && (
+          <div className="mb-6">
+            <OptionsLevelNotice shortfalls={shortfalls} />
+          </div>
+        )}
+
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-slate-200">Brokers &amp; accounts</h2>
           <DataTable
@@ -163,6 +187,12 @@ export default async function StatusPage({
             ]}
             rows={rows}
           />
+          {fundingLines.map((l) => (
+            <p key={l.target} className="mt-2 text-xs text-slate-400">
+              <span className="font-medium text-slate-300">{l.label}:</span>{" "}
+              {l.clauses.join(" · ")}
+            </p>
+          ))}
           <p className="mt-2 text-xs text-slate-500">{p.account_equity_scope}</p>
         </section>
 

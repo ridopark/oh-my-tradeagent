@@ -61,7 +61,18 @@ public class AccountEquityClient {
    * with no real account endpoint may carry a null account number, and a snapshot that omits
    * last_equity leaves the "today" figure to fall back to the last completed daily bar.
    */
-  public record BrokerAccount(BigDecimal equity, String accountNumber, BigDecimal lastEquity) {
+  public record BrokerAccount(
+      BigDecimal equity,
+      String accountNumber,
+      BigDecimal lastEquity,
+      // #874/#942 funding detail — informational, explains a broker "insufficient options buying
+      // power" rejection. Each is null when the snapshot omits it (an exec predating #942, or a
+      // field Alpaca sent garbled), never defaulted to 0.
+      BigDecimal optionsBuyingPower,
+      Long optionsApprovedLevel,
+      Long optionsTradingLevel,
+      BigDecimal multiplier,
+      BigDecimal pendingTransferIn) {
 
     /**
      * Back-compat convenience for the degraded/unavailable path (and tests) that carry no {@code
@@ -69,6 +80,11 @@ public class AccountEquityClient {
      */
     public BrokerAccount(BigDecimal equity, String accountNumber) {
       this(equity, accountNumber, null);
+    }
+
+    /** Back-compat convenience for callers that carry no funding detail. */
+    public BrokerAccount(BigDecimal equity, String accountNumber, BigDecimal lastEquity) {
+      this(equity, accountNumber, lastEquity, null, null, null, null, null);
     }
   }
 
@@ -106,7 +122,14 @@ public class AccountEquityClient {
       return result == null
           ? new BrokerAccount(null, null)
           : new BrokerAccount(
-              result.getEquity(), result.getAccountNumber(), result.getLastEquity());
+              result.getEquity(),
+              result.getAccountNumber(),
+              result.getLastEquity(),
+              result.getOptionsBuyingPower(),
+              result.getOptionsApprovedLevel(),
+              result.getOptionsTradingLevel(),
+              result.getMultiplier(),
+              result.getPendingTransferIn());
     } catch (TimeoutException e) {
       // We stopped waiting, but the workflow is still running. Cancel it so it doesn't linger as an
       // orphan — holding an orchestrator worker slot and re-hitting the broker account endpoint —

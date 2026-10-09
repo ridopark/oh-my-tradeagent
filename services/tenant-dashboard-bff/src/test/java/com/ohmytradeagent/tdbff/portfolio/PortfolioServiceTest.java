@@ -146,6 +146,59 @@ class PortfolioServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
+  void passesFundingDetailThroughOnTheAccountRow() {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+    when(accountEquity.snapshotFor("acme", "alpaca-live"))
+        .thenReturn(
+            new AccountEquityClient.BrokerAccount(
+                new BigDecimal("5000"),
+                null,
+                null,
+                new BigDecimal("812.40"),
+                2L,
+                1L,
+                BigDecimal.ONE,
+                new BigDecimal("2500")));
+
+    var row = ((List<Map<String, Object>>) service.portfolio("acme").get("account_equity")).get(0);
+
+    assertThat(row)
+        .containsEntry("options_buying_power", new BigDecimal("812.40"))
+        .containsEntry("options_approved_level", 2L)
+        .containsEntry("options_trading_level", 1L)
+        .containsEntry("multiplier", BigDecimal.ONE)
+        .containsEntry("pending_transfer_in", new BigDecimal("2500"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void fundingDetailIsNullNotZeroWhenTheSnapshotLacksIt() {
+    // An exec predating #942 sends none of these; the row must carry null (dashboard hides it),
+    // never 0 — "$0 options buying power" would read as a broke account.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-paper");
+    when(accountEquity.snapshotFor("acme", "alpaca-paper"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000.00"), null));
+
+    var row = ((List<Map<String, Object>>) service.portfolio("acme").get("account_equity")).get(0);
+
+    assertThat(row)
+        .containsEntry("options_buying_power", null)
+        .containsEntry("options_approved_level", null)
+        .containsEntry("options_trading_level", null)
+        .containsEntry("multiplier", null)
+        .containsEntry("pending_transfer_in", null);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
   void todayPlIsNullWhenLastEquityUnavailable() {
     // last_equity absent (older producer / broker adapter that doesn't expose it, or a degraded
     // snapshot) → today_pl and today_pl_pct are null (never fabricated); the dashboard falls back
