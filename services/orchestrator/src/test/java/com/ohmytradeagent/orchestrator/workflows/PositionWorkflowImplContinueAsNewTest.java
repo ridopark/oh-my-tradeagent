@@ -1030,6 +1030,47 @@ class PositionWorkflowImplContinueAsNewTest {
     WorkflowStub.fromTyped(stub).getResult(String.class);
   }
 
+  /**
+   * Issue #958: a redelivered STC that lands in a CARRIED run's first workflow task (before run()
+   * assigns input) must still be deduped against the carried processedSignalIds. signalWithStart
+   * delivers the signal in that first task deterministically — the real-server IT hit the same
+   * window in 3 of 4 runs. A NEW signal id buffered in the same window must still be processed.
+   */
+  @Test
+  void carriedRun_preInitRedelivery_isDeduped_newSignalStillProcessed() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    String wfId = "pos-can-preinit-dedupe";
+    PositionWorkflowInput carried = futureInput(6);
+    carried.setCarriedRemainingQty(3L);
+    carried.setCarriedExpectedQty(6L);
+    carried.setCarriedEntryBookedQty(6L);
+    carried.setCarriedEntryBrokerOrderId("brk-entry");
+    carried.setCarriedProcessedSignalIds(List.of("sig-pre-roll"));
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub)
+        .signalWithStart(
+            "partialExit",
+            new Object[] {partialExitRequest("sig-pre-roll", wfId, 0.5)},
+            new Object[] {carried});
+    Thread.sleep(1_000);
+
+    assertThat(placeOrderInvocations())
+        .as("a pre-init redelivery of a carried signal id must not place an order")
+        .isZero();
+    assertThat(auditKinds("ExitDuplicateSuppressed"))
+        .anySatisfy(e -> assertThat(e.getSubject()).containsEntry("signal_id", "sig-pre-roll"));
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+
+    stub.partialExit(partialExitRequest("sig-new", wfId, 0.5));
+    waitForPlaceOrderAtLeast(1);
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    assertThat(intent.getAllValues())
+        .extracting(OrderIntent::getIntentKey)
+        .containsOnly(wfId + ":exit:sig-new");
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {

@@ -344,13 +344,11 @@ class PositionWorkflowContinueAsNewRealServerIT {
   }
 
   /**
-   * KNOWN GAP (#958): a redelivery that lands in the carried run's FIRST workflow task, before
-   * {@code run()} assigns {@code input}, is buffered by {@code partialExit}'s {@code input == null}
-   * branch without the dedupe check, so the carried run processes it again. What keeps that from
-   * becoming a second sell is that the re-placement reuses the SAME intent key, which exec's
-   * journal ({@code ON CONFLICT (intent_key) DO NOTHING}) and the broker's client_order_id both
-   * treat as the existing order. This pins that invariant whether or not a given run hits the
-   * window. When #958 is fixed, tighten this to exactly one placement.
+   * #958: a redelivery that lands in the carried run's FIRST workflow task, before {@code run()}
+   * assigns {@code input}, must still be deduped against the carried processedSignalIds — exactly
+   * one placement whether or not a given run hits the window. The intent-key pin stays as the
+   * backstop: a re-placement under the SAME key is absorbed by exec's journal and the broker's
+   * client_order_id.
    */
   @Test
   void realServer_redeliveryAtCarriedRunStart_neverPlacesUnderANewIntentKey() throws Exception {
@@ -367,9 +365,8 @@ class PositionWorkflowContinueAsNewRealServerIT {
 
     List<String> orders = sigRaceOrders();
     System.out.printf(
-        "[IT-752] redelivery at carried-run start: placements=%d (2 = window hit) %s%n",
-        orders.size(), orders);
-    assertThat(orders).as("the STC was placed at least once").isNotEmpty();
+        "[IT-752] redelivery at carried-run start: placements=%d %s%n", orders.size(), orders);
+    assertThat(orders).as("one STC, one order — even in the carried run's first task").hasSize(1);
     assertThat(placed.stream().filter(i -> i.getIntentKey().contains(":exit:sig-race")))
         .extracting(OrderIntent::getIntentKey)
         .as("every placement for one STC must share one intent key")
