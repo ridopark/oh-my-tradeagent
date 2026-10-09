@@ -11,4 +11,16 @@ package com.ohmytradeagent.orchestrator.activities;
  * queue). {@code brokerTarget} may be null/blank when a strategy's config cannot be resolved; the
  * workflow FAILS CLOSED on such a strategy (guardrail G2) rather than summing a partial.
  */
-public record TenantStrategyBrokerTarget(String strategyId, String brokerTarget) {}
+public record TenantStrategyBrokerTarget(
+    String strategyId, String brokerTarget, boolean liveCondorRealizedRead) {
+
+  /**
+   * {@code liveCondorRealizedRead} (#921 K3c): the operator flag {@code
+   * orchestrator.condor.live-realized-read-enabled}, set only AFTER exec-alpaca-live is rolled onto
+   * a build that registers {@code ComputeCondorRealizedPnl}. Off (and absent in older recorded
+   * results), the account cap reads condor realized for {@code -paper} strategies only.
+   */
+  public TenantStrategyBrokerTarget(String strategyId, String brokerTarget) {
+    this(strategyId, brokerTarget, false);
+  }
+}

@@ -73,8 +73,11 @@ public class AccountKillSwitchConfig {
       DailyPnlActivities dailyPnl,
       TenantStrategies tenantStrategies,
       WorkflowClient client,
-      StrategyRegistry strategyRegistry) {
-    return new AccountPnlActivitiesImpl(dailyPnl, tenantStrategies, client, strategyRegistry);
+      StrategyRegistry strategyRegistry,
+      @Value("${orchestrator.condor.live-realized-read-enabled:false}")
+          boolean liveCondorRealizedRead) {
+    return new AccountPnlActivitiesImpl(
+        dailyPnl, tenantStrategies, client, strategyRegistry, liveCondorRealizedRead);
   }
 
   @Bean

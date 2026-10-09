@@ -53,16 +53,27 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
   private final TenantStrategies tenantStrategies;
   private final WorkflowClient client;
   private final StrategyRegistry strategyRegistry;
+  private final boolean liveCondorRealizedRead;
 
   public AccountPnlActivitiesImpl(
       DailyPnlActivities dailyPnl,
       TenantStrategies tenantStrategies,
       WorkflowClient client,
       StrategyRegistry strategyRegistry) {
+    this(dailyPnl, tenantStrategies, client, strategyRegistry, false);
+  }
+
+  public AccountPnlActivitiesImpl(
+      DailyPnlActivities dailyPnl,
+      TenantStrategies tenantStrategies,
+      WorkflowClient client,
+      StrategyRegistry strategyRegistry,
+      boolean liveCondorRealizedRead) {
     this.dailyPnl = dailyPnl;
     this.tenantStrategies = tenantStrategies;
     this.client = client;
     this.strategyRegistry = strategyRegistry;
+    this.liveCondorRealizedRead = liveCondorRealizedRead;
   }
 
   @Override
@@ -100,7 +111,7 @@ public class AccountPnlActivitiesImpl implements AccountPnlActivities {
             sid,
             e.getMessage());
       }
-      out.add(new TenantStrategyBrokerTarget(sid, brokerTarget));
+      out.add(new TenantStrategyBrokerTarget(sid, brokerTarget, liveCondorRealizedRead));
     }
     if (out.isEmpty()) {
       // Fail CLOSED: an empty strategy set means we cannot know the tenant's realized book. Summing

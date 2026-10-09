@@ -554,6 +554,28 @@ class AccountKillSwitchWorkflowImplTest {
     assertThat(stub.killswitchState().getTripped()).isFalse();
   }
 
+  // #921 K3c: with the operator's live-read flag ON (surfaced per strategy by the activity, flipped
+  // only after exec-alpaca-live is rolled), a live strategy's condor realized IS read at v4.
+  @Test
+  void heartbeat_liveStrategyWithOperatorFlag_readsCondorRealized() {
+    when(accountPnl.tenantStrategyBrokerTargets(anyString()))
+        .thenReturn(
+            List.of(
+                new TenantStrategyBrokerTarget("s1", BROKER_TARGET, true),
+                new TenantStrategyBrokerTarget("s-live", "alpaca-live", true)));
+    when(execPnl.computeCondorRealizedPnl(anyString(), eq("s-live"), any()))
+        .thenReturn(new BigDecimal("-6000"));
+
+    AccountKillSwitchWorkflow stub = newStub("t-dev/account/killswitch-condor-live-flag");
+    WorkflowStub.fromTyped(stub).start(input());
+    env.sleep(Duration.ofSeconds(75));
+
+    verify(execPnl, atLeastOnce()).computeCondorRealizedPnl(anyString(), eq("s-live"), any());
+    KillSwitchState s = stub.killswitchState();
+    assertThat(s.getTripped()).isTrue();
+    assertThat(s.getReason()).isEqualTo("auto:account_daily_loss");
+  }
+
   // #906: a failed condor realized read defers the tick like any per-strategy realized read (G2:
   // never sum a partial) — no trip on the mirror's -6000 alone, and no thrown heartbeat.
   @Test

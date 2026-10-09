@@ -297,6 +297,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * today's hold is NOT Running, the condor REALIZED from exec ({@code computeCondorRealizedPnl}, a
    * NEW activity command) and adds it to the day total. A history recorded at 1 or 2 replays as
    * such (no read).
+   *
+   * <p>#921 K3c: WIDENED to maxSupported=4 — at v&gt;=4 the read also runs for a NON-paper strategy
+   * when the activity reports the operator's {@code liveCondorRealizedRead} flag (new commands on
+   * broker-alpaca-live). A history recorded at 3 replays paper-only.
    */
   static final String VERSION_ACCOUNT_CONDOR_MAX_LOSS = "killswitch-condor-max-loss-v1";
 
@@ -918,7 +922,7 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
         Workflow.getVersion(VERSION_ACCOUNT_CLEAR_ONLY_WHEN_ARMABLE, Workflow.DEFAULT_VERSION, 1);
     // #899: appended last (see the change-id javadoc).
     this.condorMaxLossVersion =
-        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 3);
+        Workflow.getVersion(VERSION_ACCOUNT_CONDOR_MAX_LOSS, Workflow.DEFAULT_VERSION, 4);
 
     LocalDate today = calendar.todayEt();
     if (!today.equals(tradingDay)) {
@@ -1516,9 +1520,10 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
    * returns null (the caller defers, as for {@link #execTenantRealized}).
    *
    * <p>PAPER-scoped (same guard as {@code CondorSessionWorkflowImpl} / {@code
-   * CondorScheduleBootstrapper}): a non-{@code -paper} strategy is never read. The live exec worker
-   * is rolled by hand and may not register this activity; scheduling it there would defer — and so
-   * disarm — a real-money cap on every tick.
+   * CondorScheduleBootstrapper}): a non-{@code -paper} strategy is read only at v&gt;=4 AND when
+   * the operator has set {@code orchestrator.condor.live-realized-read-enabled} (#921 K3c). The
+   * live exec worker is rolled by hand and may not register this activity; scheduling it there
+   * before that roll would defer — and so disarm — a real-money cap on every tick.
    */
   private BigDecimal execCondorRealized(AccountOpenBook book) {
     if (book.condorHoldIds() == null) {
@@ -1526,7 +1531,8 @@ public class AccountKillSwitchWorkflowImpl implements AccountKillSwitchWorkflow 
     }
     BigDecimal total = BigDecimal.ZERO;
     for (TenantStrategyBrokerTarget s : realizedStrategies) {
-      if (s.brokerTarget() == null || !s.brokerTarget().endsWith("-paper")) {
+      boolean paper = s.brokerTarget() != null && s.brokerTarget().endsWith("-paper");
+      if (!paper && !(condorMaxLossVersion >= 4 && s.liveCondorRealizedRead())) {
         continue;
       }
       String todaysHold =
