@@ -1405,6 +1405,57 @@ class AlpacaPaperBrokerTest {
         .isEqualTo(new OptionsBroker.FundingDetail(null, null, null, null, null));
   }
 
+  // #942 R1, per field: garble ONE funding field with the others well-formed — the read succeeds,
+  // only that component is null, and the well-formed ones still parse (leniency never nulls a good
+  // value).
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> garbledField() {
+    return java.util.stream.Stream.of(
+            "options_buying_power",
+            "options_approved_level",
+            "options_trading_level",
+            "multiplier",
+            "pending_transfer_in")
+        .flatMap(
+            f ->
+                java.util.stream.Stream.of("\"N/A\"", "{}", "true", "[1]")
+                    .map(g -> org.junit.jupiter.params.provider.Arguments.of(f, g)));
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("garbledField")
+  void getAccount_oneGarbledFundingField_onlyThatComponentIsNull(String field, String garbage) {
+    java.util.Map<String, String> fields = new java.util.LinkedHashMap<>();
+    fields.put("options_buying_power", "\"250.00\"");
+    fields.put("options_approved_level", "2");
+    fields.put("options_trading_level", "1");
+    fields.put("multiplier", "\"1\"");
+    fields.put("pending_transfer_in", "\"100.00\"");
+    fields.put(field, garbage);
+    StringBuilder body =
+        new StringBuilder(
+            "{\"id\":\"acct-1\",\"equity\":\"1000.00\",\"cash\":\"900.00\","
+                + "\"account_number\":\"PA3ER05HLHMB\"");
+    fields.forEach((k, v) -> body.append(",\"").append(k).append("\":").append(v));
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(body.append("}").toString()));
+
+    OptionsBroker.AccountSummary account = broker.getAccount();
+
+    assertThat(account.equity()).isEqualByComparingTo("1000.00");
+    assertThat(account.cash()).isEqualByComparingTo("900.00");
+    OptionsBroker.FundingDetail expected =
+        new OptionsBroker.FundingDetail(
+            field.equals("options_buying_power") ? null : new BigDecimal("250.00"),
+            field.equals("options_approved_level") ? null : 2,
+            field.equals("options_trading_level") ? null : 1,
+            field.equals("multiplier") ? null : new BigDecimal("1"),
+            field.equals("pending_transfer_in") ? null : new BigDecimal("100.00"));
+    assertThat(account.funding()).isEqualTo(expected);
+  }
+
   @Test
   void preTradeCheck_marginAccount_gatesOnCash_notOptionsBuyingPower() throws Exception {
     // The point of this change: the affordability gate reads AVAILABLE CASH, not margin/options
