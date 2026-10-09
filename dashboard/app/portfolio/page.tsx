@@ -3,6 +3,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { contractCell } from "@/components/ContractLink";
 import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
+import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { getPortfolio } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function PortfolioPage() {
   const session = await auth();
   const p = await getPortfolio();
+  const degraded = p.open_positions_degraded === true;
   return (
     <>
       <Nav tenantId={session?.tenantId} />
@@ -20,11 +22,11 @@ export default async function PortfolioPage() {
         <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Stat
             label="Open positions"
-            value={String(p.open_positions_count)}
+            value={degraded ? "Unknown" : String(p.open_positions_count)}
           />
           <Stat
             label="Sum open notional"
-            value={fmtCurrency(p.sum_open_notional)}
+            value={degraded ? "—" : fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
           <Stat label="Realized P&L today" value={fmtCurrency(p.realized_pnl_today)} />
@@ -50,6 +52,9 @@ export default async function PortfolioPage() {
 
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-slate-200">Open positions</h2>
+          {degraded ? (
+            <PositionsUnavailable />
+          ) : (
           <DataTable
             empty="No open positions."
             columns={[
@@ -64,6 +69,7 @@ export default async function PortfolioPage() {
             ]}
             rows={p.open_positions}
           />
+          )}
         </section>
 
         <p className="text-xs text-slate-500">{p.unrealized_pnl_note}</p>

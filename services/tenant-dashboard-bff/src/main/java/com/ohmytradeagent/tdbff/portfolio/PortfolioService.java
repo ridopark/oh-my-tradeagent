@@ -223,13 +223,16 @@ public class PortfolioService {
       marksByOcc.putAll(m);
     }
 
-    // Join positions under the sub-read budget; a stalled query set degrades to "no positions
-    // shown". Each open position picks up its live marks by normalized-compact OCC (the tracked
-    // position carries the padded canonical OCC; broker marks are keyed compact — both normalize
-    // the
-    // same way). No matching mark -> the row stays clean (mark fields omitted).
-    List<OpenPosition> positions =
-        await(positionsFuture, List.of(), "positions tenant=" + tenantId);
+    // Join positions under the sub-read budget. A stalled or failed query set degrades to an empty
+    // list PLUS open_positions_degraded=true: an empty list alone reads as a healthy flat book, the
+    // worst thing to show an operator mid-incident. Each open position picks up its live marks by
+    // normalized-compact OCC (the tracked position carries the padded canonical OCC; broker marks
+    // are keyed compact — both normalize the same way). No matching mark -> the row stays clean
+    // (mark fields omitted).
+    List<OpenPosition> positionsOrNull =
+        await(positionsFuture, null, "positions tenant=" + tenantId);
+    boolean positionsDegraded = positionsOrNull == null;
+    List<OpenPosition> positions = positionsDegraded ? List.of() : positionsOrNull;
     // The underlying's price at entry (recorded once per position by the #783 recorder) and its
     // price now. BOTH RUN AS BOUNDED SUB-READS, in parallel with each other: a stalled market-data
     // hop or a stalled DB read must degrade the cell to "—", never slow the whole page. They are
@@ -304,6 +307,9 @@ public class PortfolioService {
     body.put("tenant_id", tenantId);
     body.put("trading_day", tradingDay.toString());
     body.put("open_positions", positionItems);
+    // When degraded, count and sum stay 0 for older dashboards, which cannot tell anyway; a reader
+    // that knows this flag must render them as unknown, not as an empty book.
+    body.put("open_positions_degraded", positionsDegraded);
     body.put("open_positions_count", positionItems.size());
     body.put("sum_open_notional", sumOpenNotional);
     body.put("sum_open_notional_basis", "cost_basis_at_entry"); // NOT live mark

@@ -14,6 +14,7 @@ import {
 import { brokerMode, brokerProvider } from "@/lib/mode";
 import { Pnl, fmtCurrency } from "@/components/Pnl";
 import { AccountKillSwitchReset } from "@/components/AccountKillSwitchReset";
+import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 
 export const dynamic = "force-dynamic";
 
@@ -121,6 +122,7 @@ export default async function StatusPage({
       const n = raw == null ? NaN : Number(raw);
       return Number.isNaN(n) ? sum : (sum ?? 0) + n;
     }, null);
+  const positionsDegraded = p.open_positions_degraded === true;
   const unrealizedToday = sumMark("unrealized_intraday_pl");
   const unrealizedTotal = sumMark("unrealized_pl");
 
@@ -164,16 +166,26 @@ export default async function StatusPage({
           <p className="mt-2 text-xs text-slate-500">{p.account_equity_scope}</p>
         </section>
 
+        {positionsDegraded && (
+          <div className="mb-4">
+            <PositionsUnavailable />
+          </div>
+        )}
+
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat
             label="Total account value"
             value={fmtCurrency(totalAccountValue)}
             note="Net-liq equity (account-level, shared)."
           />
-          <Stat label="Open positions" value={String(p.open_positions_count)} />
+          <Stat
+            label="Open positions"
+            value={positionsDegraded ? "Unknown" : String(p.open_positions_count)}
+            note={positionsDegraded ? "Positions read failed — not an empty book." : undefined}
+          />
           <Stat
             label="Sum open notional"
-            value={fmtCurrency(p.sum_open_notional)}
+            value={positionsDegraded ? "—" : fmtCurrency(p.sum_open_notional)}
             note="Cost basis at entry — not live mark."
           />
           <Stat

@@ -187,6 +187,17 @@ class PortfolioCacheTest {
   }
 
   @Test
+  void degradedPositions_areCachedOnlyBriefly() {
+    Map<String, Object> degraded = new java.util.HashMap<>(body("degraded"));
+    degraded.put("open_positions_degraded", true);
+    when(service.portfolio("acme")).thenReturn(degraded, body("ok"));
+
+    cache.portfolio("acme");
+    clock.advance(Duration.ofSeconds(2)); // DEGRADED_TTL elapsed, well inside TTL
+    assertThat(cache.portfolio("acme")).containsEntry("tag", "ok");
+  }
+
+  @Test
   void tenantsAreCachedSeparately() {
     when(service.portfolio("acme")).thenReturn(body("acme"));
     when(service.portfolio("beta")).thenReturn(body("beta"));

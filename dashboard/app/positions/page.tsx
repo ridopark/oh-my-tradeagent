@@ -3,6 +3,7 @@ import { Nav } from "@/components/Nav";
 import { DataTable } from "@/components/DataTable";
 import { contractCell } from "@/components/ContractLink";
 import { pnlCell, priceCell } from "@/components/Pnl";
+import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { getPortfolio } from "@/lib/bff";
 
 export const dynamic = "force-dynamic";
@@ -13,15 +14,20 @@ export default async function PositionsPage() {
   // (current price + today's/total unrealized P&L), joined by OCC in the BFF.
   const p = await getPortfolio();
   const count = p.open_positions_count;
+  const degraded = p.open_positions_degraded === true;
   return (
     <>
       <Nav tenantId={session?.tenantId} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         <h1 className="mb-1 text-xl font-semibold text-slate-100">Open Positions</h1>
         <p className="mb-4 text-sm text-slate-400">
-          {count} open position{count === 1 ? "" : "s"} across your strategies. Notional is cost
-          basis at entry; price &amp; P&amp;L are live broker marks (shown when available).
+          {degraded ? "Unknown number of" : count} open position{count === 1 ? "" : "s"} across
+          your strategies. Notional is cost basis at entry; price &amp; P&amp;L are live broker
+          marks (shown when available).
         </p>
+        {degraded ? (
+          <PositionsUnavailable />
+        ) : (
         <DataTable
           empty="No open positions."
           columns={[
@@ -36,6 +42,7 @@ export default async function PositionsPage() {
           ]}
           rows={p.open_positions}
         />
+        )}
       </main>
     </>
   );

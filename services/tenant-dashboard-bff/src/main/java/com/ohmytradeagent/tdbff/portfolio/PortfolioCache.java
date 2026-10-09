@@ -30,9 +30,9 @@ import org.springframework.stereotype.Component;
  *       PortfolioService} degrades a stalled section instead of failing, and publishes a degraded
  *       realized-P&L or equity figure as null; such a body is kept just long enough to absorb a
  *       burst of viewers (single-flight already stops them stacking loads) without pinning "—" on
- *       the page for the full TTL. A degraded positions or marks section is not distinguishable
- *       from a real empty one in the body, so it gets the normal TTL — at most 10s, under the 15s
- *       refresh.
+ *       the page for the full TTL. Degraded positions ({@code open_positions_degraded}) count too.
+ *       A degraded marks section is not distinguishable from a real empty one in the body, so it
+ *       gets the normal TTL — at most 10s, under the 15s refresh.
  *   <li><b>{@link #invalidate} wins over an in-flight load.</b> It removes the tenant's entry; the
  *       in-flight load completes only its own future, which is no longer in the map, so its
  *       pre-invalidation result can never be served to a caller arriving after the invalidation.
@@ -114,7 +114,8 @@ public class PortfolioCache {
   }
 
   private static boolean isDegraded(Map<String, Object> body) {
-    if (body.get("realized_pnl_today") == null) {
+    if (body.get("realized_pnl_today") == null
+        || Boolean.TRUE.equals(body.get("open_positions_degraded"))) {
       return true;
     }
     if (body.get("account_equity") instanceof List<?> rows) {
