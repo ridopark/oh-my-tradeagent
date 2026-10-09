@@ -20,12 +20,14 @@ import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -77,6 +79,7 @@ class ReconciliationWorkflowImplTest {
   private ReconciliationExecActivity exec;
   private ReconciliationMetricsActivities metrics;
   private PositionLookupActivities positionLookup;
+  private StrategyActivities strategy;
 
   @BeforeEach
   void setUp() {
@@ -106,6 +109,7 @@ class ReconciliationWorkflowImplTest {
     exec = Mockito.mock(ReconciliationExecActivity.class);
     metrics = Mockito.mock(ReconciliationMetricsActivities.class);
     positionLookup = Mockito.mock(PositionLookupActivities.class);
+    strategy = Mockito.mock(StrategyActivities.class);
     // Issue #206: default to "no prior detection" so existing tests (which don't care about
     // debounce) keep emitting per-cycle PositionOrphan / JournalOrphan audits as before. The
     // primitive long return defaults to 0 already, but make it explicit for readability.
@@ -122,7 +126,8 @@ class ReconciliationWorkflowImplTest {
         .thenReturn(0L);
     when(auditQuery.countPriorJournalOrphanOngoing(anyString(), anyString(), anyString(), any()))
         .thenReturn(0L);
-    coreWorker.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup);
+    coreWorker.registerActivitiesImplementations(
+        audit, auditQuery, metrics, positionLookup, strategy);
     Worker brokerWorker = env.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
     env.start();
@@ -1141,6 +1146,65 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void staleNullScheduleAccount_freshConfigAccountIsUsedForTheSiblingProbe() {
+    // #938: a recon schedule created before the strategy row had its broker_account_id keeps a
+    // frozen NULL in its input. Recon now reads the account per tick from strategy_config, so the
+    // account-scoped sibling probe runs with the CURRENT id instead of being skipped.
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(positionLookup.sumRunningOwnerRemainingQtyForOcc(anyString(), anyString())).thenReturn(0L);
+    when(positionLookup.hasRunningOwnerForOcc(anyString(), anyString())).thenReturn(false);
+    when(strategy.get("dev", "copytrade-v1"))
+        .thenReturn(new StrategyConfig().withBrokerAccountId(" ACCT-FRESH-1 "));
+    when(positionLookup.hasRunningOwnerForOccOnAccount(eq("ACCT-FRESH-1"), eq(paddedOcc)))
+        .thenReturn(true);
+
+    ReconciliationSummary summary = runWorkflow(/* brokerAccountId= */ null);
+
+    assertThat(summary.getPositionOrphans()).isEqualTo(0L);
+    assertThat(captureKind("PositionOrphanSuppressedSiblingOwner").getSubject())
+        .containsEntry("owner_scope", "account")
+        .containsEntry("broker_account_id", "ACCT-FRESH-1");
+  }
+
+  @Test
+  void freshConfigAccount_supersedesAStaleNonNullScheduleValue() {
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(strategy.get("dev", "copytrade-v1"))
+        .thenReturn(new StrategyConfig().withBrokerAccountId("ACCT-NEW"));
+
+    runWorkflow("ACCT-OLD");
+
+    verify(positionLookup).hasRunningOwnerForOccOnAccount("ACCT-NEW", paddedOcc);
+    verify(positionLookup, never()).hasRunningOwnerForOccOnAccount(eq("ACCT-OLD"), anyString());
+  }
+
+  @Test
+  void configReadFailure_fallsBackToTheScheduleAccount_neverFailsRecon() {
+    String paddedOcc = PADDED_OCC;
+    when(exec.journalDumpOpen(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenOrders(anyString(), anyString())).thenReturn(List.of());
+    when(exec.brokerListOpenPositions(anyString(), anyString()))
+        .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
+    when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
+    when(strategy.get("dev", "copytrade-v1"))
+        .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("db down", "X"));
+
+    runWorkflow("ACCT-SCHED");
+
+    verify(positionLookup).hasRunningOwnerForOccOnAccount("ACCT-SCHED", paddedOcc);
+  }
+
+  @Test
   void missingBranch_transientSingleObservation_isDebouncedNoFirstPage() {
     // Phase 3: a single transient `missing` observation with no covering owner (cold SCAN +
     // Visibility finds nothing) must NOT page on the FIRST sweep — the new first-page debounce
@@ -1853,7 +1917,7 @@ class ReconciliationWorkflowImplTest {
     Worker core = penv.newWorker(CORE_QUEUE);
     core.registerWorkflowImplementationTypes(
         ReconciliationWorkflowImpl.class, RecordingAdoptionWorkflowImpl.class);
-    core.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup);
+    core.registerActivitiesImplementations(audit, auditQuery, metrics, positionLookup, strategy);
     Worker brokerWorker = penv.newWorker(EXEC_QUEUE);
     brokerWorker.registerActivitiesImplementations(exec);
     penv.start();

@@ -49,6 +49,36 @@ public final class CrossTenantBrokerTargetValidator {
 
   private CrossTenantBrokerTargetValidator() {}
 
+  /**
+   * #938: which invariant a config breaks, so a periodic drift check can grade it without parsing
+   * the message. Boot behavior is unchanged — {@link InvariantViolation} is still an {@link
+   * IllegalStateException}.
+   */
+  public enum Violation {
+    /** Strict mode: two distinct tenants map one broker_target. */
+    TENANTS_SHARE_TARGET,
+    /** One tenant's strategies on a broker_target declare different accounts. */
+    INTRA_TENANT_ACCOUNT_CONFLICT,
+    /** Shared mode: a tenant on a shared broker_target declares no broker_account_id. */
+    MISSING_ACCOUNT,
+    /** Shared mode: two tenants declare the SAME broker_account_id. */
+    DUPLICATE_ACCOUNT
+  }
+
+  /** The boot-invariant failure, typed by {@link Violation}. */
+  public static final class InvariantViolation extends IllegalStateException {
+    private final Violation violation;
+
+    InvariantViolation(Violation violation, String message) {
+      super(message);
+      this.violation = violation;
+    }
+
+    public Violation violation() {
+      return violation;
+    }
+  }
+
   /** Strict mode (default): a {@code broker_target} is owned by exactly one tenant. */
   public static void validate(StrategyRegistry registry) {
     validate(registry, false);
@@ -93,7 +123,8 @@ public final class CrossTenantBrokerTargetValidator {
       }
       String existingOwner = ownerByTarget.putIfAbsent(brokerTarget, ts.tenantId());
       if (existingOwner != null && !existingOwner.equals(ts.tenantId())) {
-        throw new IllegalStateException(
+        throw new InvariantViolation(
+            Violation.TENANTS_SHARE_TARGET,
             "Cross-tenant broker_target conflict (#323): broker_target='"
                 + brokerTarget
                 + "' is mapped by two distinct tenants ('"
@@ -137,7 +168,8 @@ public final class CrossTenantBrokerTargetValidator {
       if (byTenant.containsKey(ts.tenantId())) {
         String prior = byTenant.get(ts.tenantId());
         if (!Objects.equals(prior, account)) {
-          throw new IllegalStateException(
+          throw new InvariantViolation(
+              Violation.INTRA_TENANT_ACCOUNT_CONFLICT,
               "Intra-tenant broker_account_id conflict (#323/P4-c): tenant '"
                   + ts.tenantId()
                   + "' declares different broker_account_id values ('"
@@ -169,7 +201,8 @@ public final class CrossTenantBrokerTargetValidator {
     for (Map.Entry<String, String> te : accountByTenant.entrySet()) {
       String account = te.getValue();
       if (account == null) {
-        throw new IllegalStateException(
+        throw new InvariantViolation(
+            Violation.MISSING_ACCOUNT,
             "Cross-tenant broker_target conflict (#323/P4-c): broker_target='"
                 + brokerTarget
                 + "' is shared by multiple tenants but tenant '"
@@ -179,7 +212,8 @@ public final class CrossTenantBrokerTargetValidator {
                 + accountByTenant.keySet());
       }
       if (!seenAccounts.add(account)) {
-        throw new IllegalStateException(
+        throw new InvariantViolation(
+            Violation.DUPLICATE_ACCOUNT,
             "Cross-tenant broker_target conflict (#323/P4-c): broker_target='"
                 + brokerTarget
                 + "' has two tenants declaring the same broker_account_id='"

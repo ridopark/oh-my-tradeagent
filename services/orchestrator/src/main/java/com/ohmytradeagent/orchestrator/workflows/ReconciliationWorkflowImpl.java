@@ -7,17 +7,20 @@ import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.JournalEntry;
 import com.ohmytradeagent.contract.ReconciliationSummary;
 import com.ohmytradeagent.contract.ReconciliationWorkflowInput;
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.activities.ReconciliationExecActivity;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.AuditQueryActivities;
 import com.ohmytradeagent.orchestrator.activities.PositionLookupActivities;
 import com.ohmytradeagent.orchestrator.activities.ReconciliationMetricsActivities;
+import com.ohmytradeagent.orchestrator.activities.StrategyActivities;
 import com.ohmytradeagent.orchestrator.domain.OccSymbol;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.enums.v1.ParentClosePolicy;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.common.RetryOptions;
+import io.temporal.failure.ActivityFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.Promise;
@@ -160,6 +163,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    */
   static final String VERSION_EXPIRY_PINGPONG = "recon-expiry-pingpong-v1";
 
+  /**
+   * #938: the account-scoped sibling probe uses the broker_account_id read FRESH from
+   * strategy_config (once per run, lazily, on first need) instead of the value frozen into the
+   * schedule's input at creation — a schedule created before the row had its id kept a null and
+   * silently skipped the probe. The config read is a new activity command, so it is gated; read
+   * once outside the loop.
+   */
+  static final String VERSION_FRESH_ACCOUNT_ID = "recon-fresh-account-id-v1";
+
   /** Hard expiry-session close in America/New_York (16:00 ET); past this a 0DTE OCC is done. */
   private static final LocalTime ET_MARKET_CLOSE = LocalTime.of(16, 0);
 
@@ -213,6 +225,13 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // orchestrator-svc worker, so the stub uses default options (core task queue).
   private final PositionLookupActivities positionLookup =
       Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
+  private final StrategyActivities strategy =
+      Workflow.newActivityStub(StrategyActivities.class, DEFAULT_OPTIONS);
+
+  /** #938: the per-run account id; resolved lazily by {@link #accountId}. */
+  private boolean accountResolved;
+
+  private String resolvedAccountId;
 
   private ReconciliationWorkflowInput input;
 
@@ -374,6 +393,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     int condorOwnerVersion = Workflow.getVersion(VERSION_CONDOR_OWNER, Workflow.DEFAULT_VERSION, 1);
     int expiryPingpongVersion =
         Workflow.getVersion(VERSION_EXPIRY_PINGPONG, Workflow.DEFAULT_VERSION, 1);
+    int freshAccountVersion =
+        Workflow.getVersion(VERSION_FRESH_ACCOUNT_ID, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -450,9 +471,9 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // recon executions are short-lived per scheduled run (workflowId carries
         // {{.ScheduledRunID}}), so there is no long-lived in-flight history to replay-protect — see
         // the maybeAutoAdopt note below (a getVersion marker here would be vacuous).
-        if (brokerQty > 0
-            && in.getBrokerAccountId() != null
-            && positionLookup.hasRunningOwnerForOccOnAccount(in.getBrokerAccountId(), occPadded)) {
+        String accountId = brokerQty > 0 ? accountId(in, freshAccountVersion) : null;
+        if (accountId != null
+            && positionLookup.hasRunningOwnerForOccOnAccount(accountId, occPadded)) {
           recordSiblingSuppressionMetric(in, brokerTarget);
           // No covered_qty here: this branch is reached only after the tenant-scoped Redis SCAN
           // returned 0 coverage (the cross-tenant owner is invisible to this tenant's SCAN), so a
@@ -464,7 +485,7 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
                   "option_symbol", occPadded,
                   "broker_qty", brokerQty,
                   "broker_target", brokerTarget,
-                  "broker_account_id", in.getBrokerAccountId(),
+                  "broker_account_id", accountId,
                   "owner_scope", "account"));
           continue;
         }
@@ -1007,6 +1028,30 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
 
   private static OffsetDateTime etStartOfDay(LocalDate etDate) {
     return etDate.atStartOfDay(java.time.ZoneId.of("America/New_York")).toOffsetDateTime();
+  }
+
+  /**
+   * #938: the broker_account_id for the account-scoped probe. v>=1 reads strategy_config once per
+   * run (on first need) and prefers it over the schedule's frozen input; a failed read falls back
+   * to the input value so recon never fails on it. v0 keeps the input value only.
+   */
+  private String accountId(ReconciliationWorkflowInput in, int freshAccountVersion) {
+    if (freshAccountVersion < 1) {
+      return in.getBrokerAccountId();
+    }
+    if (!accountResolved) {
+      accountResolved = true;
+      String fresh = null;
+      try {
+        StrategyConfig cfg = strategy.get(in.getTenantId(), in.getStrategyId());
+        fresh = cfg == null ? null : cfg.getBrokerAccountId();
+      } catch (ActivityFailure e) {
+        // Fall back to the schedule's value below.
+      }
+      fresh = fresh == null || fresh.isBlank() ? null : fresh.trim();
+      resolvedAccountId = fresh != null ? fresh : in.getBrokerAccountId();
+    }
+    return resolvedAccountId;
   }
 
   private void recordAutoAdoptMetric(

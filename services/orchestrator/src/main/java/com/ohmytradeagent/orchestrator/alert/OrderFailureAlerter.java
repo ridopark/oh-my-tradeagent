@@ -141,7 +141,7 @@ public class OrderFailureAlerter {
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
           + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed,"
           + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing,ReconAdoptionLoop,"
-          + "OvernightTrailHeld";
+          + "OvernightTrailHeld,BrokerAccountInvariantViolated";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -205,6 +205,9 @@ public class OrderFailureAlerter {
   // #930: one OCC auto-adopted 3+ times in a day — an adopt/close loop. YELLOW: the lot keeps an
   // owner each cycle, but something keeps closing it and recon keeps re-adopting it.
   private static final String RECON_ADOPTION_LOOP_KIND = "ReconAdoptionLoop";
+  // #938: the boot broker_account_id invariant is violated by the live config. RED for a
+  // duplicate/conflict (cap isolation breached now), YELLOW for a missing id (restart outage).
+  private static final String BROKER_ACCOUNT_INVARIANT_KIND = "BrokerAccountInvariantViolated";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -289,6 +292,8 @@ public class OrderFailureAlerter {
         embed = buildCondorWorkflowTaskFailingEmbed(event);
       } else if (RECON_ADOPTION_LOOP_KIND.equals(event.getKind())) {
         embed = buildReconAdoptionLoopEmbed(event);
+      } else if (BROKER_ACCOUNT_INVARIANT_KIND.equals(event.getKind())) {
+        embed = buildBrokerAccountInvariantEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -392,6 +397,30 @@ public class OrderFailureAlerter {
         null,
         recreated && !stateUnknown ? AlertColors.YELLOW : AlertColors.RED,
         buildFooter(event),
+        fields);
+  }
+
+  /** #938: the broker-account invariant page. Severity from the subject; null-safe. */
+  private WebhookEmbed buildBrokerAccountInvariantEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    boolean yellow = "YELLOW".equals(rawSubject(subject, "severity"));
+    String violation = orNa(rawSubject(subject, "violation"));
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("violation", violation, false));
+    fields.add(new WebhookEmbed.Field("detail", subjectStr(subject, "detail"), false));
+    return new WebhookEmbed(
+        (yellow ? ":large_yellow_circle: " : ":red_circle: ")
+            + "broker_account_id invariant violated — "
+            + violation,
+        yellow
+            ? "A tenant on a shared broker_target has no broker_account_id. Nothing is"
+                + " mis-scoped yet, but the NEXT orchestrator restart fails closed for every"
+                + " tenant. Set the row's broker_account_id (#938)."
+            : "Two tenants resolve to the same brokerage account (or one tenant declares"
+                + " conflicting accounts): the account cap is no longer isolated and the next"
+                + " restart fails closed. Disable or correct the row now (#937/#938).",
+        yellow ? AlertColors.YELLOW : AlertColors.RED,
+        "actor: " + orNa(event.getActor()),
         fields);
   }
 
