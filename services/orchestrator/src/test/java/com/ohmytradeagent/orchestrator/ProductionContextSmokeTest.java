@@ -1,17 +1,28 @@
 package com.ohmytradeagent.orchestrator;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.temporal.api.workflowservice.v1.WorkflowServiceGrpc;
 import io.temporal.client.WorkflowClient;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import org.jooq.DSLContext;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.web.server.LocalManagementPort;
+import org.springframework.boot.web.context.WebServerApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -80,9 +91,13 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  */
 @SpringBootTest(
     classes = {OrchestratorApplication.class, ProductionContextSmokeTest.TemporalMockConfig.class},
-    webEnvironment = SpringBootTest.WebEnvironment.NONE,
+    // Issue #795: boot the REAL web environment the pod runs — server.port=-1 from application.yml
+    // (no application HTTP server), actuator on a separate management port. Running this test with
+    // web-application-type=none would hide every bean the servlet context newly activates.
+    webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT,
     properties = {
-      "spring.main.web-application-type=none",
+      // Random management port so parallel forks don't collide; production pins 8080.
+      "management.server.port=0",
       // Required so the TemporalMockConfig @Bean methods below (which reuse the same names as
       // TemporalWorkerConfig's @Bean methods) can override the production definitions. Spring
       // disables override-by-name by default; we opt in for this test only.
@@ -99,6 +114,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
       // and early-returns without touching Temporal.
       "orchestrator.tenants-dir=target/smoke-test-nonexistent-tenants-dir",
     })
+// @SpringBootTest disables metrics export by default (a SimpleMeterRegistry replaces Prometheus);
+// re-enable it so the scrape assertion exercises the production registry.
+@AutoConfigureObservability(tracing = false)
 class ProductionContextSmokeTest {
 
   /**
@@ -182,6 +200,52 @@ class ProductionContextSmokeTest {
     StringRedisTemplate smokeStringRedisTemplate() {
       return mock(StringRedisTemplate.class);
     }
+  }
+
+  @LocalManagementPort int managementPort;
+  @Autowired MeterRegistry meterRegistry;
+  @Autowired WebServerApplicationContext context;
+
+  private HttpResponse<String> getManagement(String path) throws Exception {
+    return HttpClient.newHttpClient()
+        .send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + managementPort + path)).build(),
+            HttpResponse.BodyHandlers.ofString());
+  }
+
+  /**
+   * Issue #795: the history-length gauges register into the context's {@link MeterRegistry}; this
+   * pins that THAT registry is the one {@code /actuator/prometheus} exports on the management port
+   * (the ServiceMonitor scrapes {@code http} = 8080 at this path).
+   */
+  @Test
+  void historyLengthGaugeIsScrapableOnTheManagementPort() throws Exception {
+    Gauge.builder("temporal_workflow_history_length", () -> 4321)
+        .tag("workflow_type", "SmokeTestWorkflow")
+        .register(meterRegistry);
+
+    HttpResponse<String> scrape = getManagement("/actuator/prometheus");
+
+    assertThat(scrape.statusCode()).isEqualTo(200);
+    assertThat(scrape.body())
+        .contains("temporal_workflow_history_length{workflow_type=\"SmokeTestWorkflow\"} 4321");
+  }
+
+  /** Only the allow-listed actuator endpoints are reachable; nothing else is exposed. */
+  @Test
+  void onlyAllowListedActuatorEndpointsAreExposed() throws Exception {
+    assertThat(getManagement("/actuator/health").statusCode()).isEqualTo(200);
+    assertThat(getManagement("/actuator/env").statusCode()).isEqualTo(404);
+    assertThat(getManagement("/actuator/beans").statusCode()).isEqualTo(404);
+  }
+
+  /**
+   * The orchestrator stays a worker, not a web service: server.port=-1 means the application
+   * context starts no HTTP server of its own — only the management child context listens.
+   */
+  @Test
+  void noApplicationHttpServerIsStarted() {
+    assertThat(context.getWebServer().getPort()).isEqualTo(-1);
   }
 
   @Test

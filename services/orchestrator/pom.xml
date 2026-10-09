@@ -40,9 +40,16 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-redis</artifactId>
     </dependency>
+    <!-- Issue #795: a servlet container for the ACTUATOR MANAGEMENT PORT ONLY. application.yml
+         sets server.port=-1 (no application HTTP server, no controllers served) and
+         management.server.port=8080, so the only listener is /actuator/{health,info,prometheus}
+         - which the ServiceMonitor scrapes and the history-length gauges export through. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
     <!-- Provides JacksonAutoConfiguration's @Bean ObjectMapper, required by
-         AuditActivitiesImpl. The orchestrator-svc has no web stack, so we add the json
-         starter directly rather than pulling in spring-boot-starter-web. -->
+         AuditActivitiesImpl (also transitively present via the web starter above). -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-json</artifactId>

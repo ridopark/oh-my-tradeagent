@@ -163,7 +163,21 @@ trade-context:
     user: ${TRADE_CONTEXT_DB_USER:trade_context_writer}
     password: ${TRADE_CONTEXT_WRITER_PASSWORD:}
 
+# Issue #795: the orchestrator is a Temporal worker, not a web service. server.port=-1 keeps the
+# application context from opening ANY HTTP listener; actuator runs in its own management child
+# context on 8080 (the Service/ServiceMonitor `http` port). The Tomcat pool is tiny on purpose —
+# the only clients are the Prometheus scrape and kubelet, and these threads share the pod with the
+# worker. server.tomcat.* is applied to the management server too.
+server:
+  port: -1
+  tomcat:
+    threads:
+      max: 4
+      min-spare: 1
+
 management:
+  server:
+    port: 8080
   endpoints:
     web:
       exposure:
