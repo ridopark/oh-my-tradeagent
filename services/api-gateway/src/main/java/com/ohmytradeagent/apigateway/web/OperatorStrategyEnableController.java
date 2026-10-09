@@ -99,8 +99,8 @@ public class OperatorStrategyEnableController {
     // (b) arm-guard: verified broker account must exist for the STORED broker_target (C5/C7).
     String brokerTarget =
         config.getBrokerTarget() == null ? null : config.getBrokerTarget().value();
-    VerifiedAccountGuard.Decision decision = guard.evaluate(tenant, brokerTarget);
-    switch (decision) {
+    VerifiedAccountGuard.Verification verification = guard.evaluate(tenant, brokerTarget);
+    switch (verification.decision()) {
       case ALLOW -> {
         /* proceed */
       }
@@ -115,7 +115,14 @@ public class OperatorStrategyEnableController {
           throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
     }
 
-    // (c) flip enabled=true on the stored config and CAS via the existing update workflow.
+    // (c) bind the verified broker_account_id (#871), flip enabled=true, and CAS via the existing
+    // update workflow.
+    try {
+      config.setBrokerAccountId(
+          VerifiedAccountGuard.bindAccount(config.getBrokerAccountId(), verification.account()));
+    } catch (VerifiedAccountGuard.AccountMismatchException mismatch) {
+      return mismatch.toResponse();
+    }
     config.setEnabled(true);
 
     String correlationId =

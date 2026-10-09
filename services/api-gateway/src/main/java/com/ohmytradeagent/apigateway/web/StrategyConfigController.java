@@ -97,28 +97,43 @@ public class StrategyConfigController {
     // broker account exists — the same bypass-proof check the operator enable route runs, so the
     // settings-page path cannot arm an unverified tenant either. ONLY the arming transition is
     // gated; disabling and every other SAFE edit are untouched.
-    if (proposedArmed(body.config())) {
-      Optional<StrategyConfigReader.Stored> stored = reader.read(tenant, body.strategyId());
-      // A transition only when a stored row exists and is explicitly disabled (enabled==false).
-      // Stored absent-enabled (schema-default true) is already ARMED → an edit-while-armed, not an
-      // arming transition → not re-gated. No stored row → the writer returns NOT_FOUND anyway.
-      if (stored.isPresent() && Boolean.FALSE.equals(stored.get().config().getEnabled())) {
-        StrategyConfig storedConfig = stored.get().config();
-        String storedBrokerTarget =
-            storedConfig.getBrokerTarget() == null ? null : storedConfig.getBrokerTarget().value();
-        switch (guard.evaluate(tenant, storedBrokerTarget)) {
-          case ALLOW -> {
-            /* proceed */
-          }
-          case REJECT_UNVERIFIED ->
-              throw new ResponseStatusException(
-                  HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNVERIFIED_ACCOUNT");
-          case REJECT_UNSUPPORTED_TARGET ->
-              throw new ResponseStatusException(
-                  HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNSUPPORTED_TARGET");
-          case FAULT -> throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
+    //
+    // #871: broker_account_id is never taken from the client. The writer accepts null→value (so an
+    // arm can bind the verified account), which would otherwise let a tenant self-declare an id —
+    // and a duplicate fail-closes boot for every tenant on the broker_target. Non-arming edits keep
+    // the stored value; an arming edit binds the exec-verified account.
+    Optional<StrategyConfigReader.Stored> stored = reader.read(tenant, body.strategyId());
+    String account = stored.map(st -> st.config().getBrokerAccountId()).orElse(null);
+    // A transition only when a stored row exists and is explicitly disabled (enabled==false).
+    // Stored absent-enabled (schema-default true) is already ARMED → an edit-while-armed, not an
+    // arming transition → not re-gated. No stored row → the writer returns NOT_FOUND anyway.
+    if (proposedArmed(body.config())
+        && stored.isPresent()
+        && Boolean.FALSE.equals(stored.get().config().getEnabled())) {
+      StrategyConfig storedConfig = stored.get().config();
+      String storedBrokerTarget =
+          storedConfig.getBrokerTarget() == null ? null : storedConfig.getBrokerTarget().value();
+      VerifiedAccountGuard.Verification verification = guard.evaluate(tenant, storedBrokerTarget);
+      switch (verification.decision()) {
+        case ALLOW -> {
+          /* proceed */
         }
+        case REJECT_UNVERIFIED ->
+            throw new ResponseStatusException(
+                HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNVERIFIED_ACCOUNT");
+        case REJECT_UNSUPPORTED_TARGET ->
+            throw new ResponseStatusException(
+                HttpStatus.UNPROCESSABLE_ENTITY, "REJECTED_UNSUPPORTED_TARGET");
+        case FAULT -> throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
       }
+      try {
+        account = VerifiedAccountGuard.bindAccount(account, verification.account());
+      } catch (VerifiedAccountGuard.AccountMismatchException mismatch) {
+        return mismatch.toResponse();
+      }
+    }
+    if (body.config() != null) {
+      body.config().setBrokerAccountId(account);
     }
 
     String correlationId =

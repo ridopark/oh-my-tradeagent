@@ -21,6 +21,7 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowException;
 import io.temporal.client.WorkflowOptions;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -46,6 +47,7 @@ class CreateTenantControllerTest {
   private WorkflowClient workflowClient;
   private StrategyConfigCreateWorkflow stub;
   private CreateTenantController controller;
+  private VerifiedAccountGuard guard;
 
   @BeforeEach
   void setUp() {
@@ -56,13 +58,15 @@ class CreateTenantControllerTest {
         .thenReturn(stub);
     // Allowlist the OPERATOR so the outcome-mapping tests exercise the create path; the allowlist
     // gate itself is covered by the dedicated 403 tests below.
+    guard = mock(VerifiedAccountGuard.class);
     controller =
-        new CreateTenantController(workflowClient, new TenantContext("dev", STRATEGY, OPERATOR));
+        new CreateTenantController(
+            workflowClient, new TenantContext("dev", STRATEGY, OPERATOR), Optional.of(guard));
   }
 
   private CreateTenantController controllerWithAllowlist(String allowlist) {
     return new CreateTenantController(
-        workflowClient, new TenantContext("dev", STRATEGY, allowlist));
+        workflowClient, new TenantContext("dev", STRATEGY, allowlist), Optional.of(guard));
   }
 
   private static HttpServletRequest reqWithOperator(String operator) {
@@ -184,6 +188,63 @@ class CreateTenantControllerTest {
         org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
     verify(stub).create(captor.capture());
     assertThat(captor.getValue().getConfig().getEnabled()).isFalse();
+  }
+
+  /**
+   * #871: an EXISTING tenant adding a strategy already has a verified account; create binds it, so
+   * the new row cannot sit on a shared broker_target without one. A caller-sent value is ignored.
+   */
+  @Test
+  void create_bindsTenantsVerifiedAccount_ignoringCallerValue_871() {
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    when(guard.evaluate(TENANT, "alpaca-live"))
+        .thenReturn(VerifiedAccountGuard.Verification.allowed("380083820"));
+
+    controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, liveBody("999999999"));
+
+    assertThat(createdConfig().getBrokerAccountId()).isEqualTo("380083820");
+  }
+
+  /** A brand-new tenant has no verified account yet: create writes none (enable binds it later). */
+  @Test
+  void create_unverifiedTenant_writesNoAccount_evenIfCallerSentOne() {
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    when(guard.evaluate(TENANT, "alpaca-live"))
+        .thenReturn(
+            VerifiedAccountGuard.Verification.of(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED));
+
+    controller.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, liveBody("999999999"));
+
+    assertThat(createdConfig().getBrokerAccountId()).isNull();
+  }
+
+  @Test
+  void create_withoutGuardBean_writesNoAccount() {
+    when(stub.create(any(StrategyConfigCreateRequest.class)))
+        .thenReturn(result(StrategyConfigCreateResult.Outcome.CREATED, 1L));
+    CreateTenantController noGuard =
+        new CreateTenantController(
+            workflowClient, new TenantContext("dev", STRATEGY, OPERATOR), Optional.empty());
+
+    noGuard.create(reqWithOperator(OPERATOR), TENANT, STRATEGY, liveBody("999999999"));
+
+    assertThat(createdConfig().getBrokerAccountId()).isNull();
+  }
+
+  private static TenantCreateRequest liveBody(String callerAccount) {
+    StrategyConfig cfg = new StrategyConfig();
+    cfg.setBrokerTarget(StrategyConfig.BrokerTarget.ALPACA_LIVE);
+    cfg.setBrokerAccountId(callerAccount);
+    return new TenantCreateRequest(cfg, "corr-live", null);
+  }
+
+  private StrategyConfig createdConfig() {
+    org.mockito.ArgumentCaptor<StrategyConfigCreateRequest> captor =
+        org.mockito.ArgumentCaptor.forClass(StrategyConfigCreateRequest.class);
+    verify(stub).create(captor.capture());
+    return captor.getValue().getConfig();
   }
 
   @Test

@@ -180,12 +180,74 @@ class StrategyConfigWriterTest {
   }
 
   @Test
-  void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
-    // P4-c: broker_account_id routes real orders to a brokerage account; a runtime change would
-    // re-route live orders. DANGEROUS (must equal stored): setting it from null is rejected.
+  void allowsBrokerAccountIdSetFromNull_871() {
+    // #871: onboarding never wrote broker_account_id, and the writer refused null→value, so a row
+    // created without it could never acquire it — a shared broker_target then fail-closed boot
+    // estate-wide. Populating an ABSENT account id re-routes nothing (there is no prior account).
     StrategyConfig stored = liveSafeStored();
+    assertThat(stored.getBrokerAccountId()).isNull();
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId("380083820");
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+    verify(audit).log(any());
+  }
+
+  /** A blank stored id is absent too — the same rule the gateway's bind and the boot check use. */
+  @Test
+  void allowsBrokerAccountIdSetFromBlank_871() {
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("  ");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId("380083820");
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+  }
+
+  @Test
+  void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
+    // P4-c: once set, broker_account_id routes real orders to a brokerage account; changing it
+    // would re-route live orders. Immutable once set.
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("380083820");
     StrategyConfig next = copy(stored);
     next.setBrokerAccountId("847309116");
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("broker_account_id");
+    verify(audit, never()).log(any());
+  }
+
+  @Test
+  void rejectsBrokerAccountIdCleared() {
+    // Clearing a set account id would re-open the #871 boot hazard. Immutable once set.
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("380083820");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId(null);
+    assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
+        .isInstanceOf(DangerousFieldChangeRejected.class)
+        .hasMessageContaining("broker_account_id");
+    verify(audit, never()).log(any());
+  }
+
+  /**
+   * #871: the boot invariant exempts explicitly DISABLED rows, which is sound only because a
+   * null-id row can then only be one that was never armed: every arm route binds the verified id,
+   * and a set id can never be cleared — not even on a disabled row, or a strategy that traded could
+   * be disabled, cleared and slip past the check while still holding positions.
+   */
+  @Test
+  void rejectsBrokerAccountIdCleared_evenOnADisabledRow_871() {
+    StrategyConfig stored = liveSafeStored();
+    stored.setEnabled(false);
+    stored.setBrokerAccountId("380083820");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId(null);
     assertThatThrownBy(() -> writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice"))
         .isInstanceOf(DangerousFieldChangeRejected.class)
         .hasMessageContaining("broker_account_id");

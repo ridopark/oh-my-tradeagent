@@ -1,12 +1,15 @@
 package com.ohmytradeagent.apigateway.web;
 
 import com.ohmytradeagent.apigateway.config.ExecTargetProperties;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -58,6 +61,17 @@ public class VerifiedAccountGuard {
     FAULT
   }
 
+  /** The decision plus, on {@link Decision#ALLOW} only, the exec-verified account id. */
+  public record Verification(Decision decision, String account) {
+    public static Verification of(Decision decision) {
+      return new Verification(decision, null);
+    }
+
+    public static Verification allowed(String account) {
+      return new Verification(Decision.ALLOW, account);
+    }
+  }
+
   private final RestClient execRestClient;
   private final ExecTargetProperties execTargets;
 
@@ -72,7 +86,7 @@ public class VerifiedAccountGuard {
    * brokerTarget} is the STORED value (a DANGEROUS field the writer pins, so a proposed edit cannot
    * drift it) — never a caller-supplied one for the operator route.
    */
-  public Decision evaluate(String tenant, String brokerTarget) {
+  public Verification evaluate(String tenant, String brokerTarget) {
     String provider = providerOf(brokerTarget);
     if (provider == null) {
       // Bare / unknown target (not a <provider>-{paper,live}) — cannot be verified. Fail closed.
@@ -80,7 +94,7 @@ public class VerifiedAccountGuard {
           "arm-guard: refusing unsupported broker_target for tenant={} broker_target={}",
           tenant,
           brokerTarget);
-      return Decision.REJECT_UNSUPPORTED_TARGET;
+      return Verification.of(Decision.REJECT_UNSUPPORTED_TARGET);
     }
     // Route to the exec pod that OWNS this broker_target. FAIL CLOSED (no HTTP call, NO fallback to
     // the shared paper base) when the broker_target is absent from exec.targets — a -live target
@@ -92,7 +106,7 @@ public class VerifiedAccountGuard {
               + " (no verify call, no paper fallback)",
           brokerTarget,
           tenant);
-      return Decision.REJECT_UNSUPPORTED_TARGET;
+      return Verification.of(Decision.REJECT_UNSUPPORTED_TARGET);
     }
     try {
       return execRestClient
@@ -105,26 +119,26 @@ public class VerifiedAccountGuard {
               (request, response) -> {
                 HttpStatusCode status = response.getStatusCode();
                 if (!status.is2xxSuccessful()) {
-                  return Decision.FAULT;
+                  return Verification.of(Decision.FAULT);
                 }
                 Map<?, ?> body = response.bodyTo(Map.class);
                 if (body == null) {
-                  return Decision.FAULT;
+                  return Verification.of(Decision.FAULT);
                 }
                 Object verified = body.get("verified");
                 if (Boolean.FALSE.equals(verified)) {
-                  return Decision.REJECT_UNVERIFIED;
+                  return Verification.of(Decision.REJECT_UNVERIFIED);
                 }
                 if (!Boolean.TRUE.equals(verified)) {
                   // missing / non-boolean verified flag → malformed → fail-closed.
-                  return Decision.FAULT;
+                  return Verification.of(Decision.FAULT);
                 }
                 Object account = body.get("account");
                 if (!(account instanceof String s) || s.isBlank()) {
                   // verified:true but no bound account → treat as unverifiable (fail-closed).
-                  return Decision.FAULT;
+                  return Verification.of(Decision.FAULT);
                 }
-                return Decision.ALLOW;
+                return Verification.allowed(s.trim());
               },
               false);
     } catch (RuntimeException e) {
@@ -135,7 +149,53 @@ public class VerifiedAccountGuard {
           tenant,
           provider,
           e.getClass().getName());
-      return Decision.FAULT;
+      return Verification.of(Decision.FAULT);
+    }
+  }
+
+  /**
+   * #871: the {@code broker_account_id} an ARMING write persists. An absent stored id takes the
+   * exec-verified account — onboarding never wrote one, and on a shared {@code broker_target} a
+   * missing id fail-closes orchestrator boot for every tenant. A stored id must equal the verified
+   * one: a mismatch refuses to arm (422 {@code REJECTED_ACCOUNT_MISMATCH}) rather than trading on
+   * an account the credentials do not authenticate. The writer keeps a set id immutable.
+   */
+  static String bindAccount(String storedAccount, String verifiedAccount) {
+    String stored = storedAccount == null || storedAccount.isBlank() ? null : storedAccount.trim();
+    if (stored == null) {
+      return verifiedAccount;
+    }
+    if (!stored.equals(verifiedAccount)) {
+      log.warn(
+          "arm-guard: refusing to arm — stored broker_account_id={} but the verified account is {}",
+          stored,
+          verifiedAccount);
+      throw new AccountMismatchException(stored, verifiedAccount);
+    }
+    return stored;
+  }
+
+  /** A stored {@code broker_account_id} that the credentials do not authenticate (#871). */
+  static final class AccountMismatchException extends RuntimeException {
+    private final String stored;
+    private final String verified;
+
+    AccountMismatchException(String stored, String verified) {
+      super("REJECTED_ACCOUNT_MISMATCH");
+      this.stored = stored;
+      this.verified = verified;
+    }
+
+    /**
+     * 422 naming both ids, so the operator sees the cause rather than a generic refusal. Account
+     * ids are not secrets — the onboard flow already shows the verified one.
+     */
+    ResponseEntity<Map<String, Object>> toResponse() {
+      Map<String, Object> body = new LinkedHashMap<>();
+      body.put("status", "REJECTED_ACCOUNT_MISMATCH");
+      body.put("stored_broker_account_id", stored);
+      body.put("verified_broker_account_id", verified);
+      return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
     }
   }
 

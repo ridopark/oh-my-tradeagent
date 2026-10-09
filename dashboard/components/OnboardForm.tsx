@@ -15,6 +15,9 @@ export interface OnboardActionResult {
   newVersion?: number;
   // Set only on a successful invite (step 4) — the invite's expiry, shown to the operator.
   expiresAt?: string;
+  // #871: set only on an enable refused because the strategy's stored broker_account_id is not the
+  // account the verified keys authenticate. Both ids are non-secret (the keys step shows one).
+  accountMismatch?: { storedAccountId: string; verifiedAccountId: string };
 }
 
 // An existing tenant for the identity dropdowns: the strategies it already has (subtracted from the
@@ -93,6 +96,15 @@ function enableMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string } 
     return {
       tone: "ok",
       msg: `Strategy armed (version ${r.newVersion ?? "updated"}). The tenant is now enabled.`,
+    };
+  }
+  if (r.accountMismatch) {
+    return {
+      tone: "err",
+      msg:
+        `Not armed — the strategy is bound to broker account ${r.accountMismatch.storedAccountId}, ` +
+        `but the verified keys authenticate account ${r.accountMismatch.verifiedAccountId}. ` +
+        "The bound account cannot be changed; re-enter keys for the bound account.",
     };
   }
   switch (r.status) {

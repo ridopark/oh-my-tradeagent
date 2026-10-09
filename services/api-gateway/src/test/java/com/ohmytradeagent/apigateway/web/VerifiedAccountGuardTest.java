@@ -129,37 +129,39 @@ class VerifiedAccountGuardTest {
   @Test
   void paper_verifiedTrueWithAccount_allows() {
     paper.respond(200, "{\"verified\":true,\"account\":\"PA3FKGPFYPLH\"}");
-    assertThat(guard().evaluate("acme", PAPER_TARGET))
+    assertThat(guard().evaluate("acme", PAPER_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.ALLOW);
-    assertThat(paper.hits.get()).isEqualTo(1);
+    // #871: ALLOW carries the verified account, so the arm routes can bind broker_account_id.
+    assertThat(guard().evaluate("acme", PAPER_TARGET).account()).isEqualTo("PA3FKGPFYPLH");
+    assertThat(paper.hits.get()).isEqualTo(2);
     assertThat(live.hits.get()).isEqualTo(0);
   }
 
   @Test
   void paper_verifiedFalse_rejectsUnverified() {
     paper.respond(200, "{\"verified\":false}");
-    assertThat(guard().evaluate("acme", PAPER_TARGET))
+    assertThat(guard().evaluate("acme", PAPER_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED);
   }
 
   @Test
   void paper_serverError_isFault() {
     paper.respond(500, "{\"error\":\"boom\"}");
-    assertThat(guard().evaluate("acme", PAPER_TARGET))
+    assertThat(guard().evaluate("acme", PAPER_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
   @Test
   void paper_missingVerifiedField_isFault() {
     paper.respond(200, "{\"account\":\"PA3FKGPFYPLH\"}");
-    assertThat(guard().evaluate("acme", PAPER_TARGET))
+    assertThat(guard().evaluate("acme", PAPER_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
   @Test
   void paper_verifiedTrueButBlankAccount_isFault() {
     paper.respond(200, "{\"verified\":true,\"account\":\"  \"}");
-    assertThat(guard().evaluate("acme", PAPER_TARGET))
+    assertThat(guard().evaluate("acme", PAPER_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
@@ -169,7 +171,8 @@ class VerifiedAccountGuardTest {
     paper = null; // avoid double-stop in tearDown
     assertThat(
             guard(targets(Map.of(PAPER_TARGET, "http://127.0.0.1:1", LIVE_TARGET, live.baseUrl)))
-                .evaluate("acme", PAPER_TARGET))
+                .evaluate("acme", PAPER_TARGET)
+                .decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
@@ -179,7 +182,7 @@ class VerifiedAccountGuardTest {
   void live_verifiedTrueWithAccount_allows_routedToLivePod() {
     // The incident-reproduction case: a verified LIVE account must ALLOW, read from the LIVE pod.
     live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
-    assertThat(guard().evaluate("acme", LIVE_TARGET))
+    assertThat(guard().evaluate("acme", LIVE_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.ALLOW);
     // Read from the live pod, NEVER the shared paper base.
     assertThat(live.hits.get()).isEqualTo(1);
@@ -189,7 +192,7 @@ class VerifiedAccountGuardTest {
   @Test
   void live_verifiedFalse_rejectsUnverified() {
     live.respond(200, "{\"verified\":false}");
-    assertThat(guard().evaluate("acme", LIVE_TARGET))
+    assertThat(guard().evaluate("acme", LIVE_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNVERIFIED);
     assertThat(paper.hits.get()).isEqualTo(0);
   }
@@ -197,7 +200,7 @@ class VerifiedAccountGuardTest {
   @Test
   void live_verifiedTrueButBlankAccount_isFault() {
     live.respond(200, "{\"verified\":true,\"account\":\"\"}");
-    assertThat(guard().evaluate("acme", LIVE_TARGET))
+    assertThat(guard().evaluate("acme", LIVE_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
@@ -207,7 +210,8 @@ class VerifiedAccountGuardTest {
     live = null; // avoid double-stop in tearDown
     assertThat(
             guard(targets(Map.of(PAPER_TARGET, paper.baseUrl, LIVE_TARGET, "http://127.0.0.1:1")))
-                .evaluate("acme", LIVE_TARGET))
+                .evaluate("acme", LIVE_TARGET)
+                .decision())
         .isEqualTo(VerifiedAccountGuard.Decision.FAULT);
   }
 
@@ -219,7 +223,7 @@ class VerifiedAccountGuardTest {
     // closed,
     // NO http call, NEVER a fallback to the shared paper base.
     live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
-    assertThat(guard().evaluate("acme", "tradier-live"))
+    assertThat(guard().evaluate("acme", "tradier-live").decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
     assertThat(paper.hits.get()).isEqualTo(0);
     assertThat(live.hits.get()).isEqualTo(0);
@@ -228,7 +232,7 @@ class VerifiedAccountGuardTest {
   @Test
   void unknownSuffixTarget_rejectsUnsupported_withoutAnyExecCall() {
     // alpaca-foo is neither -paper nor -live → not a supported target → fail closed, no http call.
-    assertThat(guard().evaluate("acme", "alpaca-foo"))
+    assertThat(guard().evaluate("acme", "alpaca-foo").decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
     assertThat(paper.hits.get()).isEqualTo(0);
     assertThat(live.hits.get()).isEqualTo(0);
@@ -239,7 +243,7 @@ class VerifiedAccountGuardTest {
     // An exec.targets entry present but BLANK for the tenant's broker_target → fail closed (the
     // execBase.isBlank() branch), NO http call, NEVER a fallback to the shared paper base.
     live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
-    assertThat(guard(targets(Map.of(LIVE_TARGET, ""))).evaluate("acme", LIVE_TARGET))
+    assertThat(guard(targets(Map.of(LIVE_TARGET, ""))).evaluate("acme", LIVE_TARGET).decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
     assertThat(paper.hits.get()).isEqualTo(0);
     assertThat(live.hits.get()).isEqualTo(0);
@@ -250,7 +254,7 @@ class VerifiedAccountGuardTest {
     // Stored broker_target "Alpaca-Live" (mixed case) with only a lowercase alpaca-live key → the
     // match is case-SENSITIVE, so it must fail closed (no http call), NEVER fall back to paper.
     live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
-    assertThat(guard().evaluate("acme", "Alpaca-Live"))
+    assertThat(guard().evaluate("acme", "Alpaca-Live").decision())
         .isEqualTo(VerifiedAccountGuard.Decision.REJECT_UNSUPPORTED_TARGET);
     assertThat(paper.hits.get()).isEqualTo(0);
     assertThat(live.hits.get()).isEqualTo(0);
@@ -261,7 +265,7 @@ class VerifiedAccountGuardTest {
     // Stored broker_target "alpaca-live " (trailing space) with the map keyed on "alpaca-live" →
     // the .trim() on the lookup routes to the LIVE pod (ALLOW), never the shared paper base.
     live.respond(200, "{\"verified\":true,\"account\":\"847309116\"}");
-    assertThat(guard().evaluate("acme", "alpaca-live "))
+    assertThat(guard().evaluate("acme", "alpaca-live ").decision())
         .isEqualTo(VerifiedAccountGuard.Decision.ALLOW);
     assertThat(live.hits.get()).isEqualTo(1);
     assertThat(paper.hits.get()).isEqualTo(0);

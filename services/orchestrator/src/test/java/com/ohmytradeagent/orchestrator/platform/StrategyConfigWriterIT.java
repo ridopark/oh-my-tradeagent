@@ -291,10 +291,13 @@ class StrategyConfigWriterIT {
   @Test
   void noAuditRowOnRejection() throws Exception {
     StrategyConfig stored = liveSafeConfig("dev", "copytrade-v1");
+    stored.setBrokerAccountId("acct-1");
     seedRow("dev", "copytrade-v1", stored, 1L);
 
     StrategyConfig next = copy(stored);
-    next.setBrokerAccountId("acct-999"); // a still-DANGEROUS change (null -> value), keeps -live
+    // A still-DANGEROUS change that keeps -live: re-pointing a SET account id (#871 made only
+    // null -> value settable).
+    next.setBrokerAccountId("acct-999");
 
     StrategyConfigWriter writer = new StrategyConfigWriter(dsl, om, audit, armedTenantRegistry());
     assertThatThrownBy(() -> writer.update("dev", "copytrade-v1", next, 1L, "alice"))

@@ -297,6 +297,76 @@ class CrossTenantBrokerTargetValidatorTest {
         .hasMessageContaining("paper_jinchiul");
   }
 
+  // ---- #871: a disabled row without an account id ----
+
+  /**
+   * The 2026-09-30 outage shape: four tenants share alpaca-live and one ARMED row declares no
+   * broker_account_id. Still fails boot closed — an armed strategy that cannot prove account
+   * isolation must not trade.
+   */
+  @Test
+  void sharedModeStillRejectsArmedTenantWithoutAccount_871() {
+    StrategyRegistry registry = sharedLiveRegistry(null);
+
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry, true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("prod-soonwon")
+        .hasMessageContaining("declares no broker_account_id");
+  }
+
+  /** Same with an explicit enabled=true: only rows that cannot trade are exempt. */
+  @Test
+  void sharedModeStillRejectsExplicitlyEnabledTenantWithoutAccount_871() {
+    StrategyRegistry registry = sharedLiveRegistry(true);
+
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry, true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("prod-soonwon");
+  }
+
+  /**
+   * #871: a row created but not yet enabled (or an onboarding abandoned before enable) has no
+   * verified account to declare. It opens nothing, and every arm route now binds the verified id,
+   * so it no longer fail-closes boot for every tenant on the broker_target.
+   */
+  @Test
+  void sharedModeIgnoresExplicitlyDisabledTenantWithoutAccount_871() {
+    StrategyRegistry registry = sharedLiveRegistry(false);
+
+    assertThatCode(() -> CrossTenantBrokerTargetValidator.validate(registry, true))
+        .doesNotThrowAnyException();
+  }
+
+  /** Strict mode is unchanged: a disabled second tenant on a broker_target still fails. */
+  @Test
+  void strictModeStillCountsDisabledTenants() {
+    StrategyRegistry registry = sharedLiveRegistry(false);
+
+    assertThatThrownBy(() -> CrossTenantBrokerTargetValidator.validate(registry, false))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  /** prod_real + prod-kipark carry accounts; prod-soonwon has none and {@code enabled} as given. */
+  private static StrategyRegistry sharedLiveRegistry(Boolean soonwonEnabled) {
+    StrategyRegistry registry = mock(StrategyRegistry.class);
+    when(registry.list())
+        .thenReturn(
+            List.of(
+                new TenantStrategy("prod_real", "copytrade-v1"),
+                new TenantStrategy("prod-kipark", "copytrade-v1"),
+                new TenantStrategy("prod-soonwon", "copytrade-v1")));
+    StrategyConfig real = configWithTarget("alpaca-live");
+    real.setBrokerAccountId("847309116");
+    StrategyConfig kipark = configWithTarget("alpaca-live");
+    kipark.setBrokerAccountId("313392388");
+    StrategyConfig soonwon = configWithTarget("alpaca-live");
+    soonwon.setEnabled(soonwonEnabled);
+    when(registry.get("prod_real", "copytrade-v1")).thenReturn(real);
+    when(registry.get("prod-kipark", "copytrade-v1")).thenReturn(kipark);
+    when(registry.get("prod-soonwon", "copytrade-v1")).thenReturn(soonwon);
+    return registry;
+  }
+
   private static StrategyConfig configWithTarget(String brokerTarget) {
     StrategyConfig cfg = new StrategyConfig();
     cfg.setBrokerTarget(StrategyConfig.BrokerTarget.fromValue(brokerTarget));
