@@ -2,6 +2,7 @@ package com.ohmytradeagent.exec.broker.alpaca.dto;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import java.math.BigDecimal;
 
 /**
@@ -38,11 +39,14 @@ import java.math.BigDecimal;
 public record AlpacaAccountResponse(
     @JsonProperty("equity") BigDecimal equity,
     @JsonProperty("cash") BigDecimal cash,
-    @JsonProperty("options_buying_power") BigDecimal optionsBuyingPower,
+    @JsonDeserialize(using = LenientNumbers.LenientBigDecimal.class)
+        @JsonProperty("options_buying_power")
+        BigDecimal optionsBuyingPower,
     @JsonProperty("buying_power") BigDecimal buyingPower,
     @JsonProperty("pattern_day_trader") Boolean patternDayTrader,
     @JsonProperty("daytrade_count") Integer daytradeCount,
-    @JsonProperty("multiplier") BigDecimal multiplier,
+    @JsonDeserialize(using = LenientNumbers.LenientBigDecimal.class) @JsonProperty("multiplier")
+        BigDecimal multiplier,
     /**
      * Prior market-close net-liquidation equity (Alpaca {@code /v2/account 'last_equity'}). The
      * live intraday "today" P&L on the dashboard is {@code equity - last_equity}. Informational
@@ -50,6 +54,19 @@ public record AlpacaAccountResponse(
      * simply leaves the downstream {@code today_pl} unavailable (never fabricated).
      */
     @JsonProperty("last_equity") BigDecimal lastEquity,
+    /**
+     * Issue #874: informational funding detail; see {@code OptionsBroker.FundingDetail}. Lenient
+     * (null on a malformed value, #942 R1) like options_buying_power / multiplier above.
+     */
+    @JsonDeserialize(using = LenientNumbers.LenientInteger.class)
+        @JsonProperty("options_approved_level")
+        Integer optionsApprovedLevel,
+    @JsonDeserialize(using = LenientNumbers.LenientInteger.class)
+        @JsonProperty("options_trading_level")
+        Integer optionsTradingLevel,
+    @JsonDeserialize(using = LenientNumbers.LenientBigDecimal.class)
+        @JsonProperty("pending_transfer_in")
+        BigDecimal pendingTransferIn,
     /**
      * Informational brokerage account identity for the tenant dashboard (Alpaca {@code
      * account_number}). NOT a credential and NOT used by any gate.

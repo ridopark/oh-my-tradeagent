@@ -766,7 +766,19 @@ public class AlpacaPaperBroker implements OptionsBroker {
     // missing value is NOT a fail-closed breach: pass it through as-is (possibly null) and let the
     // dashboard degrade "today" to the last completed daily bar rather than fabricate an intraday
     // P&L.
-    return new AccountSummary(resp.equity(), resp.cash(), resp.accountNumber(), resp.lastEquity());
+    // #874: funding detail is likewise informational (explains a broker funding rejection), so its
+    // fields pass through as-is, each possibly null — never a fail-closed breach.
+    return new AccountSummary(
+        resp.equity(),
+        resp.cash(),
+        resp.accountNumber(),
+        resp.lastEquity(),
+        new FundingDetail(
+            resp.optionsBuyingPower(),
+            resp.optionsApprovedLevel(),
+            resp.optionsTradingLevel(),
+            resp.multiplier(),
+            resp.pendingTransferIn()));
   }
 
   /**

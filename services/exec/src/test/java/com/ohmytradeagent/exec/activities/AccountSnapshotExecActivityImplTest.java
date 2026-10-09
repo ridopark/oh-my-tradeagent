@@ -164,6 +164,58 @@ class AccountSnapshotExecActivityImplTest {
         .brokerFor(BrokerClientRegistry.ACCOUNT_LEVEL, "alpaca");
   }
 
+  // #874: the funding detail that explains a broker "insufficient options buying power" rejection
+  // is surfaced on the snapshot. Observability only — no gate reads it.
+  @Test
+  void accountSnapshot_surfacesFundingDetail() {
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getAccount())
+        .thenReturn(
+            new OptionsBroker.AccountSummary(
+                new BigDecimal("1000.00"),
+                new BigDecimal("1000.00"),
+                "PA3ER05HLHMB",
+                null,
+                new OptionsBroker.FundingDetail(
+                    BigDecimal.ZERO, 2, 1, BigDecimal.ONE, new BigDecimal("1000.00"))));
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
+    AccountSnapshotRequest req = new AccountSnapshotRequest();
+    req.setSchemaVersion(1L);
+    req.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
+
+    AccountSnapshotResult result = impl.accountSnapshot(req);
+
+    assertThat(result.getOptionsBuyingPower()).isEqualByComparingTo("0");
+    assertThat(result.getOptionsApprovedLevel()).isEqualTo(2L);
+    assertThat(result.getOptionsTradingLevel()).isEqualTo(1L);
+    assertThat(result.getMultiplier()).isEqualByComparingTo("1");
+    assertThat(result.getPendingTransferIn()).isEqualByComparingTo("1000.00");
+  }
+
+  // A broker with no funding detail (stub / future adapter) leaves every optional field absent.
+  @Test
+  void accountSnapshot_noFundingDetail_leavesFieldsAbsent() {
+    OptionsBroker broker = mock(OptionsBroker.class);
+    when(broker.getAccount())
+        .thenReturn(new OptionsBroker.AccountSummary(BigDecimal.ONE, BigDecimal.TEN, null));
+    AccountSnapshotExecActivityImpl impl =
+        new AccountSnapshotExecActivityImpl(
+            new com.ohmytradeagent.exec.broker.FixedBrokerClientRegistry(broker));
+    AccountSnapshotRequest req = new AccountSnapshotRequest();
+    req.setSchemaVersion(1L);
+    req.setBrokerTarget(AccountSnapshotRequest.BrokerTarget.ALPACA_PAPER);
+
+    AccountSnapshotResult result = impl.accountSnapshot(req);
+
+    assertThat(result.getOptionsBuyingPower()).isNull();
+    assertThat(result.getOptionsApprovedLevel()).isNull();
+    assertThat(result.getOptionsTradingLevel()).isNull();
+    assertThat(result.getMultiplier()).isNull();
+    assertThat(result.getPendingTransferIn()).isNull();
+  }
+
   // P4-c-b behavior-preserving proof: under a tenant-ignoring source (env-fallback returns ONE
   // account for every key), the cash is identical whether tenant_id is set or absent — the live
   // single-tenant cap decision is unchanged.
