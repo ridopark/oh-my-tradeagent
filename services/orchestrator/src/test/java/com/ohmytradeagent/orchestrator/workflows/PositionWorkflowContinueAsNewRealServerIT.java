@@ -369,6 +369,7 @@ class PositionWorkflowContinueAsNewRealServerIT {
     System.out.printf(
         "[IT-752] redelivery at carried-run start: placements=%d (2 = window hit) %s%n",
         orders.size(), orders);
+    assertThat(orders).as("the STC was placed at least once").isNotEmpty();
     assertThat(placed.stream().filter(i -> i.getIntentKey().contains(":exit:sig-race")))
         .extracting(OrderIntent::getIntentKey)
         .as("every placement for one STC must share one intent key")

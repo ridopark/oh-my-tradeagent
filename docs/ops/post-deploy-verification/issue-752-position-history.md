@@ -68,6 +68,11 @@ Every test uses a fresh tenant id, so the Visibility queries see only its workfl
 **Result: 8/8 pass on each of 4 consecutive full runs.** Without the property
 the class is skipped, not failed (CI never runs it).
 
+Two limits on what the IT enforces. The Visibility window figures are
+measurements printed by the test, not asserted bounds. The "nothing more is
+placed" checks after a redelivery are negative assertions over a 2-3 s wait, so
+they are best-effort: a redelivery processed later than that would be missed.
+
 ### A1: search attributes on the carried run, and the Visibility window
 
 **Expected:** the carried run carries `TenantStrategy` and `ContractSymbol`; any
