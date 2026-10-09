@@ -759,6 +759,14 @@ export interface Portfolio {
     last_equity?: string | number | null;
     today_pl?: string | number | null;
     account_number?: string;
+    // #942 funding detail (Alpaca /v2/account), informational. Each is null/absent when the exec
+    // predates #942 or Alpaca sent it garbled — hide it then, never show 0. multiplier 1 = cash
+    // account (T+1 settlement), 2/4 = margin. Levels: 1 covered, 2 long calls/puts, 3 spreads.
+    options_buying_power?: string | number | null;
+    options_approved_level?: number | null;
+    options_trading_level?: number | null;
+    multiplier?: string | number | null;
+    pending_transfer_in?: string | number | null;
   }[];
   account_equity_scope: string;
   unrealized_pnl: null;

@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import { auth } from "@/auth";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
+import { FundsRejectionBanner } from "@/components/FundingBanners";
+import { etDateOf, latestFundsRejection } from "@/lib/funding";
 import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
@@ -391,6 +393,13 @@ export default async function LivePage() {
     : [];
 
   const count = portfolio.open_positions_count;
+  // A broker refused an order today for insufficient options buying power (the strip's last
+  // ACTIVITY_LIMIT orders, so it clears once newer orders go through). Paired with the account's
+  // funding detail (#942) so the banner says why.
+  const fundsRejection = latestFundsRejection(orders, etDateOf(new Date().toISOString()) ?? "");
+  const fundsRejectionAccount = fundsRejection
+    ? portfolio.account_equity.find((a) => a.broker_target === fundsRejection.broker_target)
+    : undefined;
   const positionsDegraded = portfolio.open_positions_degraded === true;
 
   // Holdings totals for the section header. Cost = the backend's authoritative cost-basis sum
@@ -581,6 +590,10 @@ export default async function LivePage() {
             account-level (shared) value, not your tenant&apos;s slice.
           </p>
         </div>
+
+        {fundsRejection && (
+          <FundsRejectionBanner order={fundsRejection} account={fundsRejectionAccount} />
+        )}
 
         <LiveAccount
           accountValue={accountValue}

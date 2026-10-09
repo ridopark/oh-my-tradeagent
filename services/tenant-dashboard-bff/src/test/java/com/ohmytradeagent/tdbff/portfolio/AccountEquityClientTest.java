@@ -49,7 +49,35 @@ class AccountEquityClientTest {
     // last_equity (prior market close) carries through end-to-end so the header can compute the
     // live intraday "today" figure (equity - last_equity).
     assertThat(acct.lastEquity()).isEqualByComparingTo(new BigDecimal("10250.00"));
+    // #942 funding fields absent on this snapshot -> null, not 0.
+    assertThat(acct.optionsBuyingPower()).isNull();
+    assertThat(acct.optionsApprovedLevel()).isNull();
     verify(stub, never()).cancel();
+  }
+
+  @Test
+  void carriesTheFundingDetailFromTheSnapshot() throws Exception {
+    WorkflowClient client = mock(WorkflowClient.class);
+    WorkflowStub stub = stubReturning(client);
+    AccountSnapshotResult result = new AccountSnapshotResult();
+    result.setSchemaVersion(1L);
+    result.setEquity(new BigDecimal("5000"));
+    result.setOptionsBuyingPower(new BigDecimal("812.40"));
+    result.setOptionsApprovedLevel(2L);
+    result.setOptionsTradingLevel(1L);
+    result.setMultiplier(BigDecimal.ONE);
+    result.setPendingTransferIn(new BigDecimal("2500"));
+    when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
+        .thenReturn(result);
+
+    var acct =
+        new AccountEquityClient(client, "orchestrator-core").snapshotFor("acme", "alpaca-live");
+
+    assertThat(acct.optionsBuyingPower()).isEqualByComparingTo("812.40");
+    assertThat(acct.optionsApprovedLevel()).isEqualTo(2L);
+    assertThat(acct.optionsTradingLevel()).isEqualTo(1L);
+    assertThat(acct.multiplier()).isEqualByComparingTo("1");
+    assertThat(acct.pendingTransferIn()).isEqualByComparingTo("2500");
   }
 
   @Test
