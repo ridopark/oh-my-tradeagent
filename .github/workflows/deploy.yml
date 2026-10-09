@@ -415,6 +415,38 @@ jobs:
           chmod 600 "$RUNNER_TEMP/.kube/config"
           echo "KUBECONFIG=$RUNNER_TEMP/.kube/config" >> "$GITHUB_ENV"
 
+      - name: Verify :latest is current for ${{ matrix.service }}
+        # #951: `:latest` is whichever build pushed LAST, not the newest commit — re-running an old
+        # build after a newer merge re-tags it backwards, and this roll would then deploy the
+        # older code. Runs after approval, immediately before apply/restart, against the images
+        # the live Deployment will actually pull. Fails the roll (nothing applied, nothing
+        # restarted) unless every image's org.opencontainers.image.revision has no build-relevant
+        # commit after it on main. No auto-rebuild: fail and tell.
+        #
+        # A STALE verdict while a newer build is still in flight is expected and harmless: that
+        # build's own deploy run rolls it, and #842's baseline (since the last SUCCESSFUL deploy)
+        # carries this run's changes into it. UNVERIFIABLE means the image has no revision label
+        # (pushed before #951) or a registry/GitHub read failed — fail closed.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "::error::python3 is not available on this runner — cannot verify the image is current; refusing to roll."
+            exit 1
+          fi
+          images=$(kubectl -n "$NAMESPACE" get deployment/${{ matrix.service }} \
+            -o jsonpath='{.spec.template.spec.initContainers[*].image} {.spec.template.spec.containers[*].image}')
+          if [ -z "$(echo "$images" | tr -d '[:space:]')" ]; then
+            echo "::error::could not read the images of deployment/${{ matrix.service }}; refusing to roll."
+            exit 1
+          fi
+          # shellcheck disable=SC2086  # word-splitting the image list is intended
+          if ! python3 scripts/ops/check_image_current.py $images; then
+            echo "::error::${{ matrix.service }}: an image is NOT built from current main (see above) — not rolled. Re-run 'Build and push images' on main (workflow_dispatch), then redeploy."
+            exit 1
+          fi
+
       - name: Apply manifest for ${{ matrix.service }}
         # Picks up env-var / resource / image-tag changes from git.
         # Prior to this step, deploy.yml only ran `kubectl rollout restart`,
