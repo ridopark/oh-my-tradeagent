@@ -240,10 +240,42 @@ class PortfolioServiceTest {
     assertThat(body.get("open_positions_count")).isEqualTo(0);
     assertThat((List<Map<String, Object>>) body.get("open_positions")).isEmpty();
     assertThat(body.get("sum_open_notional")).isEqualTo(BigDecimal.ZERO);
+    // ...but flagged, so the dashboard cannot mistake the stall for a flat book (#934).
+    assertThat(body.get("open_positions_degraded")).isEqualTo(true);
     // Equity sub-read was fast -> unaffected.
     var equity = (List<Map<String, Object>>) body.get("account_equity");
     assertThat(equity).hasSize(1);
     assertThat(equity.get(0)).containsEntry("equity", new BigDecimal("100"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void positionsReadThatThrowsIsFlaggedDegradedNotShownAsAnEmptyBook() {
+    // PositionsReader's whole-read deadline (#933) throws rather than returning a partial book;
+    // that throw must surface as the degraded flag, not vanish into [].
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenThrow(new IllegalStateException("open-positions read exceeded 15s tenant=acme"));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    assertThat(body.get("open_positions_degraded")).isEqualTo(true);
+    assertThat((List<Map<String, Object>>) body.get("open_positions")).isEmpty();
+  }
+
+  @Test
+  void aGenuinelyEmptyBookIsNotFlaggedDegraded() {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenReturn(List.of());
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    assertThat(body.get("open_positions_degraded")).isEqualTo(false);
+    assertThat(body.get("open_positions_count")).isEqualTo(0);
   }
 
   @Test

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { auth } from "@/auth";
 import { revalidatePath } from "next/cache";
 import { Nav } from "@/components/Nav";
+import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
@@ -390,6 +391,7 @@ export default async function LivePage() {
     : [];
 
   const count = portfolio.open_positions_count;
+  const positionsDegraded = portfolio.open_positions_degraded === true;
 
   // Holdings totals for the section header. Cost = the backend's authoritative cost-basis sum
   // (sum_open_notional = Σ entry_premium × qty × 100, the same figure the notional-cap gate uses) —
@@ -590,9 +592,9 @@ export default async function LivePage() {
         <section>
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="text-sm font-semibold text-slate-200">
-              Holdings ({count})
+              Holdings ({positionsDegraded ? "?" : count})
             </h2>
-            {count > 0 && (
+            {!positionsDegraded && count > 0 && (
               <span className="text-xs text-slate-400">
                 Cost{" "}
                 <span className="font-medium text-slate-200">
@@ -612,6 +614,16 @@ export default async function LivePage() {
               scrolled sideways — the exact thing this split exists to prevent. At xl the container
               is 1118px and the widest case fits with ~100px to spare. Both branches are
               server-rendered — no JS decides which one you get. */}
+          {positionsDegraded ? (
+            <PositionsUnavailable
+              note={
+                MANUAL_ENTRY_WRITE_ENABLED
+                  ? "Manual entry below cannot warn that you already hold a contract until this clears."
+                  : undefined
+              }
+            />
+          ) : (
+          <>
           <div className="flex flex-col gap-3 xl:hidden">
             {count === 0 ? (
               <p className="text-sm text-slate-400">No open positions.</p>
@@ -637,6 +649,8 @@ export default async function LivePage() {
               rowKey={(row, i) => (row.workflow_id ? String(row.workflow_id) : i)}
             />
           </div>
+          </>
+          )}
         </section>
 
         {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (

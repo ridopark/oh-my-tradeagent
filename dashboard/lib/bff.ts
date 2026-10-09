@@ -733,6 +733,11 @@ export interface Portfolio {
   tenant_id: string;
   trading_day: string;
   open_positions: Position[];
+  /**
+   * True when the BFF's positions read stalled or failed. `open_positions` is then [] and the
+   * count/sum are 0 — NOT an empty book; render them as unknown. Absent on a BFF predating #934.
+   */
+  open_positions_degraded?: boolean;
   open_positions_count: number;
   sum_open_notional: string | number;
   sum_open_notional_basis: string;
