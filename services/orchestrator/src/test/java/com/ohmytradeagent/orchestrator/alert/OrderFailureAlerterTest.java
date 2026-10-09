@@ -84,6 +84,28 @@ class OrderFailureAlerterTest {
   }
 
   @Test
+  void brokerAccountInvariant_duplicatePagesRed_missingPagesYellow() {
+    // #938: the drift check's page. Severity comes from the subject.
+    for (String[] c :
+        new String[][] {{"DUPLICATE_ACCOUNT", "RED"}, {"MISSING_ACCOUNT", "YELLOW"}}) {
+      WebhookClient webhook = mock(WebhookClient.class);
+      OrderFailureAlerter alerter =
+          new OrderFailureAlerter(
+              webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, false);
+      Map<String, Object> subject = new LinkedHashMap<>();
+      subject.put("violation", c[0]);
+      subject.put("severity", c[1]);
+      subject.put("detail", "broker_target='alpaca-live' ...");
+
+      alerter.onAuditEvent(event("BrokerAccountInvariantViolated", null, subject));
+
+      WebhookEmbed embed = capture(webhook);
+      assertThat(embed.title()).contains(c[0]);
+      assertThat(embed.color()).isEqualTo("RED".equals(c[1]) ? 15548997 : AlertColors.YELLOW);
+    }
+  }
+
+  @Test
   void stcNoOpenPositionDoesNotPage_benignNotInFailureKinds() {
     // PLAN-2026-07-21-benign-stc-no-position: Sites A/B (STC after the position was already fully
     // closed) now emit the benign StcNoOpenPosition kind, which is absent from

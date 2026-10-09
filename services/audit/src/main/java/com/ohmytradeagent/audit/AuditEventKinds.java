@@ -458,6 +458,10 @@ public final class AuditEventKinds {
           // #930: the same OCC was auto-adopted 3+ times in one ET day (an adopt/close loop).
           // Pages YELLOW via OrderFailureAlerter, once per OCC per day. Observability-only.
           "ReconAdoptionLoop",
+          // #938: BrokerAccountDriftCheck — the boot broker_account_id invariant is violated by
+          // the current config (the next restart would fail closed). Pages RED (duplicate /
+          // conflict) or YELLOW (missing). Observability-only.
+          "BrokerAccountInvariantViolated",
           // Issue #434: emitted by ReconciliationWorkflowImpl when a recon cycle refuses to
           // auto-adopt a broker remnant whose OCC has physically expired. An expired contract has
           // been dropped by the broker; adopting it would spawn a PositionWorkflow that lingers
