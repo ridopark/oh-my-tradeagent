@@ -70,9 +70,8 @@ class AuditCompletenessVerifierIT {
         DriverManager.getConnection(
             postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
     dsl = DSL.using(conn, SQLDialect.POSTGRES);
-    verifier =
-        new AuditCompletenessVerifier(
-            new JooqAuditEventSource(dsl, OM), new LedgerRederiver(), openPositions);
+    JooqAuditEventSource source = new JooqAuditEventSource(dsl, OM);
+    verifier = new AuditCompletenessVerifier(source, new LedgerRederiver(), openPositions, source);
   }
 
   /**
@@ -201,6 +200,31 @@ class AuditCompletenessVerifierIT {
             .pairsInWindow(day(LocalDate.of(2026, 5, 1)), day(LocalDate.of(2026, 5, 2)));
 
     assertThat(pairs).containsExactly(new AuditPairSource.TenantStrategy("dev", "copytrade-v1"));
+  }
+
+  // #925: the real SQL behind the close-side lookback. Entry on 05-01, hard close on 05-02; the
+  // 05-02 window holds only the close. A same-correlation entry on ANOTHER tenant, and one outside
+  // the lookback, must not count.
+  @Test
+  void hardCloseWithEntryInEarlierWindowIsNotAnOrphan() throws Exception {
+    truncate();
+    insert(audit("corr-multiday", "EntryFilled", ts(0, 0)));
+    insert(audit("corr-multiday", "PositionClosed", day(LocalDate.of(2026, 5, 2)).plusHours(15)));
+    insert(auditFor("other_tenant", "copytrade-v1", "corr-foreign", "EntryFilled", ts(0, 0)));
+    insert(audit("corr-foreign", "PositionClosed", day(LocalDate.of(2026, 5, 2)).plusHours(15)));
+    insert(audit("corr-ancient", "EntryFilled", day(LocalDate.of(2026, 3, 1))));
+    insert(audit("corr-ancient", "PositionClosed", day(LocalDate.of(2026, 5, 2)).plusHours(15)));
+
+    AuditCompletenessVerifier.Report report =
+        verifier.verify(
+            "dev", "copytrade-v1", day(LocalDate.of(2026, 5, 2)), day(LocalDate.of(2026, 5, 3)));
+
+    assertThat(report.divergences())
+        .extracting(Divergence::correlationId)
+        .containsExactlyInAnyOrder("corr-foreign", "corr-ancient");
+    assertThat(report.divergences())
+        .extracting(Divergence::kind)
+        .containsOnly(Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY);
   }
 
   @Test

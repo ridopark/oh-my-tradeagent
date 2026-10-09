@@ -4,6 +4,7 @@ import com.ohmytradeagent.contract.AuditEvent;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +58,7 @@ public final class LedgerRederiver {
   public Rederivation rederive(List<AuditEvent> events) {
     List<Divergence> divergences = new ArrayList<>();
     Set<String> unclosed = new LinkedHashSet<>();
+    Map<String, String> closedWithoutEntry = new LinkedHashMap<>();
     Map<String, List<AuditEvent>> byCorrelation = new HashMap<>();
     for (AuditEvent ev : events) {
       if (ev.getKind() == null) {
@@ -79,9 +81,10 @@ public final class LedgerRederiver {
       byCorrelation.computeIfAbsent(corr, k -> new ArrayList<>()).add(ev);
     }
     for (Map.Entry<String, List<AuditEvent>> entry : byCorrelation.entrySet()) {
-      checkLifecycle(entry.getKey(), entry.getValue(), divergences, unclosed);
+      checkLifecycle(entry.getKey(), entry.getValue(), divergences, unclosed, closedWithoutEntry);
     }
-    return new Rederivation(List.copyOf(divergences), Set.copyOf(unclosed));
+    return new Rederivation(
+        List.copyOf(divergences), Set.copyOf(unclosed), Map.copyOf(closedWithoutEntry));
   }
 
   /**
@@ -92,14 +95,21 @@ public final class LedgerRederiver {
    * @param unclosedLifecycles correlation ids that opened in the window with no terminal close in
    *     it. NOT faults on their own — an open position and a lost close event look identical in the
    *     log, so the caller must consult {@link OpenPositionSource} to tell them apart
+   * @param closedWithoutEntry correlation id → first hard-close event id, for lifecycles that hard
+   *     closed in the window with no entry in it. NOT faults on their own — a multi-day hold's
+   *     entry is in an earlier window, so the caller must consult {@link PriorEntrySource} (#925)
    */
-  public record Rederivation(List<Divergence> divergences, Set<String> unclosedLifecycles) {}
+  public record Rederivation(
+      List<Divergence> divergences,
+      Set<String> unclosedLifecycles,
+      Map<String, String> closedWithoutEntry) {}
 
   private static void checkLifecycle(
       String correlationId,
       List<AuditEvent> events,
       List<Divergence> findings,
-      Set<String> unclosed) {
+      Set<String> unclosed,
+      Map<String, String> closedWithoutEntry) {
     events.sort(
         Comparator.comparing(
             AuditEvent::getOccurredAt,
@@ -132,11 +142,9 @@ public final class LedgerRederiver {
     }
 
     if (hardClosed && !opened) {
-      findings.add(
-          new Divergence(
-              Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY,
-              correlationId,
-              "close_event_id=" + firstHardCloseEventId));
+      // Reported, not judged (#925). The caller looks back for an entry before the window; only a
+      // close with no entry there either is an orphan.
+      closedWithoutEntry.put(correlationId, firstHardCloseEventId);
     }
     if (opened && !anyClosed) {
       // Reported, not judged. The caller asks OpenPositionSource whether this position is still

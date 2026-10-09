@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
  */
 class CompletenessRunnerTest {
 
+  private static final PriorEntrySource NO_PRIOR_ENTRIES = (t, s, ids, f, to) -> Set.of();
   private static final LocalDate FROM = LocalDate.of(2026, 9, 11);
   private static final LocalDate TO = LocalDate.of(2026, 9, 12);
 
@@ -47,7 +48,8 @@ class CompletenessRunnerTest {
             eventsByPair.getOrDefault(tenantId + "/" + strategyId, List.of());
     OpenPositionSource openPositions = (tenantId, strategyId) -> Set.copyOf(openCorrelations);
     AuditCompletenessVerifier verifier =
-        new AuditCompletenessVerifier(source, new LedgerRederiver(), openPositions);
+        new AuditCompletenessVerifier(
+            source, new LedgerRederiver(), openPositions, NO_PRIOR_ENTRIES);
     AuditPairSource pairSource = (from, to) -> pairs;
     return new CompletenessRunner(verifier, pairSource);
   }
@@ -142,7 +144,8 @@ class CompletenessRunnerTest {
         };
     CompletenessRunner runner =
         new CompletenessRunner(
-            new AuditCompletenessVerifier(source, new LedgerRederiver(), flaky), (f, t) -> pairs);
+            new AuditCompletenessVerifier(source, new LedgerRederiver(), flaky, NO_PRIOR_ENTRIES),
+            (f, t) -> pairs);
 
     int exit = runner.run(null, null, FROM, TO);
 
@@ -172,7 +175,8 @@ class CompletenessRunnerTest {
             eventsByPair.getOrDefault(tenantId + "/" + strategyId, List.of());
     CompletenessRunner runner =
         new CompletenessRunner(
-            new AuditCompletenessVerifier(source, new LedgerRederiver(), (t, s) -> Set.of()),
+            new AuditCompletenessVerifier(
+                source, new LedgerRederiver(), (t, s) -> Set.of(), NO_PRIOR_ENTRIES),
             exploding);
 
     assertThat(runner.run("prod_real", "copytrade-v1", FROM, TO))

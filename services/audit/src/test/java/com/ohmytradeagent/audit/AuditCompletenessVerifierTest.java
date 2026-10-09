@@ -44,7 +44,100 @@ class AuditCompletenessVerifierTest {
 
   private static AuditCompletenessVerifier verifier(
       List<AuditEvent> events, OpenPositionSource openPositions) {
-    return new AuditCompletenessVerifier(source(events), new LedgerRederiver(), openPositions);
+    return verifier(events, openPositions, List.of());
+  }
+
+  /**
+   * {@code earlier} stands in for audit_log rows before the window. The fake honours the lookback
+   * range the verifier asks for, so a too-old entry is genuinely out of reach rather than filtered
+   * by the test.
+   */
+  private static AuditCompletenessVerifier verifier(
+      List<AuditEvent> events, OpenPositionSource openPositions, List<AuditEvent> earlier) {
+    PriorEntrySource prior =
+        (tenantId, strategyId, correlationIds, from, to) -> {
+          Set<String> found = new java.util.HashSet<>();
+          for (AuditEvent e : earlier) {
+            if (correlationIds.contains(e.getCorrelationId())
+                && AuditEventKinds.ENTRY_KINDS.contains(e.getKind())
+                && !e.getOccurredAt().isBefore(from)
+                && e.getOccurredAt().isBefore(to)) {
+              found.add(e.getCorrelationId());
+            }
+          }
+          return found;
+        };
+    return new AuditCompletenessVerifier(
+        source(events), new LedgerRederiver(), openPositions, prior);
+  }
+
+  private static AuditEvent eventAt(String correlationId, String kind, OffsetDateTime at) {
+    AuditEvent e = event(correlationId, kind, 0);
+    e.setOccurredAt(at);
+    return e;
+  }
+
+  /**
+   * #925, the real incident shape: SPY 50-contract entry on 09-29, partial exits and the hard close
+   * on 09-30. The 09-30 window holds the close but not the entry. The entry exists one day earlier,
+   * so this is a complete multi-day lifecycle, not an orphan close.
+   */
+  private static List<AuditEvent> closedNextDay(String corr) {
+    return new ArrayList<>(
+        List.of(
+            event(corr, "PartialExitRequested", 30),
+            event(corr, "PartialExitFilled", 31),
+            event(corr, "PartialExitRequested", 120),
+            event(corr, "PartialExitFilled", 121),
+            event(corr, "PositionClosed", 122)));
+  }
+
+  private static List<AuditEvent> enteredOn(String corr, OffsetDateTime day) {
+    return List.of(
+        eventAt(corr, "SignalReceived", day.plusHours(14)),
+        eventAt(corr, "EntryFilled", day.plusHours(14).plusMinutes(1)),
+        eventAt(corr, "PositionEntered", day.plusHours(14).plusMinutes(2)));
+  }
+
+  @Test
+  void hardCloseWhoseEntryIsInTheEarlierWindowIsNotAnOrphan() {
+    String corr = "chat-messages-769797179992571914-1554578484343476305:0";
+
+    AuditCompletenessVerifier.Report report =
+        verifier(closedNextDay(corr), open(), enteredOn(corr, FROM.minusDays(1)))
+            .verify(TENANT, STRATEGY, FROM, TO);
+
+    assertThat(report.divergences()).isEmpty();
+    assertThat(report.passed()).isTrue();
+  }
+
+  @Test
+  void hardCloseWhoseOnlyEntryIsBeyondTheLookbackIsStillAnOrphan() {
+    String corr = "signal-ancient-entry";
+
+    AuditCompletenessVerifier.Report report =
+        verifier(closedNextDay(corr), open(), enteredOn(corr, FROM.minusDays(61)))
+            .verify(TENANT, STRATEGY, FROM, TO);
+
+    assertThat(report.divergences()).hasSize(1);
+    assertThat(report.divergences().get(0).kind())
+        .isEqualTo(Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY);
+    assertThat(report.divergences().get(0).correlationId()).isEqualTo(corr);
+    assertThat(report.passed()).isFalse();
+  }
+
+  @Test
+  void hardCloseWithNoEntryAnywhereIsAnOrphan() {
+    String corr = "signal-orphan";
+    // A prior entry on a DIFFERENT correlation must not rescue this one.
+    AuditCompletenessVerifier.Report report =
+        verifier(closedNextDay(corr), open(), enteredOn("other-signal", FROM.minusDays(1)))
+            .verify(TENANT, STRATEGY, FROM, TO);
+
+    assertThat(report.divergences())
+        .extracting(Divergence::kind)
+        .containsExactly(Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY);
+    assertThat(report.divergences().get(0).detail()).startsWith("close_event_id=");
   }
 
   private static AuditEvent event(String correlationId, String kind, int minute) {

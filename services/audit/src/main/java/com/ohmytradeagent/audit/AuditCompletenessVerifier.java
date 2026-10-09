@@ -1,10 +1,12 @@
 package com.ohmytradeagent.audit;
 
 import com.ohmytradeagent.contract.AuditEvent;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +33,14 @@ public final class AuditCompletenessVerifier {
   private final AuditEventSource source;
   private final LedgerRederiver rederiver;
   private final OpenPositionSource openPositions;
+  private final PriorEntrySource priorEntries;
+
+  /**
+   * How far before the window to look for the entry of a lifecycle that hard-closed in it (#925).
+   * The incident's entries sat 1-11 days back; options expire, so no realistic hold reaches 60
+   * days. A close whose only entry is older than this is still reported as an orphan.
+   */
+  static final Duration ENTRY_LOOKBACK = Duration.ofDays(60);
 
   /**
    * {@code @Autowired} is required here, not decorative. Two constructors are declared (the one
@@ -42,15 +52,20 @@ public final class AuditCompletenessVerifier {
    * SpringComponentConstructorGuardTest} in this module now catches it.
    */
   @Autowired
-  public AuditCompletenessVerifier(AuditEventSource source, OpenPositionSource openPositions) {
-    this(source, new LedgerRederiver(), openPositions);
+  public AuditCompletenessVerifier(
+      AuditEventSource source, OpenPositionSource openPositions, PriorEntrySource priorEntries) {
+    this(source, new LedgerRederiver(), openPositions, priorEntries);
   }
 
   AuditCompletenessVerifier(
-      AuditEventSource source, LedgerRederiver rederiver, OpenPositionSource openPositions) {
+      AuditEventSource source,
+      LedgerRederiver rederiver,
+      OpenPositionSource openPositions,
+      PriorEntrySource priorEntries) {
     this.source = source;
     this.rederiver = rederiver;
     this.openPositions = openPositions;
+    this.priorEntries = priorEntries;
   }
 
   public Report verify(
@@ -78,6 +93,29 @@ public final class AuditCompletenessVerifier {
                 Divergence.Kind.MISSING_TERMINAL_CLOSE,
                 correlationId,
                 "entry_present=true lifecycle_unclosed position_not_open"));
+      }
+    }
+
+    // The close-side mirror (#925): a hard close with no entry in the window is only an orphan if
+    // there is no entry BEFORE the window either. Every multi-day hold closes in a later window
+    // than it opened in — measured, all 8 orphans of the 09-30..10-02 runs were exactly that.
+    Map<String, String> closedWithoutEntry = rederivation.closedWithoutEntry();
+    if (!closedWithoutEntry.isEmpty()) {
+      Set<String> enteredEarlier =
+          priorEntries.correlationIdsWithEntry(
+              tenantId,
+              strategyId,
+              closedWithoutEntry.keySet(),
+              fromInclusive.minus(ENTRY_LOOKBACK),
+              fromInclusive);
+      for (Map.Entry<String, String> e : closedWithoutEntry.entrySet()) {
+        if (!enteredEarlier.contains(e.getKey())) {
+          divergences.add(
+              new Divergence(
+                  Divergence.Kind.ORPHAN_CLOSE_WITHOUT_ENTRY,
+                  e.getKey(),
+                  "close_event_id=" + e.getValue()));
+        }
       }
     }
 
