@@ -225,8 +225,17 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // orchestrator-svc worker, so the stub uses default options (core task queue).
   private final PositionLookupActivities positionLookup =
       Workflow.newActivityStub(PositionLookupActivities.class, DEFAULT_OPTIONS);
+  // #938/#950 R1: BOUNDED. StrategyActivitiesImpl.get rethrows every read failure as retryable, so
+  // the default (unlimited) retry policy would block the run forever on a persistent failure — the
+  // fallback to the schedule's account would be unreachable and the schedule's SKIP overlap policy
+  // would silently stop recon for this tenant-strategy. 2 attempts x 10s, then fall back.
   private final StrategyActivities strategy =
-      Workflow.newActivityStub(StrategyActivities.class, DEFAULT_OPTIONS);
+      Workflow.newActivityStub(
+          StrategyActivities.class,
+          ActivityOptions.newBuilder()
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
+              .build());
 
   /** #938: the per-run account id; resolved lazily by {@link #accountId}. */
   private boolean accountResolved;

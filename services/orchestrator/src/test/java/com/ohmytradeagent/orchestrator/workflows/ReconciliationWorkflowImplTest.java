@@ -1196,10 +1196,14 @@ class ReconciliationWorkflowImplTest {
     when(exec.brokerListOpenPositions(anyString(), anyString()))
         .thenReturn(List.of(brokerPosition(paddedOcc, 5L, new BigDecimal("0.84"))));
     when(exec.journalListFilledByOcc(anyString(), anyString(), anyString())).thenReturn(List.of());
-    when(strategy.get("dev", "copytrade-v1"))
-        .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("db down", "X"));
+    // A RETRYABLE failure, as StrategyActivitiesImpl.get rethrows every read error (not_found,
+    // corrupt blob, newer schema) — with unbounded retries the fallback was unreachable and the
+    // run blocked forever, silently stalling recon under the schedule's SKIP overlap (#950 R1).
+    when(strategy.get("dev", "copytrade-v1")).thenThrow(new IllegalStateException("db down"));
 
-    runWorkflow("ACCT-SCHED");
+    ReconciliationSummary summary = runWorkflow("ACCT-SCHED");
+
+    assertThat(summary).isNotNull();
 
     verify(positionLookup).hasRunningOwnerForOccOnAccount("ACCT-SCHED", paddedOcc);
   }
