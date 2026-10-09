@@ -1371,6 +1371,40 @@ class AlpacaPaperBrokerTest {
     assertThat(funding.pendingTransferIn()).isNull();
   }
 
+  // #942 risk R1: /v2/account is ONE shared read feeding the pre-trade cash gate, the account
+  // snapshot (cap SOD equity) and the identity verifier. A garbled INFORMATIONAL funding field
+  // must parse to null, never fail the DTO and take those gates down with it.
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"\"N/A\"", "{}", "true", "[1]"})
+  void getAccount_garbledFundingFields_parseToNull_gateFieldsIntact(String garbage) {
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":\"1000.00\",\"cash\":\"900.00\","
+                    + "\"buying_power\":\"2000.00\",\"account_number\":\"PA3ER05HLHMB\","
+                    + "\"options_buying_power\":"
+                    + garbage
+                    + ",\"options_approved_level\":"
+                    + garbage
+                    + ",\"options_trading_level\":"
+                    + garbage
+                    + ",\"multiplier\":"
+                    + garbage
+                    + ",\"pending_transfer_in\":"
+                    + garbage
+                    + "}"));
+
+    OptionsBroker.AccountSummary account = broker.getAccount();
+
+    assertThat(account.equity()).isEqualByComparingTo("1000.00");
+    assertThat(account.cash()).isEqualByComparingTo("900.00");
+    assertThat(account.accountNumber()).isEqualTo("PA3ER05HLHMB");
+    assertThat(account.funding())
+        .isEqualTo(new OptionsBroker.FundingDetail(null, null, null, null, null));
+  }
+
   @Test
   void preTradeCheck_marginAccount_gatesOnCash_notOptionsBuyingPower() throws Exception {
     // The point of this change: the affordability gate reads AVAILABLE CASH, not margin/options
