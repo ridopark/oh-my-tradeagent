@@ -248,6 +248,16 @@ spec:
         - podSelector:
             matchLabels:
               app: api-gateway
+        # Prometheus (kube-prometheus-stack) scrapes /actuator/prometheus via the copytrade-actuator
+        # ServiceMonitor, which selects this service. Without this peer every scrape was refused at
+        # the network layer (target DOWN, "connection refused"). ServiceTokenFilter already exempts
+        # /actuator/, so the scraper needs no token. Same peer as the exec policies.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 8083

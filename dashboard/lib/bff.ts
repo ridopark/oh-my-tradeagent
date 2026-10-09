@@ -723,6 +723,10 @@ export interface Order {
   recorded_at: string;
   filled_at: string | null;
   last_error: string | null;
+  // Sent by OrdersReader but not rendered yet; typed so the BFF row and this interface stay one set.
+  signal_id: string | null;
+  broker_order_id: string | null;
+  submitted_at: string | null;
 }
 
 export interface Portfolio {

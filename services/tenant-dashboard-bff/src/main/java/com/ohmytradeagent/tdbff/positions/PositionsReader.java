@@ -12,6 +12,9 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
@@ -46,8 +49,20 @@ public class PositionsReader {
   // US options market timezone (the trading calendar the broker drops contracts on).
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
 
+  /**
+   * Whole-read bound. Every Temporal RPC here (each Visibility page, each per-workflow query)
+   * already carries the SDK's ~10s gRPC deadline, but nothing bounded the SUM: with a stalled
+   * worker, N open positions x a timed-out query each pinned the calling MVC thread for minutes.
+   * Above the dashboard's 12s BFF_TIMEOUT_MS on purpose — by then the caller has aborted, so this
+   * only frees the thread; it never cuts short a read anyone is still waiting for. Checked between
+   * RPCs, so a read can overrun by at most one RPC deadline.
+   */
+  static final Duration READ_DEADLINE = Duration.ofSeconds(15);
+
   private final WorkflowClient client;
   private final TenantStrategyResolver strategyResolver;
+  // Not a constructor parameter: a second constructor trips Spring's ambiguous-constructor abort.
+  Clock clock = Clock.systemUTC();
 
   public PositionsReader(WorkflowClient client, TenantStrategyResolver strategyResolver) {
     this.client = client;
@@ -58,7 +73,9 @@ public class PositionsReader {
   public List<OpenPosition> openPositions(String tenantId) {
     List<OpenPosition> out = new ArrayList<>();
     Set<String> seenWorkflowIds = new LinkedHashSet<>();
+    Instant deadline = clock.instant().plus(READ_DEADLINE);
     for (String strategyId : strategyResolver.strategyIdsForTenant(tenantId)) {
+      checkDeadline(deadline, tenantId);
       String query =
           String.format(
               "WorkflowType='%s' AND TenantStrategy='%s' AND ExecutionStatus='Running'",
@@ -72,6 +89,7 @@ public class PositionsReader {
           if (!seenWorkflowIds.add(wfId)) {
             continue;
           }
+          checkDeadline(deadline, tenantId);
           OpenPosition valued = valuePosition(wfId, strategyId);
           if (valued != null) {
             out.add(valued);
@@ -80,6 +98,24 @@ public class PositionsReader {
       }
     }
     return out;
+  }
+
+  /**
+   * Throws rather than returning what was read so far: a partial list would render as a smaller,
+   * healthy-looking book.
+   */
+  private void checkDeadline(Instant deadline, String tenantId) {
+    if (clock.instant().isAfter(deadline)) {
+      throw new PositionsReadTimeoutException(
+          "open-positions read exceeded " + READ_DEADLINE.toSeconds() + "s tenant=" + tenantId);
+    }
+  }
+
+  /** The whole-read {@link #READ_DEADLINE} elapsed before every open position was valued. */
+  public static final class PositionsReadTimeoutException extends RuntimeException {
+    PositionsReadTimeoutException(String message) {
+      super(message);
+    }
   }
 
   /**

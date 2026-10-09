@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.positions;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -16,9 +17,13 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionMetadata;
 import io.temporal.client.WorkflowStub;
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.stream.Stream;
@@ -119,6 +124,82 @@ class PositionsReaderTest {
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).contractSymbol()).isEqualTo("NOT-AN-OCC");
+  }
+
+  // ---------------------------------------------------------------------------
+  // whole-read deadline
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void throwsRatherThanReturningAPartialBookWhenTheReadOverrunsItsDeadline() {
+    // Each positionState query "takes" 10s — what a stalled worker costs per query (the SDK's gRPC
+    // deadline). Checks run before each query: 0s ok, 10s ok, 20s > 15s -> throw. Without the
+    // deadline the read would return all three after 30s; with a partial return it would show 2.
+    StepClock clock = new StepClock();
+    reader.clock = clock;
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-1", "wf-2", "wf-3");
+    for (String wf : List.of("wf-1", "wf-2", "wf-3")) {
+      wireTimedState(wf, clock, Duration.ofSeconds(10));
+    }
+
+    assertThatThrownBy(() -> reader.openPositions("acme"))
+        .isInstanceOf(PositionsReader.PositionsReadTimeoutException.class)
+        .hasMessageContaining("tenant=acme");
+  }
+
+  @Test
+  void aReadThatReachesExactlyTheDeadlineStillReturnsEveryPosition() {
+    // First query takes the whole budget; the check before the second sees now == deadline, which
+    // is still inside it (isAfter), so both positions come back.
+    StepClock clock = new StepClock();
+    reader.clock = clock;
+    wireStrategies("acme", "s1");
+    wireListExecutions("wf-1", "wf-2");
+    wireTimedState("wf-1", clock, PositionsReader.READ_DEADLINE);
+    wireTimedState("wf-2", clock, Duration.ZERO);
+
+    assertThat(reader.openPositions("acme")).hasSize(2);
+  }
+
+  private void wireTimedState(String workflowId, StepClock clock, Duration takes) {
+    PositionStateView state =
+        new PositionStateView(
+            occFor("NVDA", LocalDate.now(MARKET_TZ).plusDays(7), "C", "00140000"),
+            1,
+            BigDecimal.ONE);
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(client.newUntypedWorkflowStub(eq(workflowId))).thenReturn(stub);
+    when(stub.query(eq("positionState"), eq(PositionStateView.class), any(Object[].class)))
+        .thenAnswer(
+            inv -> {
+              clock.advance(takes);
+              return state;
+            });
+  }
+
+  /** A clock that only moves when told to. */
+  private static final class StepClock extends Clock {
+    private Instant now = Instant.parse("2026-10-08T15:00:00Z");
+
+    void advance(Duration d) {
+      now = now.plus(d);
+    }
+
+    @Override
+    public Instant instant() {
+      return now;
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
   }
 
   // ---------------------------------------------------------------------------
