@@ -195,6 +195,19 @@ class StrategyConfigWriterTest {
     verify(audit).log(any());
   }
 
+  /** A blank stored id is absent too — the same rule the gateway's bind and the boot check use. */
+  @Test
+  void allowsBrokerAccountIdSetFromBlank_871() {
+    StrategyConfig stored = liveSafeStored();
+    stored.setBrokerAccountId("  ");
+    StrategyConfig next = copy(stored);
+    next.setBrokerAccountId("380083820");
+
+    long newVersion = writerFor(stored).update(TENANT, STRATEGY, next, 1L, "alice");
+
+    assertThat(newVersion).isEqualTo(2L);
+  }
+
   @Test
   void rejectsBrokerAccountIdChange_theAccountRoutingVector() {
     // P4-c: once set, broker_account_id routes real orders to a brokerage account; changing it

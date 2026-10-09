@@ -154,7 +154,15 @@ public class CreateTenantController {
     }
     VerifiedAccountGuard.Verification v =
         guard.get().evaluate(tenant, config.getBrokerTarget().value());
-    return v.decision() == VerifiedAccountGuard.Decision.ALLOW ? v.account() : null;
+    if (v.decision() != VerifiedAccountGuard.Decision.ALLOW) {
+      log.info(
+          "create-tenant: no verified account for tenant={} ({}); broker_account_id left unset"
+              + " until enable",
+          tenant,
+          v.decision());
+      return null;
+    }
+    return v.account();
   }
 
   /**

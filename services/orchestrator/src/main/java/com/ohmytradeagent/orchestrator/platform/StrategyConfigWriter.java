@@ -618,7 +618,7 @@ public class StrategyConfigWriter {
     // from, and a shared broker_target fail-closes boot until every tenant on it declares one.
     // Once set it is immutable (change and clear are both rejected). Which value is legitimate
     // (the exec-verified account) is decided by the api-gateway arm routes, not here.
-    if (stored.getBrokerAccountId() != null) {
+    if (stored.getBrokerAccountId() != null && !stored.getBrokerAccountId().isBlank()) {
       requireDangerousUnchanged(
           "broker_account_id", stored.getBrokerAccountId(), next.getBrokerAccountId());
     }

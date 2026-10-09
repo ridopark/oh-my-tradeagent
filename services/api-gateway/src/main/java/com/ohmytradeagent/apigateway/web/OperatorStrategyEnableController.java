@@ -115,9 +115,8 @@ public class OperatorStrategyEnableController {
           throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
     }
 
-    // (c) flip enabled=true on the stored config, binding the verified broker_account_id (#871),
-    // and
-    // CAS via the existing update workflow.
+    // (c) bind the verified broker_account_id (#871), flip enabled=true, and CAS via the existing
+    // update workflow.
     try {
       config.setBrokerAccountId(
           VerifiedAccountGuard.bindAccount(config.getBrokerAccountId(), verification.account()));
