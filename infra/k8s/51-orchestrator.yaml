@@ -151,13 +151,13 @@ spec:
           volumeMounts:
             - name: tenants-snapshot
               mountPath: /var/lib/copytrade/snapshot
-          # orchestrator-svc is a pure Temporal worker (no spring-boot-starter-web in its
-          # pom — see services/orchestrator/pom.xml comment). No HTTP listener on :8080,
-          # so http-get probes would always fail with "connection refused" and trigger a
-          # restart loop. The Temporal worker poll loop is the implicit liveness signal —
-          # if the JVM is alive, the worker is polling. Adding spring-boot-starter-web so
-          # /actuator/health works is the v0 follow-up (tracked separately); for now,
-          # default-Ready-on-Running is correct.
+          # Issue #795: :8080 is the actuator MANAGEMENT port only (server.port=-1, no
+          # application HTTP server) serving /actuator/{health,info,prometheus} — the
+          # ServiceMonitor scrape target. Probes are still deliberately absent: a liveness
+          # probe can restart the most trading-critical pod, so wiring
+          # /actuator/health/{liveness,readiness} is a separate, deliberate change. The
+          # Temporal worker poll loop remains the implicit liveness signal and
+          # default-Ready-on-Running is still correct.
           resources:
             requests:
               cpu: 200m
