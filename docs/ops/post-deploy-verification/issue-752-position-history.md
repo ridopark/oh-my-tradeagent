@@ -100,6 +100,17 @@ describe after the roll: TenantStrategy + ContractSymbol present        (4/4)
 - The window lasts until the upsert, which runs after three calendar activity
   round trips. It is unbounded if no orchestrator worker is polling when the roll
   commits, for example during a pod `Recreate`.
+- **Split by the id-only control:** 0 ms of the 1004-1068 ms is Visibility lag;
+  all of it is the missing `TenantStrategy` attribute. So this is not an accepted
+  indexing artifact; it is a real window per roll.
+- **Worst-case cap-blind window:** from the continue-as-new commit until the
+  carried run's upsert workflow task completes.
+  - Normally: about 1 s (1068 ms max observed here), with a floor of the 3
+    calendar activity round trips that precede the upsert.
+  - With no orchestrator worker polling (the roll coincides with an orchestrator
+    `Recreate` or outage): unbounded. It lasts until a new pod's worker picks up
+    the task, so pod startup plus the 3 round trips, or longer if the pod does
+    not come up.
 - **Consequences during the window:**
   - The account loss cap under-counts that position's open loss for any
     evaluation that falls in the window (fails open).
