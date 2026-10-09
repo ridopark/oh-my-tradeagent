@@ -1107,6 +1107,43 @@ class PositionWorkflowImplContinueAsNewTest {
         .hasSize(2);
   }
 
+  /**
+   * Pins the measured SDK ordering the pre-init dedupe relies on: with polling suspended, the
+   * start, the signal bundled into signalWithStart and two more copies all sit in the FIRST
+   * workflow task, yet only the bundled signal is dispatched before run() assigns input. The later
+   * copies reach the handler with input set and are suppressed there. So two copies both buffered
+   * pre-init is not reachable on a fresh run, and the drain needs no suppression of its own.
+   */
+  @Test
+  void freshRun_copiesQueuedInFirstTask_onlyBundledOneIsPreInit_placeOnce() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    String wfId = "pos-fresh-two-preinit";
+    PositionWorkflow stub = newStub(wfId);
+    env.getWorkerFactory().suspendPolling();
+    try {
+      WorkflowStub.fromTyped(stub)
+          .signalWithStart(
+              "partialExit",
+              new Object[] {partialExitRequest("sig-y", wfId, 0.5)},
+              new Object[] {futureInput(6)});
+      stub.partialExit(partialExitRequest("sig-y", wfId, 0.5));
+      stub.partialExit(partialExitRequest("sig-y", wfId, 0.5));
+    } finally {
+      env.getWorkerFactory().resumePolling();
+    }
+    confirmEntry(stub, 6L);
+    waitForPlaceOrderAtLeast(1);
+    stub.onFill(fill("brk-exit", 3L, new BigDecimal("2.60")));
+    Thread.sleep(1_500);
+
+    assertThat(placeOrderInvocations()).as("three copies, one placement").isEqualTo(1L);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    assertThat(auditKinds("ExitDuplicateSuppressed"))
+        .filteredOn(e -> "sig-y".equals(e.getSubject().get("signal_id")))
+        .as("both later copies suppressed in the handler, before the entry is confirmed")
+        .hasSize(2);
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {
