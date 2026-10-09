@@ -249,6 +249,12 @@ class ExecActivitiesImplPlaceOrderValidationTest {
     }
 
     @Override
+    public Optional<JournaledOrder> findLatestFilledByOccAndSide(
+        String tenantId, String strategyId, String occ, String side) {
+      throw fail();
+    }
+
+    @Override
     public List<JournaledOrder> findFilledBySideOnDay(
         String tenantId, String strategyId, String side, java.time.LocalDate tradingDay) {
       throw fail();

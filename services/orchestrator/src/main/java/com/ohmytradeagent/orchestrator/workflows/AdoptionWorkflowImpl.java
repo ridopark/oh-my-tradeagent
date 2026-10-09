@@ -94,7 +94,9 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     }
     // Forward-compat anchor (see VERSION_ADOPTION). v=2 for new executions; v<2 (pre-fix histories)
     // replay WITHOUT the EntryFilled command below, preserving determinism on in-flight adoptions.
-    int adoptionVersion = Workflow.getVersion(VERSION_ADOPTION, Workflow.DEFAULT_VERSION, 2);
+    // v3 (#930): anchor on the entry BUY, not the latest fill (which is the last SELL after a
+    // partial exit) — changes the child id / onFill / reconcile arguments, so it is gated.
+    int adoptionVersion = Workflow.getVersion(VERSION_ADOPTION, Workflow.DEFAULT_VERSION, 3);
 
     String tenantId = in.getTenantId();
     String strategyId = in.getStrategyId();
@@ -126,7 +128,7 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     // 2. Resolve the anchoring journal row → entry_signal_id / intent_key / broker_order_id.
     // Without
     // an entry_signal_id we cannot build the canonical workflow id, so refuse.
-    JournalEntry anchor = resolveAnchor(exec, tenantId, strategyId, occ);
+    JournalEntry anchor = resolveAnchor(exec, tenantId, strategyId, occ, adoptionVersion >= 3);
     if (anchor == null || anchor.getSignalId() == null || anchor.getSignalId().isBlank()) {
       return refused(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
     }
@@ -236,9 +238,24 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
    * still-open row can recover the signal_id/intent_key. Padding-agnostic OCC match (#246).
    */
   private JournalEntry resolveAnchor(
-      ReconciliationExecActivity exec, String tenantId, String strategyId, String occ) {
+      ReconciliationExecActivity exec,
+      String tenantId,
+      String strategyId,
+      String occ,
+      boolean preferEntryBuy) {
     List<JournalEntry> filled = exec.journalListFilledByOcc(tenantId, strategyId, occ);
     if (!filled.isEmpty()) {
+      // #930: element 0 is the LATEST fill of any side — after a partial exit, the last SELL.
+      // Keying the adopted owner to it gave the new PositionWorkflow the STC's signal id and the
+      // SELL's broker order id. The OCC-anchored recon (#432-435) means "the lot's ENTRY": prefer
+      // the latest FILLED BUY the exec read appends; fall back to element 0 when no BUY is listed.
+      if (preferEntryBuy) {
+        for (JournalEntry e : filled) {
+          if (e.getSide() == JournalEntry.Side.BUY) {
+            return e;
+          }
+        }
+      }
       return filled.get(0);
     }
     String compactOcc = OccSymbol.compact(occ);

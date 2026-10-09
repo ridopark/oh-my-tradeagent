@@ -201,6 +201,45 @@ class AdoptionWorkflowImplTest {
     return c;
   }
 
+  private JournalEntry lastSellRow() {
+    JournalEntry e = filledJournalRow();
+    e.setIntentKey("t-dev/s-x/pos/occ/sig:exit:stc-sig-9");
+    e.setSignalId("stc-sig-9");
+    e.setBrokerOrderId("sell-boid-9");
+    e.setSide(JournalEntry.Side.SELL);
+    return e;
+  }
+
+  private JournalEntry entryBuyRow() {
+    JournalEntry e = filledJournalRow();
+    e.setSide(JournalEntry.Side.BUY);
+    return e;
+  }
+
+  @Test
+  void afterAPartialExit_adoptionAnchorsOnTheEntryBuy_notTheLastSell() {
+    // #930: recon's latest-fill row is the last SELL; adopting on it keyed the new owner to the
+    // STC's signal id and the SELL's broker order id. The entry BUY is the anchor.
+    when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(brokerLot(3L, new BigDecimal("2.00")));
+    when(exec.journalListFilledByOcc(TENANT, STRATEGY, OCC))
+        .thenReturn(List.of(lastSellRow(), entryBuyRow()));
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(config(Boolean.FALSE));
+    when(exec.journalReconcileToFilled(anyString(), anyLong(), any(), any())).thenReturn(true);
+
+    AdoptionResult result = runAdopt();
+
+    assertThat(result.getEntrySignalId()).isEqualTo(SIGNAL_ID);
+    String expectedWfId = WorkflowIds.position(TENANT, STRATEGY, OCC, SIGNAL_ID);
+    assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
+    assertThat(awaitEntry(FILLS, expectedWfId).getBrokerOrderId()).isEqualTo(BROKER_ORDER_ID);
+    verify(exec).journalReconcileToFilled(eq(INTENT_KEY), eq(3L), any(BigDecimal.class), any());
+    verify(exec, never())
+        .journalReconcileToFilled(
+            eq("t-dev/s-x/pos/occ/sig:exit:stc-sig-9"), anyLong(), any(), any());
+  }
+
   @Test
   void happyPath_startsOwner_forwardsFill_terminalizesJournal_seedsCache_auditsProvenance() {
     when(exec.brokerGetPositionByOcc(TENANT, STRATEGY, OCC))

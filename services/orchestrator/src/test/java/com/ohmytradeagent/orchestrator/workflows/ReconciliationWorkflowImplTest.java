@@ -1652,6 +1652,92 @@ class ReconciliationWorkflowImplTest {
   }
 
   @Test
+  void expiryDay_worthlessCloseBookedToday_refusesAdoption_theIncident() {
+    // #930 (prod-kipark 2026-10-02): the expiry-lead floor flatten missed, the PositionWorkflow
+    // booked PositionExpired(worthless_expiry) at 14:16 ET, the broker still held the lots, and
+    // recon re-adopted at 14:20 — 15 adopt/expire round trips until the close. The worthless close
+    // is the stronger signal: recon must yield.
+    Instant tick = Instant.parse("2026-01-16T19:20:00Z"); // 14:20 ET on the expiry date
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE);
+    stubOrphanFixture(occ);
+    when(auditQuery.countPriorByKind(
+            eq("dev"), eq("copytrade-v1"), eq(occ), eq("PositionExpired"), any()))
+        .thenReturn(1L);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(tick);
+    try {
+      runWorkflowOn(penv);
+
+      assertThat(captureKind("AutoAdoptRefusedExpired").getSubject())
+          .containsEntry("option_symbol", occ)
+          .containsEntry("refuse_reason", "worthless_expiry_booked_today");
+      assertThat(ADOPT_STARTED).isEmpty();
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "ReconAutoAdoptionInitiated".equals(e.getKind())));
+      // The lookup window starts at 00:00 ET on the expiry date.
+      verify(auditQuery)
+          .countPriorByKind(
+              eq("dev"),
+              eq("copytrade-v1"),
+              eq(occ),
+              eq("PositionExpired"),
+              eq(
+                  PINNED_EXPIRY_DATE
+                      .atStartOfDay(java.time.ZoneId.of("America/New_York"))
+                      .toOffsetDateTime()));
+    } finally {
+      penv.close();
+    }
+  }
+
+  @Test
+  void adoptedMoreThanTwiceToday_pagesTheLoopOnce_andStillAdopts() {
+    // #930 defense in depth: a third adoption of the same OCC on the same day is a loop. One page
+    // (debounced per OCC per day); the adoption itself is not blocked by the page.
+    Instant tick = Instant.parse("2026-01-16T15:00:00Z"); // 10:00 ET
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE.plusDays(30));
+    stubOrphanFixture(occ);
+    when(auditQuery.countPriorByKind(
+            eq("dev"), eq("copytrade-v1"), eq(occ), eq("ReconAutoAdoptionInitiated"), any()))
+        .thenReturn(2L);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(tick);
+    try {
+      runWorkflowOn(penv);
+
+      Map<String, Object> loop = captureKind("ReconAdoptionLoop").getSubject();
+      assertThat(loop).containsEntry("option_symbol", occ);
+      assertThat(((Number) loop.get("adoptions_today")).longValue()).isEqualTo(3L);
+      waitUntilAdoptStarted(WorkflowIds.adoption("dev", "copytrade-v1", occ));
+    } finally {
+      penv.close();
+    }
+  }
+
+  @Test
+  void adoptionLoop_alreadyPagedToday_isNotRepaged() {
+    Instant tick = Instant.parse("2026-01-16T15:00:00Z");
+    String occ = paddedOccExpiring(PINNED_EXPIRY_DATE.plusDays(30));
+    stubOrphanFixture(occ);
+    when(auditQuery.countPriorByKind(
+            eq("dev"), eq("copytrade-v1"), eq(occ), eq("ReconAutoAdoptionInitiated"), any()))
+        .thenReturn(5L);
+    when(auditQuery.countPriorByKind(
+            eq("dev"), eq("copytrade-v1"), eq(occ), eq("ReconAdoptionLoop"), any()))
+        .thenReturn(1L);
+
+    TestWorkflowEnvironment penv = newStartedPinnedEnv(tick);
+    try {
+      runWorkflowOn(penv);
+
+      Mockito.verify(audit, never())
+          .log(Mockito.argThat(e -> e != null && "ReconAdoptionLoop".equals(e.getKind())));
+    } finally {
+      penv.close();
+    }
+  }
+
+  @Test
   void expiredOcc_priorDay_stillRefuses() {
     // REGRESSION on the existing #434 day-after path: an OCC that expired on a PRIOR day is refused
     // at ANY time of day. Clock pinned to 10:00 ET (well BEFORE close) on the day AFTER expiry to

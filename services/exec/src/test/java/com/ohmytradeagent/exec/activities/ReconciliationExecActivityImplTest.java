@@ -1,5 +1,7 @@
 package com.ohmytradeagent.exec.activities;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -9,7 +11,9 @@ import static org.mockito.Mockito.when;
 
 import com.ohmytradeagent.exec.broker.BrokerClientRegistry;
 import com.ohmytradeagent.exec.broker.OptionsBroker;
+import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
+import com.ohmytradeagent.exec.journal.OrderState;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +42,65 @@ class ReconciliationExecActivityImplTest {
     exec.journalReconcileToFilled("wf-1:entry", 5L, new java.math.BigDecimal("2.79"), at);
 
     verify(journal).markFilled("wf-1:entry", 5L, new java.math.BigDecimal("2.79"), at, "recon");
+  }
+
+  private static JournaledOrder filledRow(String intentKey, String side) {
+    return new JournaledOrder(
+        intentKey,
+        "sig-" + intentKey,
+        "dev",
+        "copytrade-v1",
+        "alpaca-paper",
+        "cid-" + intentKey,
+        "AMZN  261002C00265000",
+        side,
+        3L,
+        null,
+        OrderState.FILLED,
+        "boid-" + intentKey,
+        null,
+        null,
+        null,
+        null,
+        null,
+        3L,
+        new java.math.BigDecimal("2.00"),
+        null,
+        0L);
+  }
+
+  // #930: after a partial exit the latest fill is a SELL; the list must also carry the latest
+  // BUY (the entry) so adoption anchors on it. Element 0 stays the latest fill (recon's contract).
+  @Test
+  void journalListFilledByOcc_afterAnExit_appendsTheLatestEntryBuy() {
+    OrderIntentJournal journal = mock(OrderIntentJournal.class);
+    when(journal.findLatestFilledByOcc("dev", "copytrade-v1", "AMZN261002C00265000"))
+        .thenReturn(java.util.Optional.of(filledRow("pos:exit:stc-9", "SELL")));
+    when(journal.findLatestFilledByOccAndSide("dev", "copytrade-v1", "AMZN261002C00265000", "BUY"))
+        .thenReturn(java.util.Optional.of(filledRow("sig-1:entry", "BUY")));
+    ReconciliationExecActivityImpl exec =
+        new ReconciliationExecActivityImpl(
+            journal, mock(BrokerClientRegistry.class), "alpaca-paper");
+
+    var rows = exec.journalListFilledByOcc("dev", "copytrade-v1", "AMZN261002C00265000");
+
+    assertThat(rows)
+        .extracting(r -> r.getIntentKey())
+        .containsExactly("pos:exit:stc-9", "sig-1:entry");
+  }
+
+  @Test
+  void journalListFilledByOcc_latestIsTheEntry_singleRow() {
+    OrderIntentJournal journal = mock(OrderIntentJournal.class);
+    JournaledOrder buy = filledRow("sig-1:entry", "BUY");
+    when(journal.findLatestFilledByOcc(any(), any(), any())).thenReturn(java.util.Optional.of(buy));
+    when(journal.findLatestFilledByOccAndSide(any(), any(), any(), eq("BUY")))
+        .thenReturn(java.util.Optional.of(buy));
+    ReconciliationExecActivityImpl exec =
+        new ReconciliationExecActivityImpl(
+            journal, mock(BrokerClientRegistry.class), "alpaca-paper");
+
+    assertThat(exec.journalListFilledByOcc("dev", "copytrade-v1", "X")).hasSize(1);
   }
 
   // P4-a / Phase B: a present tenant_id resolves THAT tenant's broker (keyed on the tenant, not the

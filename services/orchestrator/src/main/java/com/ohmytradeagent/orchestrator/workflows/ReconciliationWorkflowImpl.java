@@ -81,6 +81,14 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
   // expired contract has been dropped by the broker; adopting it would spawn a PositionWorkflow
   // that lingers open (no buyer for a worthless contract) and gets re-adopted every cycle.
   private static final String KIND_AUTO_ADOPT_REFUSED_EXPIRED = "AutoAdoptRefusedExpired";
+  // #930: the PositionWorkflow's worthless-expiry close kind, read to refuse re-adoption.
+  private static final String KIND_POSITION_EXPIRED = "PositionExpired";
+  // #930: the same OCC was auto-adopted more than twice in one ET day — a loop. Pages YELLOW.
+  private static final String KIND_RECON_ADOPTION_LOOP = "ReconAdoptionLoop";
+
+  /** Prior same-day adoptions at which the next one is a loop (the 3rd adoption pages). */
+  static final long ADOPTION_LOOP_THRESHOLD = 2L;
+
   // Gated-condor (#901): auto-adopt refused because the OCC is a leg of a condor combo.
   private static final String KIND_AUTO_ADOPT_REFUSED_CONDOR = "AutoAdoptRefusedCondorLeg";
   // Cross-strategy recon-orphan suppression: a PositionOrphan(missing) page was suppressed because
@@ -144,6 +152,13 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
    * the deploy roll must replay its pre-change history without them. Read once outside the loop.
    */
   static final String VERSION_CONDOR_OWNER = "recon-condor-owner-v1";
+
+  /**
+   * #930 expiry-day adopt/expire ping-pong: gates the two audit reads it adds to {@link
+   * #maybeAutoAdopt} (worthless-close-booked-today refusal + adoption-loop page). Read once outside
+   * the loop; recon runs in flight across the deploy replay without them.
+   */
+  static final String VERSION_EXPIRY_PINGPONG = "recon-expiry-pingpong-v1";
 
   /** Hard expiry-session close in America/New_York (16:00 ET); past this a 0DTE OCC is done. */
   private static final LocalTime ET_MARKET_CLOSE = LocalTime.of(16, 0);
@@ -357,6 +372,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     int partialCoverageVersion =
         Workflow.getVersion(VERSION_PARTIAL_COVERAGE, Workflow.DEFAULT_VERSION, 1);
     int condorOwnerVersion = Workflow.getVersion(VERSION_CONDOR_OWNER, Workflow.DEFAULT_VERSION, 1);
+    int expiryPingpongVersion =
+        Workflow.getVersion(VERSION_EXPIRY_PINGPONG, Workflow.DEFAULT_VERSION, 1);
     long positionOrphans = 0;
     for (BrokerPosition p : brokerPositions) {
       List<JournalEntry> filled =
@@ -536,7 +553,15 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         // refuseExpiredSameday
         // (Phase 3 refuse-expired-sameday) — are read ONCE outside the loop and passed in.
         maybeAutoAdopt(
-            in, brokerTarget, p, occ, brokerOpen, refuseExpiredSameday, filled, condorOwnerVersion);
+            in,
+            brokerTarget,
+            p,
+            occ,
+            brokerOpen,
+            refuseExpiredSameday,
+            filled,
+            condorOwnerVersion,
+            expiryPingpongVersion);
       }
     }
 
@@ -792,7 +817,8 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       List<BrokerOpenOrder> brokerOpen,
       int refuseExpiredSameday,
       List<JournalEntry> filled,
-      int condorOwnerVersion) {
+      int condorOwnerVersion,
+      int expiryPingpongVersion) {
     String adoptWfId =
         WorkflowIds.adoption(in.getTenantId(), in.getStrategyId(), p.getOptionSymbol());
 
@@ -843,6 +869,21 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
         refuseReason = "prior_day";
       } else if (refuseExpiredSameday >= 1 && occExpiry.isEqual(etDate) && pastEtClose()) {
         refuseReason = "same_day_post_close";
+      } else if (expiryPingpongVersion >= 1
+          && occExpiry.isEqual(etDate)
+          && auditQuery.countPriorByKind(
+                  in.getTenantId(),
+                  in.getStrategyId(),
+                  OccSymbol.padded(occ),
+                  KIND_POSITION_EXPIRED,
+                  etStartOfDay(etDate))
+              > 0) {
+        // #930: before the 16:00 close the two expiry authorities disagreed. The PositionWorkflow
+        // closes an unfillable 0DTE remainder as worthless (its floor flatten already ran and
+        // found no liquidity — #584, deliberately kept), while this guard kept re-adopting it
+        // until 16:00, so the lot ping-ponged adopt -> expire every tick. The booked worthless
+        // close is the stronger signal: recon yields for the rest of the day.
+        refuseReason = "worthless_expiry_booked_today";
       }
       if (refuseReason != null) {
         auditLog(
@@ -888,6 +929,13 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
       return;
     }
 
+    // #930 defense in depth: with the refusal above the expiry-day ping-pong is structurally gone,
+    // but any OTHER re-adopt cycle would look the same — a 3rd+ adoption of one OCC in a day pages
+    // once (per OCC per day). The adoption itself proceeds; the page is the alarm, not a gate.
+    if (expiryPingpongVersion >= 1) {
+      maybePageAdoptionLoop(in, p);
+    }
+
     AdoptionWorkflowInput adoptInput = new AdoptionWorkflowInput();
     adoptInput.setSchemaVersion(1L);
     adoptInput.setTenantId(in.getTenantId());
@@ -924,6 +972,41 @@ public class ReconciliationWorkflowImpl implements ReconciliationWorkflow {
     // from the forbidden client-side WorkflowExecutionAlreadyStarted catch.
     Promise<?> started = Async.function(child::adopt, adoptInput);
     started.exceptionally(t -> null);
+  }
+
+  /** Pages {@value #KIND_RECON_ADOPTION_LOOP} once per OCC per ET day on a 3rd+ adoption. */
+  private void maybePageAdoptionLoop(ReconciliationWorkflowInput in, BrokerPosition p) {
+    OffsetDateTime since = etStartOfDay(workflowEtDate());
+    long priorAdoptions =
+        auditQuery.countPriorByKind(
+            in.getTenantId(),
+            in.getStrategyId(),
+            p.getOptionSymbol(),
+            KIND_RECON_AUTO_ADOPTION_INITIATED,
+            since);
+    if (priorAdoptions < ADOPTION_LOOP_THRESHOLD) {
+      return;
+    }
+    long priorPages =
+        auditQuery.countPriorByKind(
+            in.getTenantId(),
+            in.getStrategyId(),
+            p.getOptionSymbol(),
+            KIND_RECON_ADOPTION_LOOP,
+            since);
+    if (priorPages > 0) {
+      return;
+    }
+    auditLog(
+        KIND_RECON_ADOPTION_LOOP,
+        subject(
+            "option_symbol", p.getOptionSymbol(),
+            "qty", p.getQty(),
+            "adoptions_today", priorAdoptions + 1));
+  }
+
+  private static OffsetDateTime etStartOfDay(LocalDate etDate) {
+    return etDate.atStartOfDay(java.time.ZoneId.of("America/New_York")).toOffsetDateTime();
   }
 
   private void recordAutoAdoptMetric(

@@ -236,6 +236,18 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
   @Override
   public Optional<JournaledOrder> findLatestFilledByOcc(
       String tenantId, String strategyId, String occ) {
+    return latestFilledByOcc(tenantId, strategyId, occ, null);
+  }
+
+  @Override
+  public Optional<JournaledOrder> findLatestFilledByOccAndSide(
+      String tenantId, String strategyId, String occ, String side) {
+    return latestFilledByOcc(tenantId, strategyId, occ, side);
+  }
+
+  /** {@code side} null = any side. */
+  private Optional<JournaledOrder> latestFilledByOcc(
+      String tenantId, String strategyId, String occ, String side) {
     // Issue #243: the journal persists the *padded* 21-char OCC (OccSymbol.of pads the root to 6
     // chars with %-6s, e.g. "UNH   260618C00400000") while the broker reports the *compact* form
     // (Alpaca strips the space-padding on order placement, e.g. "UNH260618C00400000"). Recon passes
@@ -266,6 +278,7 @@ public class JooqOrderIntentJournal implements OrderIntentJournal {
                     .replace(field("option_symbol", String.class), " ", "")
                     .eq(compactOcc))
             .and(field("state", String.class).eq(OrderState.FILLED.name()))
+            .and(side == null ? DSL.noCondition() : field("side", String.class).eq(side))
             .orderBy(field("filled_at", OffsetDateTime.class).desc())
             .limit(1)
             .fetchOne();

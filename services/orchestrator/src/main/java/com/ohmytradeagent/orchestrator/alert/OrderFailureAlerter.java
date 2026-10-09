@@ -139,7 +139,7 @@ public class OrderFailureAlerter {
           + "BtoCorrectionSuperseded,EntryWorkflowFailed,OrderCancelFailed,FloorBreachAlerted,"
           + "PositionPartialCoverage,PositionLotCorrected,TrailDisarmed,"
           + "CondorEntryHalted,CondorFlattenIncomplete,CondorSettleMismatch,CondorHoldStartFailed,"
-          + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing";
+          + "KillSwitchWorkflowDown,CondorWorkflowTaskFailing,ReconAdoptionLoop";
 
   private static final String SIGNAL_REJECTED_KIND = "SignalRejected";
 
@@ -196,6 +196,9 @@ public class OrderFailureAlerter {
 
   // #910: a condor workflow whose workflow task keeps failing (CondorTaskFailureWatchdog). RED.
   private static final String CONDOR_WORKFLOW_TASK_FAILING_KIND = "CondorWorkflowTaskFailing";
+  // #930: one OCC auto-adopted 3+ times in a day — an adopt/close loop. YELLOW: the lot keeps an
+  // owner each cycle, but something keeps closing it and recon keeps re-adopting it.
+  private static final String RECON_ADOPTION_LOOP_KIND = "ReconAdoptionLoop";
 
   private final WebhookClient webhookClient;
   private final TenantWebhookResolver webhookResolver;
@@ -276,6 +279,8 @@ public class OrderFailureAlerter {
         embed = buildKillSwitchWorkflowDownEmbed(event);
       } else if (CONDOR_WORKFLOW_TASK_FAILING_KIND.equals(event.getKind())) {
         embed = buildCondorWorkflowTaskFailingEmbed(event);
+      } else if (RECON_ADOPTION_LOOP_KIND.equals(event.getKind())) {
+        embed = buildReconAdoptionLoopEmbed(event);
       } else {
         embed = buildEmbed(event);
       }
@@ -379,6 +384,27 @@ public class OrderFailureAlerter {
         null,
         recreated && !stateUnknown ? AlertColors.YELLOW : AlertColors.RED,
         buildFooter(event),
+        fields);
+  }
+
+  /** #930: the adoption-loop page. YELLOW; every key null-safe. */
+  private WebhookEmbed buildReconAdoptionLoopEmbed(AuditEvent event) {
+    Map<String, Object> subject = event.getSubject();
+    String symbolRaw = rawSubject(subject, "option_symbol");
+    List<WebhookEmbed.Field> fields = new ArrayList<>();
+    fields.add(new WebhookEmbed.Field("symbol", YahooOptionLink.markdown(symbolRaw), false));
+    fields.add(
+        new WebhookEmbed.Field("adoptions_today", subjectStr(subject, "adoptions_today"), false));
+    fields.add(new WebhookEmbed.Field("qty", subjectStr(subject, "qty"), false));
+    fields.add(new WebhookEmbed.Field("tenant_id", orNa(event.getTenantId()), false));
+    return new WebhookEmbed(
+        ":large_yellow_circle: Recon adoption LOOP — " + orNa(symbolRaw),
+        "Recon has auto-adopted this lot 3+ times today: something keeps closing the owning"
+            + " PositionWorkflow while the broker still holds the lot (#930). Check the lot's"
+            + " PositionExpired / flatten history; the /trades view will show phantom EntryFilled"
+            + " rows for each adoption.",
+        AlertColors.YELLOW,
+        "workflow_id: " + orNa(event.getWorkflowId()),
         fields);
   }
 

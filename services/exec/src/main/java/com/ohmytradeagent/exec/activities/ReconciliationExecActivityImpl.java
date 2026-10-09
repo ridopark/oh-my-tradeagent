@@ -10,6 +10,7 @@ import com.ohmytradeagent.exec.journal.JournaledOrder;
 import com.ohmytradeagent.exec.journal.OrderIntentJournal;
 import com.ohmytradeagent.exec.journal.OrderState;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -77,11 +78,19 @@ public class ReconciliationExecActivityImpl implements ReconciliationExecActivit
 
   @Override
   public List<JournalEntry> journalListFilledByOcc(String tenantId, String strategyId, String occ) {
-    return journal
-        .findLatestFilledByOcc(tenantId, strategyId, occ)
-        .map(ReconciliationExecActivityImpl::toContract)
-        .map(List::of)
-        .orElse(List.of());
+    // [latest FILLED row of any side] + (#930) [latest FILLED BUY, when that is a different row].
+    // Element 0 stays the latest fill (recon's existing contract); the BUY lets adoption anchor on
+    // the ENTRY instead of the last SELL after a partial exit.
+    Optional<JournaledOrder> latest = journal.findLatestFilledByOcc(tenantId, strategyId, occ);
+    if (latest.isEmpty()) {
+      return List.of();
+    }
+    Optional<JournaledOrder> entry =
+        journal.findLatestFilledByOccAndSide(tenantId, strategyId, occ, "BUY");
+    if (entry.isEmpty() || entry.get().intentKey().equals(latest.get().intentKey())) {
+      return List.of(toContract(latest.get()));
+    }
+    return List.of(toContract(latest.get()), toContract(entry.get()));
   }
 
   /**
