@@ -1489,6 +1489,61 @@ class AlpacaPaperBrokerTest {
     assertThat(account.funding()).isEqualTo(expected);
   }
 
+  // #945: equity and cash are GATE inputs (cap SOD equity, pre-trade cash gate) and must stay
+  // strict — a garbled value fails getAccount() closed. LenientNumbers is for informational fields
+  // only (#942 R1); "helpfully" applying it here must break the build.
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.CsvSource(
+      delimiter = '|',
+      value = {
+        "equity|\"N/A\"", "equity|{}", "equity|true", "equity|[1]",
+        "cash|\"N/A\"", "cash|{}", "cash|true", "cash|[1]"
+      })
+  void getAccount_garbledGateField_failsClosed(String field, String garbage) {
+    String equity = field.equals("equity") ? garbage : "\"1000.00\"";
+    String cash = field.equals("cash") ? garbage : "\"900.00\"";
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"id\":\"acct-1\",\"equity\":"
+                    + equity
+                    + ",\"cash\":"
+                    + cash
+                    + ",\"account_number\":\"PA3ER05HLHMB\"}"));
+
+    assertThatThrownBy(() -> broker.getAccount()).isInstanceOf(RuntimeException.class);
+  }
+
+  // #945: the behavioral test above cannot tell strict from lenient — a lenient equity parses
+  // garbage to null and the null check still throws. Pin the boundary itself: gate fields carry no
+  // LenientNumbers deserializer. The informational fields are the control (they MUST carry one, so
+  // this lookup is proven to see the annotation).
+  @Test
+  void accountResponse_gateFieldsAreStrict_informationalFieldsLenient() throws Exception {
+    java.util.function.Function<String, Class<?>> deserializerOf =
+        name -> {
+          try {
+            com.fasterxml.jackson.databind.annotation.JsonDeserialize a =
+                com.ohmytradeagent.exec.broker.alpaca.dto.AlpacaAccountResponse.class
+                    .getDeclaredField(name)
+                    .getAnnotation(com.fasterxml.jackson.databind.annotation.JsonDeserialize.class);
+            return a == null ? null : a.using();
+          } catch (NoSuchFieldException e) {
+            throw new AssertionError(e);
+          }
+        };
+    for (String gate : java.util.List.of("equity", "cash")) {
+      assertThat(deserializerOf.apply(gate)).as(gate + " must stay strict").isNull();
+    }
+    assertThat(deserializerOf.apply("optionsBuyingPower"))
+        .isEqualTo(
+            com.ohmytradeagent.exec.broker.alpaca.dto.LenientNumbers.LenientBigDecimal.class);
+    assertThat(deserializerOf.apply("optionsApprovedLevel"))
+        .isEqualTo(com.ohmytradeagent.exec.broker.alpaca.dto.LenientNumbers.LenientInteger.class);
+  }
+
   @Test
   void preTradeCheck_marginAccount_gatesOnCash_notOptionsBuyingPower() throws Exception {
     // The point of this change: the affordability gate reads AVAILABLE CASH, not margin/options
