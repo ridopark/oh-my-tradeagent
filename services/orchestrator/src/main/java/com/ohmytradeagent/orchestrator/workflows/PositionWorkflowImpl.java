@@ -46,10 +46,13 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Long-running position lifecycle. Receives STC dispatches via {@link
@@ -864,6 +867,18 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_BUFFERED_OPERATOR_AUDIT = "buffered-operator-audit-v1";
 
   /**
+   * Issue #958: a redelivered STC that lands in a CARRIED run's first workflow task (before run()
+   * assigns {@code input}) is buffered by {@link #partialExit} without the dedupe check, although
+   * {@code @WorkflowInit} has already hydrated {@code processedSignalIds}. The handler now marks
+   * such a request and the main-loop drain suppresses it instead of processing it as new.
+   *
+   * <p>Gated because suppression replaces a recorded placeOrder with an audit. Read in the MAIN
+   * LOOP (see {@link #VERSION_BUFFERED_OPERATOR_AUDIT} for why not in the handler), and only for a
+   * marked request, so a history that never took this path records no marker.
+   */
+  private static final String VERSION_CARRIED_PREINIT_DEDUPE = "carried-preinit-dedupe-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -1063,6 +1078,15 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private final LinkedHashSet<String> processedSignalIds = new LinkedHashSet<>();
   private boolean exitInFlight;
   private final ArrayDeque<PartialExitRequest> pendingExits = new ArrayDeque<>();
+
+  /**
+   * Issue #958: requests in {@code pendingExits} that {@link #partialExit} buffered pre-init on a
+   * carried run although their signal id was already carried in {@code processedSignalIds}.
+   * Identity-keyed: a retry re-enqueue reuses a processed id and must not be mistaken for one.
+   */
+  private final Set<PartialExitRequest> preInitCarriedDuplicates =
+      Collections.newSetFromMap(new IdentityHashMap<>());
+
   private FillSignalPayload lastFillEvent;
 
   /**
@@ -2135,7 +2159,21 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       }
       if (!pendingExits.isEmpty()) {
         PartialExitRequest req = pendingExits.poll();
-        processOne(req);
+        if (preInitCarriedDuplicates.remove(req)
+            && Workflow.getVersion(VERSION_CARRIED_PREINIT_DEDUPE, Workflow.DEFAULT_VERSION, 1)
+                >= 1) {
+          auditLog(
+              KIND_EXIT_DUPLICATE_SUPPRESSED,
+              subject(
+                  "signal_id",
+                  req.getSignalId(),
+                  "note",
+                  "duplicate_signal_id",
+                  "deferred_until_init",
+                  true));
+        } else {
+          processOne(req);
+        }
       }
     }
 
@@ -2389,6 +2427,9 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     // the rest of the validation runs in-handler so duplicate / fraction audits fire promptly even
     // for signals that arrive before run()'s main thread has resumed.
     if (input == null) {
+      if (carriedRun && processedSignalIds.contains(req.getSignalId())) {
+        preInitCarriedDuplicates.add(req);
+      }
       pendingExits.add(req);
       return;
     }
