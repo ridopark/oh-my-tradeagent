@@ -479,6 +479,9 @@ public final class AuditEventKinds {
           "PositionLotCorrected",
           // #825: operator removed an armed trailing stop (neutral kind; pages).
           "TrailDisarmed",
+          // #747: OvernightTrailNoticeLoop's 15:40 ET notice for an armed trail held overnight
+          // (not workflow code). Informational YELLOW via OrderFailureAlerter. In ALL_KINDS only.
+          "OvernightTrailHeld",
           "PositionPartialCoverage",
           // Phase 3 (2026-06-24 remediation): non-paging first-sweep observation marker emitted by
           // ReconciliationWorkflowImpl on the missing branch. The first sweep observing a

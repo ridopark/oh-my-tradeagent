@@ -876,6 +876,36 @@ class OrderFailureAlerterTest {
   }
 
   @Test
+  void overnightTrailHeld_rendersYellowEmbed_nullSafe() {
+    // #747: the 15:40 ET notice for an armed trail held overnight — informational (YELLOW), names
+    // the contract, the bid, the stop and the distance to it, and carries the gap-risk note.
+    WebhookClient webhook = mock(WebhookClient.class);
+    OrderFailureAlerter alerter =
+        new OrderFailureAlerter(webhook, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true);
+    Map<String, Object> subject = new java.util.LinkedHashMap<>();
+    subject.put("contract_symbol", "SPY   260825C00640000");
+    subject.put("remaining_qty", 3);
+    subject.put("bid", "1.60");
+    subject.put("threshold", "1.4925");
+    subject.put("giveback_pct", "0.25");
+    subject.put("distance_pct", "0.0672");
+    subject.put("note", "stop is best-effort across the overnight gap");
+    alerter.onAuditEvent(event("OvernightTrailHeld", "pos-wf-1", subject));
+    WebhookEmbed embed = capture(webhook);
+    assertThat(embed.color()).isEqualTo(AlertColors.YELLOW);
+    assertThat(embed.title()).contains("overnight");
+    assertThat(field(embed, "stop")).isEqualTo("1.4925");
+    assertThat(field(embed, "bid")).isEqualTo("1.60");
+    assertThat(field(embed, "distance to stop")).isEqualTo("6.72%");
+    assertThat(embed.description()).contains("best-effort");
+
+    WebhookClient webhook2 = mock(WebhookClient.class);
+    new OrderFailureAlerter(webhook2, RESOLVER, OrderFailureAlerter.DEFAULT_FAILURE_KINDS, true)
+        .onAuditEvent(event("OvernightTrailHeld", null, new java.util.LinkedHashMap<>()));
+    assertThat(capture(webhook2).color()).isEqualTo(AlertColors.YELLOW);
+  }
+
+  @Test
   void trailDisarmed_rendersYellowEmbed_nullSafe() {
     // #825: the disarm page must render (protection was just removed — losing this page silently
     // is the worst outcome) and must carry the prior anchor + operator identity.
