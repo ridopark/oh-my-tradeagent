@@ -1071,6 +1071,42 @@ class PositionWorkflowImplContinueAsNewTest {
         .containsOnly(wfId + ":exit:sig-new");
   }
 
+  /**
+   * The fresh-run form of #958: an STC buffered before run() assigns input skipped the dedupe set,
+   * so a redelivery after run() started was processed as new (a second placement; the intermittent
+   * PositionWorkflowImplTest.duplicateSignalId_isSuppressed failure on main). signalWithStart lands
+   * the first copy pre-init deterministically. Two redeliveries: one before the buffered copy is
+   * drained (handler path) and one after it filled (drain-recorded path).
+   */
+  @Test
+  void freshRun_preInitStc_redeliveries_areDeduped() throws Exception {
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    String wfId = "pos-fresh-preinit";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowStub.fromTyped(stub)
+        .signalWithStart(
+            "partialExit",
+            new Object[] {partialExitRequest("sig-x", wfId, 0.5)},
+            new Object[] {futureInput(6)});
+    // run() has assigned input once it schedules its first calendar activity.
+    verify(calendar, Mockito.timeout(10_000)).durationUntilEodEt();
+    // Before the entry fill: the buffered copy is still parked in pendingExits.
+    stub.partialExit(partialExitRequest("sig-x", wfId, 0.5));
+    confirmEntry(stub, 6L);
+    waitForPlaceOrderAtLeast(1);
+    stub.onFill(fill("brk-exit", 3L, new BigDecimal("2.60")));
+    Thread.sleep(500);
+    // After the buffered copy was processed and filled.
+    stub.partialExit(partialExitRequest("sig-x", wfId, 0.5));
+    Thread.sleep(1_500);
+
+    assertThat(placeOrderInvocations()).as("one STC, one placement").isEqualTo(1L);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+    assertThat(auditKinds("ExitDuplicateSuppressed"))
+        .filteredOn(e -> "sig-x".equals(e.getSubject().get("signal_id")))
+        .hasSize(2);
+  }
+
   /** Below the watermark nothing rolls, no matter how quiet the position is. */
   @Test
   void belowWatermark_neverRolls() throws Exception {

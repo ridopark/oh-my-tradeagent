@@ -76,6 +76,8 @@ class PositionWorkflowCarryForwardClassificationTest {
           "pendingExits",
           // #958: members are always also in pendingExits, removed when drained
           "preInitCarriedDuplicates",
+          // members are always also in pendingExits, removed when drained
+          "preInitBuffered",
           "pendingArms",
           "pendingTicks",
           "pendingRiskBreaches",
@@ -195,6 +197,7 @@ class PositionWorkflowCarryForwardClassificationTest {
           "VERSION_CHANDELIER_TRAIL_ON_BID",
           "VERSION_BUFFERED_OPERATOR_AUDIT",
           "VERSION_CARRIED_PREINIT_DEDUPE",
+          "VERSION_PREINIT_STC_DEDUPE",
           "VERSION_RISK_BREACH_EXEMPT_LONG_DATED");
 
   private static final Path IMPL_SOURCE =

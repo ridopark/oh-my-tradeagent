@@ -879,6 +879,20 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_CARRIED_PREINIT_DEDUPE = "carried-preinit-dedupe-v1";
 
   /**
+   * The fresh-run form of #958: an STC that {@link #partialExit} buffers before run() assigns
+   * {@code input} never entered {@code processedSignalIds}, so a redelivery after run() started was
+   * processed as new — a second placement under the same intent key (exec's journal absorbs it, but
+   * the exit then waits in flight for a fill that never comes). Now a redelivery is suppressed
+   * while the buffered copy is still queued (handler), and the buffered id is recorded when it
+   * drains (main loop) so later redeliveries and a roll dedupe normally.
+   *
+   * <p>Read at both sites ONLY when a pre-init buffer actually happened, so a history that never
+   * took that path records no marker; a legacy one that did resolves DEFAULT and keeps its recorded
+   * behaviour.
+   */
+  private static final String VERSION_PREINIT_STC_DEDUPE = "preinit-stc-dedupe-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -1085,6 +1099,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * Identity-keyed: a retry re-enqueue reuses a processed id and must not be mistaken for one.
    */
   private final Set<PartialExitRequest> preInitCarriedDuplicates =
+      Collections.newSetFromMap(new IdentityHashMap<>());
+
+  /**
+   * Requests in {@code pendingExits} that {@link #partialExit} buffered pre-init as NEW (see {@link
+   * #VERSION_PREINIT_STC_DEDUPE}). Identity-keyed for the same reason as {@code
+   * preInitCarriedDuplicates}.
+   */
+  private final Set<PartialExitRequest> preInitBuffered =
       Collections.newSetFromMap(new IdentityHashMap<>());
 
   private FillSignalPayload lastFillEvent;
@@ -2172,6 +2194,11 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   "deferred_until_init",
                   true));
         } else {
+          if (preInitBuffered.remove(req)
+              && Workflow.getVersion(VERSION_PREINIT_STC_DEDUPE, Workflow.DEFAULT_VERSION, 1)
+                  >= 1) {
+            processedSignalIds.add(req.getSignalId());
+          }
           processOne(req);
         }
       }
@@ -2429,6 +2456,8 @@ public class PositionWorkflowImpl implements PositionWorkflow {
     if (input == null) {
       if (carriedRun && processedSignalIds.contains(req.getSignalId())) {
         preInitCarriedDuplicates.add(req);
+      } else {
+        preInitBuffered.add(req);
       }
       pendingExits.add(req);
       return;
@@ -2446,6 +2475,14 @@ public class PositionWorkflowImpl implements PositionWorkflow {
       auditLog(
           KIND_EXIT_DUPLICATE_SUPPRESSED,
           subject("signal_id", req.getSignalId(), "note", "position_already_drained"));
+      return;
+    }
+    if (!processedSignalIds.contains(req.getSignalId())
+        && preInitBuffered.stream().anyMatch(r -> r.getSignalId().equals(req.getSignalId()))
+        && Workflow.getVersion(VERSION_PREINIT_STC_DEDUPE, Workflow.DEFAULT_VERSION, 1) >= 1) {
+      auditLog(
+          KIND_EXIT_DUPLICATE_SUPPRESSED,
+          subject("signal_id", req.getSignalId(), "note", "duplicate_signal_id"));
       return;
     }
     if (!processedSignalIds.add(req.getSignalId())) {

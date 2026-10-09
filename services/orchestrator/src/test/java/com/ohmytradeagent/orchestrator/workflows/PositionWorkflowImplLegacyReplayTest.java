@@ -454,6 +454,27 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * A fresh-run history recorded on the code BEFORE {@code VERSION_PREINIT_STC_DEDUPE}: an STC
+   * buffered pre-init (signalWithStart), a redelivery while it was still queued, and one after it
+   * filled — both processed as new, so the history carries their placements. Replaying it against
+   * the current impl must take the DEFAULT branch at both gate sites. Recorded once (via a
+   * throwaway test on main @ 6924983) and NEVER re-recorded: a change that breaks it needs a gate.
+   */
+  @Test
+  void preInitRedeliveryLegacyHistoryReplaysWithoutNonDeterminism() throws Exception {
+    WorkflowExecutionHistory history;
+    try (var in =
+        getClass()
+            .getClassLoader()
+            .getResourceAsStream(
+                "temporal/replay/position-preinit-redelivery-legacy-history.json")) {
+      history =
+          WorkflowExecutionHistory.fromJson(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+    }
+    WorkflowReplayer.replayWorkflowExecution(history, PositionWorkflowImpl.class);
+  }
+
+  /**
    * One-shot recorder for {@link #CARRIED_FIXTURE_RESOURCE}, run against the REAL {@link
    * PositionWorkflowImpl}. Lowers the watermark (the {@code PositionWorkflowImplContinueAsNewTest}
    * technique) so neutral ticks roll an armed position, restores it so the carried run cannot roll
