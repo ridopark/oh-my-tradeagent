@@ -15,6 +15,7 @@ import com.ohmytradeagent.contract.activities.CondorExecActivity;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorFlattenRequest;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.CondorFlattenResult;
 import com.ohmytradeagent.contract.activities.CondorExecActivity.HeldLeg;
+import com.ohmytradeagent.contract.activities.CondorExecActivity.SettlementCash;
 import com.ohmytradeagent.contract.activities.CondorMarketActivity;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
@@ -70,6 +71,10 @@ class CondorHoldWorkflowImplTest {
         .when(calendar.durationUntilEodCloseEt(CondorHoldWorkflowImpl.EXPIRY_CLOSE_ET))
         .thenReturn(Duration.ofHours(1));
     lenient().when(condorExec.heldCondorLegs(any(), any(), any())).thenReturn(List.of());
+    // Nothing booked: matches an OTM expiry (expected settlement cash 0).
+    lenient()
+        .when(condorExec.bookedSettlementCash(any(), any(), any(), any()))
+        .thenReturn(new SettlementCash(BigDecimal.ZERO, 0));
     lenient()
         .when(condorExec.flattenCondor(any()))
         .thenReturn(new CondorFlattenResult(true, true, null));
@@ -155,6 +160,8 @@ class CondorHoldWorkflowImplTest {
   void itmSettlement_chargesIntrinsicOfTheBreachedShort() {
     // 602.50 vs short 601C → 1.50 debit; credit 1.10 → (1.10 − 1.50) × 100 = −40.
     when(market.settlementSpot("XSP")).thenReturn(602.50);
+    when(condorExec.bookedSettlementCash(any(), any(), any(), any()))
+        .thenReturn(new SettlementCash(new BigDecimal("-150.00"), 1));
 
     assertThat(runToCompletion()).isEqualTo("settled");
 
@@ -182,6 +189,68 @@ class CondorHoldWorkflowImplTest {
 
     assertThat(runToCompletion()).isEqualTo("settled");
     verify(condorExec).heldCondorLegs(any(), any(), any());
+  }
+
+  // #920: the broker's booked settlement cash is compared to the expected settlement cash
+  // (-debit x 100 x qty) after the next open. Within tolerance: no page.
+  @Test
+  void bookedSettlementCashWithinTolerance_noMismatchPage() {
+    when(market.settlementSpot("XSP")).thenReturn(602.50); // expected cash -150
+    when(condorExec.bookedSettlementCash(any(), any(), any(), any()))
+        .thenReturn(new SettlementCash(new BigDecimal("-160.00"), 1));
+
+    assertThat(runToCompletion()).isEqualTo("settled");
+
+    verify(condorExec)
+        .bookedSettlementCash(
+            eq("staging_paper"),
+            eq("alpaca-paper"),
+            eq(
+                List.of(
+                    "XSP   261005C00601000",
+                    "XSP   261005P00599000",
+                    "XSP   261005C00604000",
+                    "XSP   261005P00596000")),
+            eq("2026-10-05"));
+    verify(audit, never()).log(Mockito.argThat(e -> "CondorSettleMismatch".equals(e.getKind())));
+  }
+
+  // #920: booked cash diverging beyond tolerance (here: nothing booked for an ITM expiry) pages
+  // CondorSettleMismatch (RED) with both figures.
+  @Test
+  void bookedSettlementCashDiverges_pagesMismatchWithBothFigures() {
+    when(market.settlementSpot("XSP")).thenReturn(602.50); // expected cash -150
+
+    assertThat(runToCompletion()).isEqualTo("settle_mismatch");
+
+    Map<String, Object> s = onlyAudit("CondorSettleMismatch").getSubject();
+    assertThat(s).containsEntry("reason", "booked_cash_mismatch").containsEntry("activities", 0);
+    assertThat(new BigDecimal(s.get("expected_settlement_cash").toString()))
+        .isEqualByComparingTo("-150");
+    assertThat(new BigDecimal(s.get("booked_settlement_cash").toString()))
+        .isEqualByComparingTo("0");
+  }
+
+  @Test
+  void bookedSettlementCashReadFailing_pagesMismatch_workflowDoesNotFail() {
+    when(market.settlementSpot("XSP")).thenReturn(600.0);
+    when(condorExec.bookedSettlementCash(any(), any(), any(), any()))
+        .thenThrow(new RuntimeException("activities endpoint down"));
+
+    assertThat(runToCompletion()).isEqualTo("settle_mismatch");
+
+    assertThat(onlyAudit("CondorSettleMismatch").getSubject())
+        .containsEntry("reason", "booked_cash_read_failed");
+  }
+
+  // An unresolved settlement (no spot) has no expected figure to compare: no cash read.
+  @Test
+  void unresolvedSettlement_skipsTheBookedCashRead() {
+    when(market.settlementSpot("XSP")).thenReturn(null);
+
+    runToCompletion();
+
+    verify(condorExec, never()).bookedSettlementCash(any(), any(), any(), any());
   }
 
   @Test
@@ -250,6 +319,8 @@ class CondorHoldWorkflowImplTest {
         .thenThrow(io.temporal.failure.ApplicationFailure.newNonRetryableFailure("exec down", "X"))
         .thenReturn(List.of());
     when(market.settlementSpot("XSP")).thenReturn(610.0);
+    when(condorExec.bookedSettlementCash(any(), any(), any(), any()))
+        .thenReturn(new SettlementCash(new BigDecimal("-300.00"), 2));
     CondorHoldWorkflow wf = stub();
     WorkflowClient.start(wf::run, input());
     wf.forceClose("operator:alice");

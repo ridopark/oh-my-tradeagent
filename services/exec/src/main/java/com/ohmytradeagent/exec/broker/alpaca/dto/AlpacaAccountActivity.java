@@ -27,6 +27,7 @@ import java.math.BigDecimal;
 public record AlpacaAccountActivity(
     @JsonProperty("id") String id,
     @JsonProperty("activity_type") String activityType,
+    @JsonProperty("symbol") String symbol,
     @JsonProperty("net_amount") BigDecimal netAmount,
     @JsonProperty("date") String date,
     @JsonProperty("transaction_time") String transactionTime) {}

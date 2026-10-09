@@ -37,6 +37,15 @@ public interface CondorExecActivity {
   List<HeldLeg> heldCondorLegs(String tenantId, String brokerTarget, List<String> occSymbols);
 
   /**
+   * #920: the settlement cash the broker BOOKED for these legs' expiry (option expiration,
+   * assignment, exercise and cash-deliverable account activities dated from {@code expiryDate}
+   * ({@code YYYY-MM-DD}) through the following days), summed. {@code activities} is how many such
+   * rows matched a leg — zero means nothing is booked yet. Paper-only, like every condor exec call.
+   */
+  SettlementCash bookedSettlementCash(
+      String tenantId, String brokerTarget, List<String> occSymbols, String expiryDate);
+
+  /**
    * @param legs short call, short put, long call, long put (the {@link CondorMarketActivity} order)
    * @param modelCredit the net credit the walk is measured against; it abandons below {@code
    *     modelCredit − 2 ticks}
@@ -82,4 +91,7 @@ public interface CondorExecActivity {
 
   /** {@code qty} is signed: negative for a short. */
   record HeldLeg(String occSymbol, long qty) {}
+
+  /** {@code cash} in dollars (credit +, debit −); {@code activities} = matching broker rows. */
+  record SettlementCash(BigDecimal cash, int activities) {}
 }
