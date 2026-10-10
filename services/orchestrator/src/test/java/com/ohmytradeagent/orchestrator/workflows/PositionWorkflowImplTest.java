@@ -5145,6 +5145,9 @@ class PositionWorkflowImplTest {
     in.setSourceSignalWorkflowId("src-wf");
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 2L);
+    // run() sets positionConfirmed after waking from the first-fill await; armTrail does not
+    // need it but correctBookedLot does, so an unawaited correction reads REJECTED_NOT_CORRECTABLE.
+    waitForAuditKind("PositionEntered");
     assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
         .isEqualTo(ArmTrailResult.Status.ARMED);
     // Armed -> correction refused (the #820 guard, message now names disarm_trail).
@@ -5467,6 +5470,9 @@ class PositionWorkflowImplTest {
     in.setSourceSignalWorkflowId("src-wf");
     WorkflowStub.fromTyped(stub).start(in);
     confirmEntry(stub, 2L);
+    // run() sets positionConfirmed after waking from the first-fill await; armTrail does not
+    // need it but correctBookedLot does, so an unawaited correction reads REJECTED_NOT_CORRECTABLE.
+    waitForAuditKind("PositionEntered");
     assertThat(stub.armTrail(armTrailRequest("ops-1", new BigDecimal("0.20"))).getStatus())
         .isEqualTo(ArmTrailResult.Status.ARMED);
 
