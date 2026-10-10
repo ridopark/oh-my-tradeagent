@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { startTransition } from "react";
+import { startTransition, useEffect } from "react";
 
 // Catch-all for a page whose server render threw — in practice a BFF read that failed or timed out
 // on a page with no degrade path of its own (/live and /status render their own "unavailable"
@@ -19,6 +19,22 @@ export default function PageError({
   reset: () => void;
 }) {
   const router = useRouter();
+  // Report what actually failed: a browser-side render error never reaches the server log, and a
+  // server one is only findable by its digest. Best-effort, so a failed report can never take
+  // this fallback page down too.
+  useEffect(() => {
+    fetch("/api/client-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({
+        message: error.message,
+        digest: error.digest,
+        stack: error.stack,
+        path: window.location.pathname,
+      }),
+    }).catch(() => {});
+  }, [error]);
   // reset() alone re-renders the boundary's children from the client cache, i.e. the same failed
   // server render; refresh() re-runs the server read.
   const retry = () =>
