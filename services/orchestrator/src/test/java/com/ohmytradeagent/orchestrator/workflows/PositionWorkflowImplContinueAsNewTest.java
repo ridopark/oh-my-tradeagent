@@ -120,6 +120,17 @@ class PositionWorkflowImplContinueAsNewTest {
     f.set(null, v);
   }
 
+  /**
+   * For the "X blocks the roll" tests: lower the watermark only AFTER the blocking condition holds.
+   * Lowered at test start, the setup's own history (57-58 events locally, more on a loaded runner)
+   * raced it — a roll check that ran while the position was still quiet legitimately rolled BEFORE
+   * the condition existed, failing the must-block assertion (CI 2026-10-08; reproduced
+   * deterministically with a start-time watermark of 30).
+   */
+  private static void lowerWatermarkOnceBlocked() throws Exception {
+    setWatermark(60L);
+  }
+
   // ---------- fixture helpers (mirroring PositionWorkflowImplTest) ----------
 
   /**
@@ -471,7 +482,6 @@ class PositionWorkflowImplContinueAsNewTest {
    */
   @Test
   void exitInFlight_blocksRoll_untilDrained() throws Exception {
-    setWatermark(60L);
     when(exec.placeOrder(any())).thenReturn(submittedResult());
 
     String wfId = "pos-can-inflight";
@@ -487,6 +497,7 @@ class PositionWorkflowImplContinueAsNewTest {
     waitForPlaceOrderCount(1);
 
     // Tick pressure past the watermark: the barrier must hold.
+    lowerWatermarkOnceBlocked();
     for (int i = 0; i < 30; i++) {
       stub.chandelierTick(tick(new BigDecimal("2.50")));
       Thread.sleep(20);
@@ -514,7 +525,6 @@ class PositionWorkflowImplContinueAsNewTest {
    */
   @Test
   void scheduledPartialRetry_blocksRoll_untilResolved() throws Exception {
-    setWatermark(60L);
     // Long next-open so the pending-but-unfired window persists across the tick pressure below.
     when(calendar.durationUntilNextRthOpenEt()).thenReturn(Duration.ofHours(12));
     // First placement (the partial) fails non-retryably -> schedules the re-drive; the re-driven
@@ -556,6 +566,7 @@ class PositionWorkflowImplContinueAsNewTest {
 
     // Tick pressure far past the watermark during the scheduled-but-unfired window: the barrier
     // must hold, else the pending retry and its timer are silently lost at the run boundary.
+    lowerWatermarkOnceBlocked();
     for (int i = 0; i < 30; i++) {
       stub.chandelierTick(tick(new BigDecimal("2.50")));
       Thread.sleep(20);
@@ -661,7 +672,6 @@ class PositionWorkflowImplContinueAsNewTest {
    */
   @Test
   void inFlightUpdateHandler_blocksRoll_untilFinished() throws Exception {
-    setWatermark(60L);
     java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
     Mockito.doAnswer(
             inv -> {
@@ -705,6 +715,7 @@ class PositionWorkflowImplContinueAsNewTest {
 
     // Tick pressure far past the watermark: everything else is quiet, so only the unfinished
     // handler stands between this position and a roll that would abort the operator's update.
+    lowerWatermarkOnceBlocked();
     for (int i = 0; i < 30; i++) {
       stub.chandelierTick(tick(new BigDecimal("2.50")));
       Thread.sleep(20);
@@ -739,7 +750,6 @@ class PositionWorkflowImplContinueAsNewTest {
    */
   @Test
   void inFlightArmTrailHandler_blocksRoll_untilFinished() throws Exception {
-    setWatermark(60L);
     java.util.concurrent.CountDownLatch auditGate = new java.util.concurrent.CountDownLatch(1);
     Mockito.doAnswer(
             inv -> {
@@ -778,6 +788,7 @@ class PositionWorkflowImplContinueAsNewTest {
 
     // Neutral ticks (below peak 3.00, above threshold 2.40) push history past the watermark while
     // the handler is parked WITH an armed trail — the arm-window twin of the disarm test.
+    lowerWatermarkOnceBlocked();
     for (int i = 0; i < 30; i++) {
       stub.chandelierTick(tick(new BigDecimal("2.50")));
       Thread.sleep(20);
