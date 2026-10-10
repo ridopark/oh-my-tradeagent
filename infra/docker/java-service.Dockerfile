@@ -31,6 +31,10 @@ COPY .mvn .mvn
 # `--mount=type=cache` on /root/.m2 is NOT persisted on ephemeral CI runners, which is why every
 # image build used to download everything from Central. A new module missing from this list fails
 # here loudly ("Child module ... does not exist"), never silently.
+#
+# It resolves the WHOLE reactor, before SERVICE_MODULE is declared, so the layer is identical for
+# every image. The six matrix jobs share one cache scope and each export overwrites its manifest:
+# a per-module layer survived only for the last writer (measured: 1 of 6 cache hits).
 COPY pom.xml ./
 COPY contract/java/pom.xml contract/java/pom.xml
 COPY contract/schemas contract/schemas
@@ -40,8 +44,7 @@ COPY services/exec/pom.xml services/exec/pom.xml
 COPY services/market-data/pom.xml services/market-data/pom.xml
 COPY services/orchestrator/pom.xml services/orchestrator/pom.xml
 COPY services/tenant-dashboard-bff/pom.xml services/tenant-dashboard-bff/pom.xml
-ARG SERVICE_MODULE
-RUN mvn -B -ntp -pl services/${SERVICE_MODULE} -am package \
+RUN mvn -B -ntp package \
         -DskipTests -Dspotless.check.skip=true -Dspring-boot.repackage.skip=true \
     && find . -name target -type d -prune -exec rm -rf {} +
 
@@ -50,6 +53,7 @@ COPY services services
 # The orchestrator packages the FOMC calendar (gated-condor event-day skip) from here into its jar;
 # without it CondorDayActivitiesImpl fails closed at boot.
 COPY scripts/data/fomc-dates.txt scripts/data/fomc-dates.txt
+ARG SERVICE_MODULE
 RUN mvn -B -ntp -pl services/${SERVICE_MODULE} -am package \
         -DskipTests -Dspotless.check.skip=true
 
