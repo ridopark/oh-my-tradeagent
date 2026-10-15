@@ -2,6 +2,8 @@ package com.ohmytradeagent.tdbff.proximity;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,12 +31,23 @@ public class MarketDataQuoteClient {
 
   private final RestClient rest;
 
+  /**
+   * The /live chain picker's reads. A chain is one or more pages of Alpaca snapshots (and the
+   * expirations probe adds a spot read in front), so the 2s budget the per-contract reads use would
+   * time out a large chain. Still bounded: an operator is waiting on it.
+   */
+  private final RestClient chainRest;
+
   public MarketDataQuoteClient(
       @Value("${market-data.base-url:http://market-data:8080}") String baseUrl) {
     SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
     factory.setConnectTimeout(Duration.ofSeconds(2));
     factory.setReadTimeout(Duration.ofSeconds(2));
     this.rest = RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
+    SimpleClientHttpRequestFactory chainFactory = new SimpleClientHttpRequestFactory();
+    chainFactory.setConnectTimeout(Duration.ofSeconds(2));
+    chainFactory.setReadTimeout(Duration.ofSeconds(8));
+    this.chainRest = RestClient.builder().baseUrl(baseUrl).requestFactory(chainFactory).build();
   }
 
   /** Underlying last-trade price for {@code ticker}, or null when unavailable. */
@@ -88,10 +101,98 @@ public class MarketDataQuoteClient {
     }
   }
 
+  /**
+   * Listed expirations for {@code underlying} from today on, ascending, or null when the read
+   * failed. Empty is a real answer (no listed options) only as far as market-data can tell — it is
+   * also fail-soft and returns an empty list when Alpaca errored.
+   */
+  public List<LocalDate> optionExpirations(String underlying) {
+    try {
+      Map<String, Object> body =
+          chainRest.get().uri("/md/chain/{u}/expirations", underlying).retrieve().body(MAP_TYPE);
+      return parseExpirations(body);
+    } catch (RuntimeException e) {
+      log.warn("market-data chain expirations read failed for {}: {}", underlying, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * One side ({@code right} = "C" or "P") of one expiry for {@code underlying}, strike ascending,
+   * or null when the read failed.
+   */
+  public List<ChainRow> optionChain(String underlying, LocalDate expiration, String right) {
+    try {
+      Map<String, Object> body =
+          chainRest
+              .get()
+              .uri(
+                  u ->
+                      u.path("/md/chain/{u}")
+                          .queryParam("expiration", expiration.toString())
+                          .queryParam("right", right)
+                          .build(underlying))
+              .retrieve()
+              .body(MAP_TYPE);
+      return parseChain(body);
+    } catch (RuntimeException e) {
+      log.warn(
+          "market-data chain read failed for {} {} {}: {}",
+          underlying,
+          expiration,
+          right,
+          e.getMessage());
+      return null;
+    }
+  }
+
+  /** The {@code /md/chain/{u}/expirations} wire shape; null when it is not that shape. */
+  static List<LocalDate> parseExpirations(Map<String, Object> body) {
+    if (body == null || !(body.get("expirations") instanceof List<?> raw)) {
+      return null;
+    }
+    return raw.stream().map(d -> LocalDate.parse(d.toString())).toList();
+  }
+
+  /** The {@code /md/chain/{u}} wire shape; null when it is not that shape. */
+  static List<ChainRow> parseChain(Map<String, Object> body) {
+    if (body == null || !(body.get("contracts") instanceof List<?> raw)) {
+      return null;
+    }
+    return raw.stream()
+        .map(r -> (Map<?, ?>) r)
+        .map(
+            r ->
+                new ChainRow(
+                    String.valueOf(r.get("occ")),
+                    decimal(r.get("strike")),
+                    decimal(r.get("bid")),
+                    decimal(r.get("mid")),
+                    decimal(r.get("ask")),
+                    decimal(r.get("iv")),
+                    decimal(r.get("delta")),
+                    r.get("volume") == null ? null : Long.valueOf(r.get("volume").toString())))
+        .toList();
+  }
+
   private static BigDecimal decimal(Object raw) {
     return raw == null ? null : new BigDecimal(raw.toString());
   }
 
   /** One NBBO snapshot. Any field may be null when the provider omitted it. */
   public record OptionQuote(BigDecimal bid, BigDecimal mid, BigDecimal ask) {}
+
+  /**
+   * One chain row ({@code occ} is COMPACT). Market fields may be null when the provider omitted
+   * them.
+   */
+  public record ChainRow(
+      String occ,
+      BigDecimal strike,
+      BigDecimal bid,
+      BigDecimal mid,
+      BigDecimal ask,
+      BigDecimal iv,
+      BigDecimal delta,
+      Long volume) {}
 }

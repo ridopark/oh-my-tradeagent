@@ -6,6 +6,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.marketdata.provider.ChainContract;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
@@ -1198,6 +1199,83 @@ class AlpacaMarketDataTest {
   void optionChainQuotes_5xx_returnsEmpty() {
     server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
     assertThat(provider.optionChainQuotes("XSP", java.time.LocalDate.of(2026, 10, 5))).isEmpty();
+  }
+
+  // --- /live chain picker: optionChain + optionExpirations ---
+
+  @Test
+  void optionChain_parsesEveryContract_strikeAscending_withNullsForMissingFields()
+      throws Exception {
+    server.enqueue(
+        json(
+            "{\"snapshots\":{"
+                + "\"NVDA261016C00190000\":{\"latestQuote\":{\"bp\":0,\"ap\":0}},"
+                + "\"NVDA261016C00182500\":{\"latestQuote\":{\"bp\":3.10,\"ap\":3.20},"
+                + "\"dailyBar\":{\"v\":4210},\"impliedVolatility\":0.41,"
+                + "\"greeks\":{\"delta\":0.52}}},\"next_page_token\":null}"));
+
+    java.util.List<ChainContract> chain =
+        provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C');
+
+    assertThat(chain)
+        .extracting(ChainContract::occ)
+        .containsExactly("NVDA261016C00182500", "NVDA261016C00190000");
+    ChainContract atm = chain.get(0);
+    assertThat(atm.strike()).isEqualByComparingTo("182.5");
+    assertThat(atm.mid()).isEqualByComparingTo("3.15");
+    assertThat(atm.impliedVolatility()).isEqualByComparingTo("0.41");
+    assertThat(atm.delta()).isEqualByComparingTo("0.52");
+    assertThat(atm.volume()).isEqualTo(4210L);
+    // A 0.00 ask is "no offer": no ask, no mid — never a free contract.
+    ChainContract wing = chain.get(1);
+    assertThat(wing.ask()).isNull();
+    assertThat(wing.mid()).isNull();
+    assertThat(wing.volume()).isNull();
+    assertThat(server.takeRequest().getPath())
+        .startsWith("/v1beta1/options/snapshots/NVDA?")
+        .contains("expiration_date=2026-10-16")
+        .contains("type=call");
+  }
+
+  @Test
+  void optionChain_put_requestsPuts() throws Exception {
+    server.enqueue(json("{\"snapshots\":{},\"next_page_token\":null}"));
+    provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'P');
+    assertThat(server.takeRequest().getPath()).contains("type=put");
+  }
+
+  @Test
+  void optionChain_5xx_returnsEmpty() {
+    server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
+    assertThat(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C')).isEmpty();
+  }
+
+  @Test
+  void optionExpirations_readsDistinctSortedDates_fromANearTheMoneyProbe() throws Exception {
+    server.enqueue(json("{\"latestTrade\":{\"p\":200.00}}"));
+    server.enqueue(
+        json(
+            "{\"snapshots\":{"
+                + "\"NVDA261023C00200000\":{},\"NVDA261016C00195000\":{},"
+                + "\"NVDA261016C00200000\":{}},\"next_page_token\":null}"));
+
+    assertThat(provider.optionExpirations("NVDA"))
+        .containsExactly(
+            java.time.LocalDate.of(2026, 10, 16), java.time.LocalDate.of(2026, 10, 23));
+    server.takeRequest(); // the spot read
+    assertThat(server.takeRequest().getPath())
+        .startsWith("/v1beta1/options/snapshots/NVDA?")
+        .contains("type=call")
+        .contains("strike_price_gte=180.00")
+        .contains("strike_price_lte=220.00")
+        .contains("expiration_date_gte=");
+  }
+
+  @Test
+  void optionExpirations_noSpot_returnsEmpty_withoutProbingTheChain() {
+    server.enqueue(new MockResponse().setResponseCode(404).setBody("{}"));
+    assertThat(provider.optionExpirations("NOPE")).isEmpty();
+    assertThat(server.getRequestCount()).isEqualTo(1);
   }
 
   private static MockResponse json(String body) {

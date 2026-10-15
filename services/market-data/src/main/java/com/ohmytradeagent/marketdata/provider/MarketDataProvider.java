@@ -84,6 +84,23 @@ public interface MarketDataProvider {
   }
 
   /**
+   * Every {@code underlying} contract of one side ({@code right} = 'C' or 'P') expiring on {@code
+   * expiration}, strike ascending, for the /live chain picker. Display-only. Default empty.
+   */
+  default java.util.List<ChainContract> optionChain(
+      String underlying, java.time.LocalDate expiration, char right) {
+    return java.util.List.of();
+  }
+
+  /**
+   * The listed expirations for {@code underlying} from today on, ascending, for the /live chain
+   * picker. Display-only. Default empty.
+   */
+  default java.util.List<java.time.LocalDate> optionExpirations(String underlying) {
+    return java.util.List.of();
+  }
+
+  /**
    * Opens a push subscription for {@code occSymbol}. Each premium tick from the provider feed is
    * delivered to {@code onTick}. Subscriptions are independent: closing one does not affect other
    * subscribers on the same symbol.

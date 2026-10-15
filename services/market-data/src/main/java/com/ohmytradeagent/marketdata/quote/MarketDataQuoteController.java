@@ -1,8 +1,10 @@
 package com.ohmytradeagent.marketdata.quote;
 
+import com.ohmytradeagent.marketdata.provider.ChainContract;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -10,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -93,6 +96,51 @@ public class MarketDataQuoteController {
     out.put("gamma", greeks.map(g -> (Object) g.gamma()).orElse(null));
     out.put("theta", greeks.map(g -> (Object) g.theta()).orElse(null));
     out.put("vega", greeks.map(g -> (Object) g.vega()).orElse(null));
+    return out;
+  }
+
+  /**
+   * {@code {underlying, expirations:[yyyy-mm-dd…]}} — listed expirations from today on, for the
+   * /live chain picker. Empty when the provider has none or the read failed.
+   */
+  @GetMapping("/md/chain/{underlying}/expirations")
+  public Map<String, Object> chainExpirations(@PathVariable("underlying") String underlying) {
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("underlying", underlying);
+    out.put(
+        "expirations",
+        provider.optionExpirations(underlying).stream().map(Object::toString).toList());
+    return out;
+  }
+
+  /**
+   * {@code {underlying, expiration, right, contracts:[{occ, strike, bid, mid, ask, iv, delta,
+   * volume}]}} — one side of one expiry, strike ascending, for the /live chain picker. Market
+   * fields are null when the provider omitted them.
+   */
+  @GetMapping("/md/chain/{underlying}")
+  public Map<String, Object> chain(
+      @PathVariable("underlying") String underlying,
+      @RequestParam("expiration") LocalDate expiration,
+      @RequestParam("right") char right) {
+    List<Map<String, Object>> rows = new ArrayList<>();
+    for (ChainContract c : provider.optionChain(underlying, expiration, right)) {
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("occ", c.occ());
+      row.put("strike", c.strike());
+      row.put("bid", c.bid());
+      row.put("mid", c.mid());
+      row.put("ask", c.ask());
+      row.put("iv", c.impliedVolatility());
+      row.put("delta", c.delta());
+      row.put("volume", c.volume());
+      rows.add(row);
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("underlying", underlying);
+    out.put("expiration", expiration.toString());
+    out.put("right", String.valueOf(right));
+    out.put("contracts", rows);
     return out;
   }
 

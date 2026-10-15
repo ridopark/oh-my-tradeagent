@@ -451,6 +451,59 @@ export async function getOptionQuote(occ: string): Promise<OptionQuoteResult> {
   return { ok: false, kind: "error" };
 }
 
+// The /live chain picker's two reads. Display-only: a picked row still goes through
+// getOptionQuote before the confirm step, so nothing here prices an order. `spot` is null when
+// the underlying's last trade is unavailable; every market field on a row may be null (a listed
+// strike with no quote).
+export interface OptionChainRow {
+  occ: string;
+  strike: number;
+  bid: number | null;
+  mid: number | null;
+  ask: number | null;
+  iv: number | null;
+  delta: number | null;
+  volume: number | null;
+}
+
+export type ChainReadFailure = { ok: false; kind: "invalid" | "unavailable" | "disabled" | "error" };
+
+export type ChainExpirationsResult =
+  | { ok: true; underlying: string; spot: number | null; expirations: string[] }
+  | ChainReadFailure;
+
+export type OptionChainResult =
+  | { ok: true; spot: number | null; contracts: OptionChainRow[] }
+  | ChainReadFailure;
+
+function chainFailure(status: number): ChainReadFailure {
+  if (status === 400) return { ok: false, kind: "invalid" };
+  if (status === 503) return { ok: false, kind: "unavailable" };
+  if (status === 404) return { ok: false, kind: "disabled" };
+  return { ok: false, kind: "error" };
+}
+
+export async function getChainExpirations(underlying: string): Promise<ChainExpirationsResult> {
+  const { status, body } = await bffGetRaw(
+    `/api/entries/chain/expirations?underlying=${encodeURIComponent(underlying)}`,
+  );
+  if (status !== 200) return chainFailure(status);
+  const b = body as { underlying: string; spot: number | null; expirations: string[] };
+  return { ok: true, underlying: b.underlying, spot: b.spot, expirations: b.expirations };
+}
+
+export async function getOptionChain(
+  underlying: string,
+  expiration: string,
+  right: "C" | "P",
+): Promise<OptionChainResult> {
+  const q = new URLSearchParams({ underlying, expiration, right });
+  const { status, body } = await bffGetRaw(`/api/entries/chain?${q}`);
+  if (status !== 200) return chainFailure(status);
+  const b = body as { spot: number | null; contracts: OptionChainRow[] };
+  return { ok: true, spot: b.spot, contracts: b.contracts };
+}
+
 // Outcome of a submit. `quote-moved` carries both prices so the operator can see WHY it refused
 // rather than being told to try again with no explanation.
 export type ManualEntryResult =

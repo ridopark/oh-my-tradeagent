@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.Bar;
+import com.ohmytradeagent.marketdata.provider.ChainContract;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.OptionGreeks;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
@@ -464,6 +465,127 @@ public class AlpacaMarketData implements MarketDataProvider {
           "Alpaca optionChainQuotes failed for {} {}: {}", underlying, expiration, e.getMessage());
       return Map.of();
     }
+  }
+
+  @Override
+  public List<ChainContract> optionChain(String underlying, LocalDate expiration, char right) {
+    List<ChainContract> out = new ArrayList<>();
+    String token = null;
+    try {
+      do {
+        String pageToken = token;
+        JsonNode body =
+            rest.get()
+                .uri(
+                    u ->
+                        u.path("/v1beta1/options/snapshots/{u}")
+                            .queryParam("expiration_date", expiration.toString())
+                            .queryParam("type", right == 'P' ? "put" : "call")
+                            .queryParam("limit", 1000)
+                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                            .build(underlying))
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null) {
+          break;
+        }
+        body.path("snapshots")
+            .fields()
+            .forEachRemaining(e -> out.add(chainContract(e.getKey(), e.getValue())));
+        token = nextPageToken(body);
+      } while (token != null);
+      out.sort(java.util.Comparator.comparing(ChainContract::strike));
+      return out;
+    } catch (RuntimeException e) {
+      log.warn(
+          "Alpaca optionChain failed for {} {} {}: {}",
+          underlying,
+          expiration,
+          right,
+          e.getMessage());
+      return List.of();
+    }
+  }
+
+  /**
+   * Alpaca has no expirations endpoint on the data API, so the dates are read off the OCCs of the
+   * calls struck within {@link #EXPIRATION_PROBE_BAND} of spot: every listed expiry has strikes
+   * near the money, and the band keeps the probe to about one page instead of the full chain.
+   */
+  @Override
+  public List<LocalDate> optionExpirations(String underlying) {
+    Optional<BigDecimal> spot = snapshotEquityPrice(underlying);
+    if (spot.isEmpty()) {
+      return List.of();
+    }
+    BigDecimal lo = spot.get().multiply(BigDecimal.ONE.subtract(EXPIRATION_PROBE_BAND));
+    BigDecimal hi = spot.get().multiply(BigDecimal.ONE.add(EXPIRATION_PROBE_BAND));
+    String today = LocalDate.now(java.time.ZoneId.of("America/New_York")).toString();
+    java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+    String token = null;
+    int pages = 0;
+    try {
+      do {
+        String pageToken = token;
+        JsonNode body =
+            rest.get()
+                .uri(
+                    u ->
+                        u.path("/v1beta1/options/snapshots/{u}")
+                            .queryParam("type", "call")
+                            .queryParam(
+                                "strike_price_gte", lo.setScale(2, java.math.RoundingMode.DOWN))
+                            .queryParam(
+                                "strike_price_lte", hi.setScale(2, java.math.RoundingMode.UP))
+                            .queryParam("expiration_date_gte", today)
+                            .queryParam("limit", 1000)
+                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                            .build(underlying))
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null) {
+          break;
+        }
+        body.path("snapshots").fieldNames().forEachRemaining(occ -> out.add(occExpiry(occ)));
+        token = nextPageToken(body);
+      } while (token != null && ++pages < EXPIRATION_PROBE_MAX_PAGES);
+      return List.copyOf(out);
+    } catch (RuntimeException e) {
+      log.warn("Alpaca optionExpirations failed for {}: {}", underlying, e.getMessage());
+      return List.of();
+    }
+  }
+
+  private static final BigDecimal EXPIRATION_PROBE_BAND = new BigDecimal("0.10");
+  private static final int EXPIRATION_PROBE_MAX_PAGES = 5;
+
+  private static ChainContract chainContract(String occ, JsonNode snapshot) {
+    JsonNode q = snapshot.path("latestQuote");
+    BigDecimal bid = numberOrNull(q.path("bp"));
+    BigDecimal ask = numberOrNull(q.path("ap"));
+    // A 0.00 ask is Alpaca's "no offer", not a free contract: show it as no quote.
+    if (ask != null && ask.signum() <= 0) {
+      ask = null;
+    }
+    JsonNode volume = snapshot.path("dailyBar").path("v");
+    return new ChainContract(
+        occ,
+        new BigDecimal(occ.substring(occ.length() - 8)).movePointLeft(3),
+        bid,
+        bid != null && ask != null ? midPrice(bid, ask) : null,
+        ask,
+        numberOrNull(snapshot.path("impliedVolatility")),
+        numberOrNull(snapshot.path("greeks").path("delta")),
+        volume.isNumber() ? volume.longValue() : null);
+  }
+
+  /** The expiry of a COMPACT OCC: the yymmdd in front of the right + 8-digit strike. */
+  private static LocalDate occExpiry(String occ) {
+    String yymmdd = occ.substring(occ.length() - 15, occ.length() - 9);
+    return LocalDate.of(
+        2000 + Integer.parseInt(yymmdd.substring(0, 2)),
+        Integer.parseInt(yymmdd.substring(2, 4)),
+        Integer.parseInt(yymmdd.substring(4, 6)));
   }
 
   /** Appends bars starting strictly before {@code end} (Alpaca's end bound is inclusive). */

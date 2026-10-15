@@ -2,22 +2,38 @@
 
 import { useEffect, useRef, useState } from "react";
 import { usePanelOpen } from "./LiveRefresh";
+import { Modal } from "./Modal";
+import {
+  OptionChain,
+  breakeven,
+  compactOcc,
+  daysToExpiry,
+  fmtPrice,
+  type ChainResult,
+  type ExpirationsResult,
+  type PickedContract,
+} from "./OptionChain";
 
 // PLAN-2026-08-10-live-manual-bto: the /live "Manual entry" panel — the operator's way to OPEN a
-// position by hand. Same interaction model as TrimButton (inline steps, no modal — the repo has no
-// modal component), with the extra step a buy needs:
+// position by hand. Two ways in, one confirm flow, shown in a modal:
 //
-//   type a contract → [Buy] → quote + qty → [Confirm — BUY n at market] → submitting → outcome
+//   type a contract → [Buy] ─────────────────────────────┐
+//   [Browse chain] → pick a strike → details → [Buy — get quote]
+//                                                         ↓
+//            quote + qty → [Confirm — BUY n at market] → submitting → outcome
 //
+// The chain only picks a contract; every order still goes through the fresh quote + confirm.
 // Every hard-won detail from TrimButton is reused deliberately, not copied by habit:
 //   * an explicit `submitting` lock rather than useTransition's `pending` — React 18.3.1 closes a
 //     transition scope at the first await, which would re-expose the button mid-flight and let a
-//     second real-money order through;
-//   * blur containment (`contains(relatedTarget)`) PLUS preventDefault on mousedown — the bug
-//     fixed in a48c665, where every control but the autofocused one was unclickable because the
-//     focusout bubbled and unmounted the row before mouseup landed;
+//     second real-money order through. The modal holds the same line: it refuses to close while
+//     submitting, and a quote refresh that lands after Confirm is dropped (scheduleRefresh);
 //   * NO retry affordance on failure. A timed-out submit may already have opened a position;
 //     recovery is re-quote-and-look, never one-click repeat.
+//
+// The confirm step used to be inline, guarded by blur containment against the a48c665 bug
+// (focusout unmounting the row before mouseup landed). In the modal that guard is gone: focus is
+// trapped by the dialog, and closing it is an explicit Cancel.
 
 export interface QuoteView {
   occ: string;
@@ -86,11 +102,12 @@ const POLL_CEILING_MS = 120_000;
 
 type Step =
   | { kind: "idle" }
+  | { kind: "detail" }
   | { kind: "quoting" }
   | { kind: "confirm"; quote: QuoteView; idempotencyKey: string }
   | { kind: "submitting" }
   | { kind: "tracking"; signalId: string; status: StatusView | null }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; inModal: boolean };
 
 function fmt(n: number | null | undefined): string {
   return n == null ? "—" : `$${Number(n).toFixed(2)}`;
@@ -161,6 +178,8 @@ export function ManualEntryPanel({
   heldOccs,
   recentContracts,
   quoteAction,
+  chainExpirationsAction,
+  optionChainAction,
   submitAction,
   statusAction,
 }: {
@@ -177,6 +196,12 @@ export function ManualEntryPanel({
    */
   recentContracts: RecentContract[];
   quoteAction: (occ: string) => Promise<QuoteActionResult>;
+  chainExpirationsAction: (underlying: string) => Promise<ExpirationsResult>;
+  optionChainAction: (
+    underlying: string,
+    expiration: string,
+    right: "C" | "P",
+  ) => Promise<ChainResult>;
   submitAction: (
     occ: string,
     strategyId: string,
@@ -191,7 +216,17 @@ export function ManualEntryPanel({
   const [qty, setQty] = useState(String(strategies[0]?.minContracts ?? 1));
   const [strategyId, setStrategyId] = useState(strategies[0]?.strategyId ?? "");
   const [step, setStep] = useState<Step>({ kind: "idle" });
-  usePanelOpen(step.kind !== "idle");
+  // The step as of the last render, for async callbacks that must not act on a step the operator
+  // has already moved past (see scheduleRefresh).
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  // Whether the step is being shown in the modal. Separate from the step on purpose: closing the
+  // modal while an entry is being TRACKED must not lose the outcome — it moves to the panel instead.
+  const [modalOpen, setModalOpen] = useState(false);
+  // The underlying the chain drawer is showing (null = drawer closed), and the row picked from it.
+  const [chainUnderlying, setChainUnderlying] = useState<string | null>(null);
+  const [picked, setPicked] = useState<PickedContract | null>(null);
+  usePanelOpen(step.kind !== "idle" || chainUnderlying !== null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   // clearTimers() alone does NOT stop the loops: if the component unmounts while a poll tick or a
   // quote refresh is awaiting its server action, the cleanup has already run by the time that
@@ -214,32 +249,21 @@ export function ManualEntryPanel({
   const reset = () => {
     clearTimers();
     setStep({ kind: "idle" });
+    setModalOpen(false);
   };
 
-  const handleBlur = (e: React.FocusEvent<HTMLDivElement>) => {
-    // Containment check — see the header note on a48c665. Only disarm the CONFIRM step; the quote
-    // step holds typed input the operator would lose.
-    if (step.kind === "confirm" && !e.currentTarget.contains(e.relatedTarget as Node | null)) {
-      reset();
-    }
-  };
   /**
-   * Suppress the browser's focus-move on mousedown so no focusout fires for a mouse interaction
-   * inside the control — this is what stops Safari/Firefox (which do not focus a <button> on click,
-   * leaving relatedTarget null) from tripping the containment check in handleBlur and disarming the
-   * confirm step before the click lands. Same guard as TrimButton.
-   *
-   * EXCEPT for native form controls. On a <select>, mousedown IS the gesture that opens the option
-   * list, so preventDefault there makes the dropdown permanently unopenable — which is exactly what
-   * it did to the qty picker. Those elements need their default behavior AND they take focus
-   * natively, so handleBlur's containment check (relatedTarget is inside the container) already
-   * covers them without any help from here.
+   * Esc, ✕ and a backdrop click all land here. While SUBMITTING the modal stays put: the order may
+   * already be in flight and its outcome is about to be shown. While TRACKING it closes but the
+   * outcome (and its poll) carries on in the panel. Anywhere else closing is Cancel.
    */
-  const keepFocus = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement | null)?.closest("select, input, textarea, option")) {
+  const closeModal = () => {
+    if (step.kind === "submitting") return;
+    if (step.kind === "tracking") {
+      setModalOpen(false);
       return;
     }
-    e.preventDefault();
+    reset();
   };
 
   const selectedStrategy =
@@ -269,36 +293,56 @@ export function ManualEntryPanel({
   const quantity = Number.parseInt(qty, 10);
   const qtyValid = Number.isInteger(quantity) && quantity >= minQty && quantity <= maxQty;
 
-  const requestQuote = async (refreshesLeft = MAX_QUOTE_REFRESHES) => {
+  /**
+   * `inModal` says where a refusal is shown: a typed contract that does not quote stays in the
+   * panel next to the box it was typed in; a pick made in the modal is answered in the modal.
+   */
+  const requestQuote = async (target: string, inModal: boolean) => {
     clearTimers();
+    if (!inModal) {
+      // A typed contract that is not the picked one ends that pick, so "Back" never returns to
+      // details of a different contract.
+      setPicked((p) => (p && compactOcc(p.row.occ) === compactOcc(target) ? p : null));
+    }
     setStep({ kind: "quoting" });
-    const r = await quoteAction(occ);
+    const r = await quoteAction(target);
     if (cancelled.current) return;
     if (!r.ok) {
-      const messages: Record<string, string> = {
-        "invalid-occ": r.kind === "invalid-occ" ? r.detail : "",
-        unavailable: "No quote available for that contract right now.",
-        disabled: "Manual entry is not enabled.",
-        error: "Could not read a quote.",
-      };
-      setStep({ kind: "failed", message: messages[r.kind] || "Could not read a quote." });
+      setStep({ kind: "failed", message: quoteFailureText(r), inModal });
       return;
     }
     // Mint the idempotency key when the confirm step OPENS, not on click, so a double-click is one
     // entry. Re-quoting mints a new one — that is a genuinely new decision.
-    setStep({
-      kind: "confirm",
-      quote: r.quote,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    // Auto-refresh the quote just under the server's 30s staleness bound, bounded so an abandoned
-    // confirm step stops polling the market. When the budget runs out the quote simply goes stale
-    // and the server refuses the submit — which is the correct, fail-closed outcome.
-    if (refreshesLeft > 0) {
-      timers.current.push(
-        setTimeout(() => void requestQuote(refreshesLeft - 1), QUOTE_REFRESH_MS),
-      );
-    }
+    setStep({ kind: "confirm", quote: r.quote, idempotencyKey: crypto.randomUUID() });
+    setModalOpen(true);
+    scheduleRefresh(target, MAX_QUOTE_REFRESHES);
+  };
+
+  /**
+   * Auto-refresh the quote just under the server's 30s staleness bound, bounded so an abandoned
+   * confirm step stops polling the market. When the budget runs out the quote simply goes stale and
+   * the server refuses the submit — which is the correct, fail-closed outcome.
+   *
+   * A refresh replaces the quote IN PLACE (no "quoting" flash, which would blank the modal) and
+   * only while the confirm step is still showing: if the operator clicked Confirm while the refresh
+   * was in flight, the step is now `submitting` and must not be swapped back to a confirm step with
+   * a fresh idempotency key — that would offer a second real-money order.
+   */
+  const scheduleRefresh = (target: string, refreshesLeft: number) => {
+    if (refreshesLeft <= 0) return;
+    timers.current.push(
+      setTimeout(async () => {
+        const r = await quoteAction(target);
+        // stepRef, not a setStep updater, decides: React may run an updater lazily at the next
+        // render, too late to tell whether to re-arm. The updater re-checks anyway.
+        if (cancelled.current || stepRef.current.kind !== "confirm") return;
+        const next: Step = r.ok
+          ? { kind: "confirm", quote: r.quote, idempotencyKey: crypto.randomUUID() }
+          : { kind: "failed", message: quoteFailureText(r), inModal: true };
+        setStep((prev) => (prev.kind === "confirm" ? next : prev));
+        if (r.ok) scheduleRefresh(target, refreshesLeft - 1);
+      }, QUOTE_REFRESH_MS),
+    );
   };
 
   const submit = async (quote: QuoteView, idempotencyKey: string) => {
@@ -330,6 +374,7 @@ export function ManualEntryPanel({
       setStep({
         kind: "failed",
         message: messages[r.kind] || "Submit failed — check Holdings before retrying.",
+        inModal: true,
       });
       return;
     }
@@ -353,11 +398,42 @@ export function ManualEntryPanel({
     timers.current.push(setTimeout(tick, POLL_INTERVAL_MS));
   };
 
+  const pickFromChain = (p: PickedContract) => {
+    clearTimers();
+    setPicked(p);
+    setOcc(p.row.occ);
+    setStep({ kind: "detail" });
+    setModalOpen(true);
+  };
+
+  /** Back from the confirm step (or a refusal) to the picked contract's details. */
+  const backToDetail = () => {
+    clearTimers();
+    setStep({ kind: "detail" });
+  };
+
   const alreadyHeld =
     step.kind === "confirm" && heldOccs.includes(step.quote.occ.replace(/\s+/g, ""));
 
   // Recomputed on every keystroke: the hint has to follow hand-typing, not just a dropdown pick.
   const matchedSignal = matchingSignal(occ, recentContracts);
+
+  // The chain is browsed by the leading ticker of whatever is typed, so both "NVDA" and a full
+  // OCC open the same underlying.
+  const typedUnderlying = occ.trim().toUpperCase().match(/^[A-Z]{1,6}/)?.[0] ?? null;
+  const toggleChain = () => {
+    setChainUnderlying((open) => (open !== null ? null : typedUnderlying));
+  };
+
+  // The picked row is only "Back"-able while the quote in hand is for that same contract.
+  const pickedCompact = picked ? compactOcc(picked.row.occ) : null;
+  const canGoBack =
+    pickedCompact !== null &&
+    (step.kind === "failed" ||
+      (step.kind === "confirm" && compactOcc(step.quote.occ) === pickedCompact));
+
+  const inlineFailure = step.kind === "failed" && !step.inModal ? step.message : null;
+  const trackingInPanel = step.kind === "tracking" && !modalOpen;
 
   return (
     <section>
@@ -368,7 +444,18 @@ export function ManualEntryPanel({
         </span>
       </div>
       <div className="rounded border border-slate-800 bg-slate-900 px-3 py-3">
-        {(step.kind === "idle" || step.kind === "quoting" || step.kind === "failed") && (
+        {trackingInPanel ? (
+          <div className="flex flex-col gap-1 text-xs" role="status" aria-live="polite">
+            <EntryOutcome status={step.status} />
+            <button
+              type="button"
+              onClick={reset}
+              className="self-start rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
+            >
+              New entry
+            </button>
+          </div>
+        ) : (
           <div className="flex flex-wrap items-center gap-2">
             {/* A real combo box: `list` adds a dropdown of recently signalled contracts WITHOUT
                 constraining the field, so hand-typing an OCC the system has never signalled works
@@ -379,7 +466,7 @@ export function ManualEntryPanel({
               value={occ}
               onChange={(e) => setOcc(e.target.value)}
               list={recentContracts.length > 0 ? RECENT_CONTRACTS_LIST_ID : undefined}
-              placeholder="NVDA 260821C00225000"
+              placeholder="NVDA 260821C00225000 or NVDA"
               spellCheck={false}
               className="w-64 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-600"
             />
@@ -410,11 +497,20 @@ export function ManualEntryPanel({
             )}
             <button
               type="button"
+              aria-expanded={chainUnderlying !== null}
+              disabled={chainUnderlying === null && typedUnderlying === null}
+              onClick={toggleChain}
+              className="rounded border border-sky-400/45 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-300 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-transparent disabled:text-slate-600"
+            >
+              {chainUnderlying !== null ? "Hide chain" : "Browse chain"}
+            </button>
+            <button
+              type="button"
               disabled={!occ.trim() || !strategyId || step.kind === "quoting"}
-              onClick={() => void requestQuote()}
+              onClick={() => void requestQuote(occ, false)}
               className="rounded border border-emerald-500/50 bg-emerald-600/10 px-3 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-transparent disabled:text-slate-600"
             >
-              {step.kind === "quoting" ? "Quoting…" : "Buy"}
+              {step.kind === "quoting" && !modalOpen ? "Quoting…" : "Buy"}
             </button>
             {/* basis-full puts this on its own line under the input row. Shown wherever the
                 browser does (or does not) render the datalist label, so the signal price is
@@ -431,103 +527,309 @@ export function ManualEntryPanel({
                   ` · sized ${matchedSignal.contracts}`}
               </span>
             )}
-            {step.kind === "failed" && (
+            {inlineFailure !== null && (
               <span className="text-xs font-medium text-rose-300" role="alert">
-                {step.message}
+                {inlineFailure}
               </span>
             )}
           </div>
         )}
 
+        {/* Hidden while an entry's outcome is shown in the panel: picking a new contract would
+            replace the step and drop the outcome's poll. "New entry" brings it back. */}
+        {chainUnderlying !== null && !trackingInPanel && (
+          <OptionChain
+            underlying={chainUnderlying}
+            heldOccs={heldOccs.map(compactOcc)}
+            signalledOccs={recentContracts.map((c) => compactOcc(c.occ))}
+            selectedOcc={modalOpen && picked ? picked.row.occ : null}
+            expirationsAction={chainExpirationsAction}
+            chainAction={optionChainAction}
+            onPick={pickFromChain}
+          />
+        )}
+      </div>
+
+      <Modal
+        open={modalOpen}
+        onClose={closeModal}
+        title={modalTitle(step, picked)}
+        subtitle={modalSubtitle(step, picked)}
+      >
+        {step.kind === "detail" && picked && (
+          <ContractDetail
+            picked={picked}
+            held={heldOccs.map(compactOcc).includes(compactOcc(picked.row.occ))}
+            onClose={reset}
+            onBuy={() => void requestQuote(picked.row.occ, true)}
+          />
+        )}
+
+        {step.kind === "quoting" && (
+          <div className="px-4 py-4 text-xs text-slate-300" role="status" aria-live="polite">
+            Getting a fresh quote…
+          </div>
+        )}
+
         {step.kind === "confirm" && (
-          <div className="flex flex-col gap-2" onBlur={handleBlur} onMouseDown={keepFocus}>
-            <div className="font-mono text-xs text-slate-200">
-              {step.quote.occ.replace(/\s+/g, " ").trim()}
-              <span className="ml-2 font-sans text-slate-400">
-                {step.quote.underlying} · {step.quote.expiry} · ${step.quote.strike}{" "}
-                {step.quote.right === "C" ? "Call" : "Put"}
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
-              <span>
-                bid <span className="text-slate-100">{fmt(step.quote.bid)}</span>
-              </span>
-              <span>
-                mid <span className="text-slate-100">{fmt(step.quote.mid)}</span>
-              </span>
-              <span>
-                ask <span className="font-medium text-slate-100">{fmt(step.quote.ask)}</span>
-              </span>
-              <label className="flex items-center gap-1">
-                qty
-                <select
-                  value={qty}
-                  onChange={(e) => setQty(e.target.value)}
-                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
-                >
-                  {qtyChoices.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <span className="text-[11px] text-slate-500">
-                max {maxQty} for {strategyId}
-              </span>
-              {qtyValid && (
-                <span className="text-slate-400">
-                  ≈ {fmt(step.quote.ask * quantity * 100)} at the ask
+          <>
+            <div className="flex flex-col gap-3 px-4 py-4 text-xs">
+              <div className="flex flex-wrap items-center gap-3 text-slate-300">
+                <span>
+                  bid <span className="text-slate-100">{fmt(step.quote.bid)}</span>
                 </span>
+                <span>
+                  mid <span className="text-slate-100">{fmt(step.quote.mid)}</span>
+                </span>
+                <span>
+                  ask <span className="font-medium text-slate-100">{fmt(step.quote.ask)}</span>
+                </span>
+                <span className="text-[11px] text-slate-500">refreshes every 20s</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-slate-300">
+                {strategies.length > 1 && (
+                  <label className="flex items-center gap-1">
+                    strategy
+                    <select
+                      value={strategyId}
+                      onChange={(e) => selectStrategy(e.target.value)}
+                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                    >
+                      {strategies.map((s) => (
+                        <option key={s.strategyId} value={s.strategyId}>
+                          {s.strategyId}
+                          {s.enabled ? "" : " (disabled)"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="flex items-center gap-1">
+                  qty
+                  <select
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value)}
+                    className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                  >
+                    {qtyChoices.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <span className="text-[11px] text-slate-500">
+                  max {maxQty} for {strategyId}
+                </span>
+                {qtyValid && (
+                  <span className="text-slate-400">
+                    ≈ {fmt(step.quote.ask * quantity * 100)} at the ask
+                  </span>
+                )}
+              </div>
+              {alreadyHeld && (
+                <div className="text-amber-300">
+                  You already hold this contract — this opens a SECOND position, it does not add
+                  to the existing one.
+                </div>
               )}
             </div>
-            {alreadyHeld && (
-              <div className="text-xs text-amber-300">
-                You already hold this contract — this opens a SECOND position, it does not add to
-                the existing one.
-              </div>
-            )}
-            <div className="flex items-center gap-2">
+            <ModalFooter>
               <button
                 type="button"
-                autoFocus
+                onClick={canGoBack ? backToDetail : reset}
+                className="rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
+              >
+                {canGoBack ? "← Back" : "Cancel"}
+              </button>
+              <button
+                type="button"
                 disabled={!qtyValid}
                 onClick={() => void submit(step.quote, step.idempotencyKey)}
                 className="rounded border border-emerald-500/60 bg-emerald-600/20 px-2 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-600/30 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-transparent disabled:text-slate-600"
               >
                 Confirm — BUY {qtyValid ? quantity : "?"} at market (limit ≥ {fmt(step.quote.ask)})
               </button>
+            </ModalFooter>
+          </>
+        )}
+
+        {step.kind === "submitting" && (
+          <div
+            className="px-4 py-4 text-xs font-medium text-slate-300"
+            role="status"
+            aria-live="polite"
+          >
+            Submitting…
+          </div>
+        )}
+
+        {step.kind === "tracking" && (
+          <>
+            <div className="px-4 py-4 text-xs" role="status" aria-live="polite">
+              <EntryOutcome status={step.status} />
+            </div>
+            <ModalFooter>
               <button
                 type="button"
                 onClick={reset}
                 className="rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
               >
-                Cancel
+                New entry
               </button>
+            </ModalFooter>
+          </>
+        )}
+
+        {step.kind === "failed" && step.inModal && (
+          <>
+            <div className="px-4 py-4 text-xs font-medium text-rose-300" role="alert">
+              {step.message}
             </div>
-          </div>
+            <ModalFooter>
+              <button
+                type="button"
+                onClick={canGoBack ? backToDetail : reset}
+                className="rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
+              >
+                {canGoBack ? "← Back" : "Close"}
+              </button>
+            </ModalFooter>
+          </>
         )}
-
-        {step.kind === "submitting" && (
-          <span className="text-xs font-medium text-slate-300" role="status" aria-live="polite">
-            Submitting…
-          </span>
-        )}
-
-        {step.kind === "tracking" && (
-          <div className="flex flex-col gap-1 text-xs" role="status" aria-live="polite">
-            <EntryOutcome status={step.status} />
-            <button
-              type="button"
-              onClick={reset}
-              className="self-start rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
-            >
-              New entry
-            </button>
-          </div>
-        )}
-      </div>
+      </Modal>
     </section>
+  );
+}
+
+function quoteFailureText(r: Exclude<QuoteActionResult, { ok: true }>): string {
+  const messages: Record<string, string> = {
+    "invalid-occ": r.kind === "invalid-occ" ? r.detail : "",
+    unavailable: "No quote available for that contract right now.",
+    disabled: "Manual entry is not enabled.",
+    error: "Could not read a quote.",
+  };
+  return messages[r.kind] || "Could not read a quote.";
+}
+
+function prettyOcc(occ: string): string {
+  return occ.replace(/\s+/g, " ").trim();
+}
+
+function contractName(underlying: string, strike: number, right: "C" | "P", expiry: string) {
+  const [y, m, d] = expiry.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return `${underlying} $${strike} ${right === "C" ? "Call" : "Put"} · ${date}`;
+}
+
+function modalTitle(step: Step, picked: PickedContract | null): string {
+  if (step.kind === "confirm") {
+    const q = step.quote;
+    return `Confirm buy · ${contractName(q.underlying, q.strike, q.right, q.expiry)}`;
+  }
+  if (picked) {
+    return contractName(picked.underlying, picked.row.strike, picked.right, picked.expiration);
+  }
+  return "Manual entry";
+}
+
+function modalSubtitle(step: Step, picked: PickedContract | null): string | undefined {
+  const occ = step.kind === "confirm" ? step.quote.occ : picked?.row.occ;
+  if (!occ) return undefined;
+  const expiry = step.kind === "confirm" ? step.quote.expiry : picked?.expiration;
+  return expiry ? `${prettyOcc(occ)} · ${daysToExpiry(expiry)} DTE` : prettyOcc(occ);
+}
+
+function ModalFooter({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 px-4 py-3">
+      {children}
+    </div>
+  );
+}
+
+/** The picked chain row, before any quote: what Robinhood shows on tapping a strike. */
+function ContractDetail({
+  picked,
+  held,
+  onClose,
+  onBuy,
+}: {
+  picked: PickedContract;
+  held: boolean;
+  onClose: () => void;
+  onBuy: () => void;
+}) {
+  const { row, right } = picked;
+  const be = row.ask === null ? null : breakeven(row.strike, row.ask, right);
+  const spreadPct =
+    row.ask !== null && row.bid !== null && row.mid ? ((row.ask - row.bid) / row.mid) * 100 : null;
+  const stats: [string, string][] = [
+    ["Bid", fmtPrice(row.bid)],
+    ["Mid", fmtPrice(row.mid)],
+    ["Ask", fmtPrice(row.ask)],
+    ["Spread", spreadPct === null ? "—" : `${spreadPct.toFixed(1)}%`],
+    ["Breakeven", fmtPrice(be)],
+    ["Delta", row.delta === null ? "—" : row.delta.toFixed(2)],
+    ["Impl. vol", row.iv === null ? "—" : `${(row.iv * 100).toFixed(1)}%`],
+    ["Volume", row.volume === null ? "—" : row.volume.toLocaleString("en-US")],
+    [`${picked.underlying} last`, fmtPrice(picked.spot)],
+  ];
+  return (
+    <>
+      <div className="flex flex-col gap-3 px-4 py-4 text-xs">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xl font-semibold tabular-nums text-emerald-300">
+            {fmtPrice(row.ask)}
+          </span>
+          <span className="text-slate-400">
+            {row.ask === null ? "no offer right now" : `ask · ≈ ${fmtPrice(row.ask * 100)} per contract`}
+          </span>
+        </div>
+        <dl className="grid grid-cols-3 gap-x-4 gap-y-2">
+          {stats.map(([k, v]) => (
+            <div key={k} className="flex flex-col">
+              <dt className="text-[10px] uppercase tracking-wide text-slate-500">{k}</dt>
+              <dd className="tabular-nums text-slate-100">{v}</dd>
+            </div>
+          ))}
+        </dl>
+        {held && (
+          <div className="text-amber-300">
+            You already hold this contract. Buying opens a second position.
+          </div>
+        )}
+        {spreadPct !== null && spreadPct > 15 && (
+          <div className="text-amber-300">
+            Wide spread: a market buy may fill well above the mid.
+          </div>
+        )}
+        <div className="text-[11px] text-slate-500">
+          The next step gets a fresh quote. Nothing is ordered yet.
+        </div>
+      </div>
+      <ModalFooter>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded border border-slate-600/60 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/30"
+        >
+          Close
+        </button>
+        <button
+          type="button"
+          onClick={onBuy}
+          className="rounded border border-emerald-500/50 bg-emerald-600/10 px-3 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20"
+        >
+          Buy — get quote
+        </button>
+      </ModalFooter>
+    </>
   );
 }
 

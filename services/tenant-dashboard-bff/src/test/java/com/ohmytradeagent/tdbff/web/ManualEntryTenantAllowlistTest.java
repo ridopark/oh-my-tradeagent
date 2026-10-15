@@ -74,6 +74,20 @@ class ManualEntryTenantAllowlistTest {
                 .andExpect(status().isNotFound()),
         () ->
             mvc.perform(
+                    get("/api/entries/chain/expirations")
+                        .param("underlying", "NVDA")
+                        .header("X-Tenant-Id", "prod_real"))
+                .andExpect(status().isNotFound()),
+        () ->
+            mvc.perform(
+                    get("/api/entries/chain")
+                        .param("underlying", "NVDA")
+                        .param("expiration", "2026-10-16")
+                        .param("right", "C")
+                        .header("X-Tenant-Id", "prod_real"))
+                .andExpect(status().isNotFound()),
+        () ->
+            mvc.perform(
                     get("/api/entries/manual:idem-1/status")
                         .param("strategy_id", "copytrade-v1")
                         .header("X-Tenant-Id", "prod_real"))
