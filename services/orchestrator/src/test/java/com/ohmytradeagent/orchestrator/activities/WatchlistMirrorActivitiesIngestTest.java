@@ -65,7 +65,7 @@ class WatchlistMirrorActivitiesIngestTest {
   private static WatchlistMirrorActivitiesImpl activity(
       WebhookClient webhook, WorkflowClient client, StrategyRegistry registry) {
     return new WatchlistMirrorActivitiesImpl(
-        webhook, BLANK_RESOLVER, client, registry, TRIGGER_ID, "orchestrator-core");
+        webhook, BLANK_RESOLVER, client, registry, TRIGGER_ID, "orchestrator-core", null);
   }
 
   @Test

@@ -1319,6 +1319,62 @@ class AlpacaMarketDataTest {
     assertThat(server.getRequestCount()).isEqualTo(1);
   }
 
+  // --- /live chain picker: equityBars1Min ---
+
+  @Test
+  void equityBars1Min_parsesHighLowClose_andDropsTheInclusiveEndBar() throws Exception {
+    server.enqueue(
+        json(
+            "{\"bars\":["
+                + "{\"t\":\"2026-10-15T14:41:00Z\",\"o\":1,\"h\":180.90,\"l\":180.50,\"c\":180.80},"
+                + "{\"t\":\"2026-10-15T14:42:00Z\",\"o\":1,\"h\":181.20,\"l\":180.70,\"c\":181.06}"
+                + "],\"next_page_token\":null}"));
+
+    java.util.List<com.ohmytradeagent.marketdata.provider.EquityBar> bars =
+        provider
+            .equityBars1Min(
+                "NVDA",
+                Instant.parse("2026-10-15T13:30:00Z"),
+                Instant.parse("2026-10-15T14:42:00Z"))
+            .orElseThrow();
+
+    assertThat(bars).hasSize(1);
+    assertThat(bars.get(0).high()).isEqualByComparingTo("180.90");
+    assertThat(bars.get(0).low()).isEqualByComparingTo("180.50");
+    assertThat(server.takeRequest().getPath())
+        .startsWith("/v2/stocks/NVDA/bars?")
+        .contains("timeframe=1Min")
+        .contains("feed=sip");
+  }
+
+  @Test
+  void equityBars1Min_laterPageFails_isUnavailable() {
+    server.enqueue(
+        json(
+            "{\"bars\":[{\"t\":\"2026-10-15T13:30:00Z\",\"h\":1,\"l\":1,\"c\":1}],"
+                + "\"next_page_token\":\"p2\"}"));
+    server.enqueue(new MockResponse().setResponseCode(429).setBody("{\"message\":\"rate\"}"));
+
+    assertThat(
+            provider.equityBars1Min(
+                "NVDA",
+                Instant.parse("2026-10-15T13:30:00Z"),
+                Instant.parse("2026-10-15T20:00:00Z")))
+        .isEmpty();
+  }
+
+  @Test
+  void equityBars1Min_noBarsYet_isAnEmptyList_notUnavailable() {
+    server.enqueue(json("{\"bars\":null,\"next_page_token\":null}"));
+
+    assertThat(
+            provider.equityBars1Min(
+                "NVDA",
+                Instant.parse("2026-10-15T13:30:00Z"),
+                Instant.parse("2026-10-15T13:31:00Z")))
+        .hasValue(java.util.List.of());
+  }
+
   private static MockResponse json(String body) {
     return new MockResponse()
         .setResponseCode(200)

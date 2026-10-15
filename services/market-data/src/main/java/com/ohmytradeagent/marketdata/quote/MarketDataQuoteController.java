@@ -1,6 +1,7 @@
 package com.ohmytradeagent.marketdata.quote;
 
 import com.ohmytradeagent.marketdata.provider.ChainContract;
+import com.ohmytradeagent.marketdata.provider.EquityBar;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.OptionExpirations;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
@@ -158,6 +159,36 @@ public class MarketDataQuoteController {
     out.put("expiration", expiration.toString());
     out.put("right", right);
     out.put("contracts", rows);
+    return ResponseEntity.ok(out);
+  }
+
+  /**
+   * {@code {ticker, bars:[{t, h, l, c}]}} — 1-minute SIP bars in {@code [start, end)}, oldest
+   * first, for the /live chain picker's watchlist "crossed the level at" time. 503 when they could
+   * not be read, so an outage never reads as "never crossed".
+   */
+  @GetMapping("/md/equity/{ticker}/bars1m")
+  public ResponseEntity<Map<String, Object>> equityBars1m(
+      @PathVariable("ticker") String ticker,
+      @RequestParam("start") Instant start,
+      @RequestParam("end") Instant end) {
+    Optional<List<EquityBar>> read = provider.equityBars1Min(ticker, start, end);
+    if (read.isEmpty()) {
+      return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+          .body(Map.of("error", "bars_unavailable", "ticker", ticker));
+    }
+    List<Map<String, Object>> bars = new ArrayList<>();
+    for (EquityBar b : read.get()) {
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("t", b.t().toString());
+      row.put("h", b.high());
+      row.put("l", b.low());
+      row.put("c", b.close());
+      bars.add(row);
+    }
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("ticker", ticker);
+    out.put("bars", bars);
     return ResponseEntity.ok(out);
   }
 

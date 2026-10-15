@@ -228,7 +228,7 @@ class WatchlistMirrorActivitiesImplTest {
   private static WatchlistMirrorActivitiesImpl fanoutActivity(
       WebhookClient webhook, WorkflowClient client, StrategyRegistry registry) {
     return new WatchlistMirrorActivitiesImpl(
-        webhook, BLANK_RESOLVER, client, registry, TRIGGER_ID, "orchestrator-core");
+        webhook, BLANK_RESOLVER, client, registry, TRIGGER_ID, "orchestrator-core", null);
   }
 
   private static final String CLEAN_SAMPLE = "SPY   756c  >  755.30\n745p  <  748.00";

@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  ideaExpiration,
+  ideaLabel,
+  ideaStatusText,
+  type WatchlistIdea,
+} from "@/lib/watchlist";
 
 // The /live chain picker: one underlying's listed contracts, Robinhood-style — an expiration strip,
 // Calls/Puts, and a strike ladder split by the spot line. It only PICKS a contract (onPick); the
@@ -29,6 +35,14 @@ export interface PickedContract {
   expiration: string;
   right: "C" | "P";
   spot: number | null;
+  /** The watchlist idea this exact contract is, if any. */
+  idea: WatchlistIdea | null;
+}
+
+/** Where to land when the chain opens from a watchlist idea. */
+export interface ChainFocus {
+  right: "C" | "P";
+  strike: number;
 }
 
 const FAILURE_TEXT: Record<ReadFailure["kind"], string> = {
@@ -75,6 +89,9 @@ export function OptionChain({
   heldOccs,
   signalledOccs,
   selectedOcc,
+  ideas,
+  watchlistDate,
+  focus,
   expirationsAction,
   chainAction,
   onPick,
@@ -85,6 +102,12 @@ export function OptionChain({
   /** COMPACT OCCs. */
   signalledOccs: string[];
   selectedOcc: string | null;
+  /** Today's watchlist ideas for THIS underlying. */
+  ideas: WatchlistIdea[];
+  /** The watchlist's ET date, which fixes the expiry its ideas trade; null when none today. */
+  watchlistDate: string | null;
+  /** Land on this idea's expiry, side and strike instead of the nearest expiry at the money. */
+  focus: ChainFocus | null;
   expirationsAction: (underlying: string) => Promise<ExpirationsResult>;
   chainAction: (underlying: string, expiration: string, right: "C" | "P") => Promise<ChainResult>;
   onPick: (picked: PickedContract) => void;
@@ -102,6 +125,20 @@ export function OptionChain({
   >({ state: "loading" });
   const ladder = useRef<HTMLDivElement>(null);
   const spotRow = useRef<HTMLTableRowElement>(null);
+  const focusRow = useRef<HTMLTableRowElement>(null);
+  // The strike to scroll to: set by a watchlist landing, cleared by any manual expiry/side change.
+  const [focusStrike, setFocusStrike] = useState<number | null>(focus?.strike ?? null);
+
+  const dates = expirations.state === "ok" ? expirations.dates : [];
+  const wlExpiry =
+    watchlistDate !== null && ideas.length > 0 ? ideaExpiration(watchlistDate, dates) : null;
+
+  const landOn = (f: ChainFocus, listed: string[]) => {
+    const exp = watchlistDate === null ? null : ideaExpiration(watchlistDate, listed);
+    setRight(f.right);
+    setExpiration(exp ?? listed[0]);
+    setFocusStrike(exp === null ? null : f.strike);
+  };
 
   useEffect(() => {
     let live = true;
@@ -115,13 +152,27 @@ export function OptionChain({
         setExpirations({ state: "failed", message: `No listed options found for ${underlying}.` });
       } else {
         setExpirations({ state: "ok", dates: r.expirations });
-        setExpiration(r.expirations[0]);
+        if (focus) {
+          landOn(focus, r.expirations);
+        } else {
+          setExpiration(r.expirations[0]);
+        }
       }
     });
     return () => {
       live = false;
     };
+    // focus is read once per underlying here; a new focus on the SAME underlying is the next effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, expirationsAction]);
+
+  // A new watchlist pick on the underlying already open re-lands without reloading expirations.
+  useEffect(() => {
+    if (focus && dates.length > 0) {
+      landOn(focus, dates);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
 
   useEffect(() => {
     if (expiration === null) return;
@@ -140,12 +191,20 @@ export function OptionChain({
     };
   }, [underlying, expiration, right, chainAction]);
 
-  // Open the ladder at the money, the way a broker app does, rather than at the deepest strike.
+  // Open the ladder on the watchlist contract when landing on one, else at the money, the way a
+  // broker app does, rather than at the deepest strike.
   useEffect(() => {
-    if (chain.state === "ok" && ladder.current && spotRow.current) {
-      ladder.current.scrollTop = spotRow.current.offsetTop - ladder.current.clientHeight / 2;
+    const target = focusRow.current ?? spotRow.current;
+    if (chain.state === "ok" && ladder.current && target) {
+      ladder.current.scrollTop = target.offsetTop - ladder.current.clientHeight / 2;
     }
   }, [chain]);
+
+  /** The idea that IS this row's contract: same side and strike, on the watchlist's expiry. */
+  const ideaFor = (row: ChainRow): WatchlistIdea | null =>
+    expiration !== null && expiration === wlExpiry
+      ? (ideas.find((i) => i.right === right && i.strike === row.strike) ?? null)
+      : null;
 
   const spot = chain.state === "ok" ? chain.spot : null;
   const held = new Set(heldOccs);
@@ -157,6 +216,35 @@ export function OptionChain({
         <span className="text-lg font-semibold text-slate-100">{underlying}</span>
         <span className="text-lg tabular-nums text-slate-100">{fmtPrice(spot)}</span>
       </div>
+
+      {watchlistDate !== null && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-0.5 text-[10px] uppercase tracking-wider text-violet-300">
+            Watchlist
+          </span>
+          {ideas.length === 0 ? (
+            <span className="text-[11px] text-slate-500">
+              {underlying} is not on today&apos;s watchlist.
+            </span>
+          ) : (
+            ideas.map((i) => (
+              <button
+                key={`${i.right}${i.strike}`}
+                type="button"
+                onClick={() => dates.length > 0 && landOn(i, dates)}
+                className={`inline-flex items-center gap-2 rounded-full border py-0.5 pl-2.5 pr-1 text-xs tabular-nums text-slate-200 ${
+                  i.status === "crossed"
+                    ? "border-amber-400/60 bg-amber-500/10"
+                    : "border-violet-400/50 bg-violet-500/10"
+                }`}
+              >
+                {ideaLabel(i)}
+                <IdeaStatusPill idea={i} />
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       {expirations.state === "loading" && (
         <span className="text-xs text-slate-400">Loading expirations…</span>
@@ -176,7 +264,10 @@ export function OptionChain({
                   key={r}
                   type="button"
                   aria-pressed={right === r}
-                  onClick={() => setRight(r)}
+                  onClick={() => {
+                    setRight(r);
+                    setFocusStrike(null);
+                  }}
                   className={`px-4 py-1 text-xs ${
                     right === r ? "bg-slate-700 text-slate-100" : "text-slate-400 hover:bg-slate-800"
                   }`}
@@ -186,6 +277,18 @@ export function OptionChain({
               ))}
             </div>
             <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
+              {ideas.length > 0 && (
+                <>
+                  <span>
+                    <span className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-amber-400 align-[-1px]" />
+                    Watchlist · triggered
+                  </span>
+                  <span>
+                    <span className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-violet-300 align-[-1px]" />
+                    Watchlist · waiting
+                  </span>
+                </>
+              )}
               <span>
                 <span className="mr-1 inline-block h-2.5 w-2.5 rounded-sm bg-emerald-500/25 align-[-1px]" />
                 In the money
@@ -205,8 +308,11 @@ export function OptionChain({
                 key={d}
                 type="button"
                 aria-pressed={expiration === d}
-                onClick={() => setExpiration(d)}
-                className={`flex-none rounded-full border px-3 py-1 text-xs tabular-nums ${
+                onClick={() => {
+                  setExpiration(d);
+                  setFocusStrike(null);
+                }}
+                className={`relative flex-none rounded-full border px-3 py-1 text-xs tabular-nums ${
                   expiration === d
                     ? "border-emerald-500/50 bg-emerald-600/10 text-emerald-300"
                     : "border-slate-700 text-slate-400 hover:bg-slate-800"
@@ -214,6 +320,12 @@ export function OptionChain({
               >
                 {chipLabel(d)}
                 <span className="ml-1 text-slate-500">{daysToExpiry(d)}d</span>
+                {d === wlExpiry && (
+                  <span
+                    title="Watchlist expiry"
+                    className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-slate-900 bg-violet-300"
+                  />
+                )}
               </button>
             ))}
           </div>
@@ -261,14 +373,23 @@ export function OptionChain({
                     ) : (
                       <ChainLadderRow
                         key={item.row.occ}
+                        rowRef={item.row.strike === focusStrike ? focusRow : undefined}
                         row={item.row}
                         right={right}
                         spot={spot}
+                        idea={ideaFor(item.row)}
                         selected={selectedOcc === item.row.occ}
                         held={held.has(item.row.occ)}
                         signalled={signalled.has(item.row.occ)}
                         onPick={() =>
-                          onPick({ row: item.row, underlying, expiration, right, spot })
+                          onPick({
+                            row: item.row,
+                            underlying,
+                            expiration,
+                            right,
+                            spot,
+                            idea: ideaFor(item.row),
+                          })
                         }
                       />
                     ),
@@ -302,17 +423,21 @@ function ladderRows(
 }
 
 function ChainLadderRow({
+  rowRef,
   row,
   right,
   spot,
+  idea,
   selected,
   held,
   signalled,
   onPick,
 }: {
+  rowRef?: React.Ref<HTMLTableRowElement>;
   row: ChainRow;
   right: "C" | "P";
   spot: number | null;
+  idea: WatchlistIdea | null;
   selected: boolean;
   held: boolean;
   signalled: boolean;
@@ -321,9 +446,21 @@ function ChainLadderRow({
   const itm = spot !== null && (right === "C" ? row.strike < spot : row.strike > spot);
   const be = row.ask === null ? null : breakeven(row.strike, row.ask, right);
   const toBe = be === null || spot === null ? null : ((be - spot) / spot) * 100;
-  const bg = selected ? "bg-sky-500/10" : itm ? "bg-emerald-500/5" : "";
+  const triggered = idea?.status === "crossed";
+  // A watchlist contract outranks the ITM tint, and a triggered one outranks a waiting one; the
+  // inset bar is the colour-independent cue next to the tag text.
+  const bg = selected
+    ? "bg-sky-500/10"
+    : idea
+      ? triggered
+        ? "bg-amber-500/[.13] shadow-[inset_3px_0_0_theme(colors.amber.400)]"
+        : "bg-violet-500/10 shadow-[inset_3px_0_0_theme(colors.violet.300)]"
+      : itm
+        ? "bg-emerald-500/5"
+        : "";
   return (
     <tr
+      ref={rowRef}
       tabIndex={0}
       onClick={onPick}
       onKeyDown={(e) => {
@@ -338,9 +475,13 @@ function ChainLadderRow({
         <span className="font-semibold text-slate-100">
           ${row.strike} {right === "C" ? "Call" : "Put"}
         </span>
+        {idea && <Tag tone={triggered ? "amber" : "violet"}>{triggered ? "WL · TRIGGERED" : "WL"}</Tag>}
         {signalled && <Tag tone="sky">SIG</Tag>}
         {held && <Tag tone="amber">HELD</Tag>}
-        <span className="block text-[11px] text-slate-500">breakeven {fmtPrice(be)}</span>
+        <span className="block text-[11px] text-slate-500">
+          {idea && `${idea.direction === "ABOVE" ? "above" : "below"} ${fmtPrice(idea.level)} · `}
+          breakeven {fmtPrice(be)}
+        </span>
       </td>
       <td className="px-2 py-1.5 text-right text-slate-400 sm:px-3">
         {toBe === null ? "—" : `${toBe >= 0 ? "+" : ""}${toBe.toFixed(2)}%`}
@@ -366,9 +507,30 @@ function ChainLadderRow({
   );
 }
 
-function Tag({ tone, children }: { tone: "sky" | "amber"; children: string }) {
+/** The idea's status as a pill: amber "TRIGGERED 10:42", sky when within 1%, grey otherwise. */
+export function IdeaStatusPill({ idea }: { idea: WatchlistIdea }) {
+  const tone =
+    idea.status === "crossed"
+      ? "border-amber-400/60 bg-amber-500/10 text-amber-300"
+      : idea.distance_pct !== null && Math.abs(idea.distance_pct) < 1
+        ? "border-sky-300/45 text-sky-300"
+        : "border-slate-600 text-slate-400";
+  return (
+    <span
+      className={`whitespace-nowrap rounded-full border px-1.5 text-[10px] font-semibold tabular-nums ${tone}`}
+    >
+      {ideaStatusText(idea)}
+    </span>
+  );
+}
+
+function Tag({ tone, children }: { tone: "sky" | "amber" | "violet"; children: string }) {
   const cls =
-    tone === "sky" ? "border-sky-300/40 text-sky-300" : "border-amber-300/40 text-amber-300";
+    tone === "sky"
+      ? "border-sky-300/40 text-sky-300"
+      : tone === "violet"
+        ? "border-violet-300/50 text-violet-300"
+        : "border-amber-300/40 text-amber-300";
   return (
     <span className={`ml-1.5 rounded-sm border px-1 text-[10px] font-medium ${cls}`}>
       {children}

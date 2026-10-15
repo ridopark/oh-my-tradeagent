@@ -70,6 +70,7 @@ class LiveCacheInvalidationWebMvcTest {
   @MockitoBean private StrategyConfigReader strategyConfigs;
   @MockitoBean private PortfolioCache portfolioCache;
   @MockitoBean private OpenOccCache openOccCache;
+  @MockitoBean private com.ohmytradeagent.tdbff.watchlist.WatchlistToday watchlistToday;
 
   private WorkflowStub stub;
 

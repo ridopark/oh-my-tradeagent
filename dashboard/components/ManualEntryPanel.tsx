@@ -4,8 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { usePanelOpen } from "./LiveRefresh";
 import { Modal } from "./Modal";
 import { decideQuoteRefresh } from "@/lib/quoteRefresh";
+import { ContractSearch, type Suggestion } from "./ContractSearch";
+import { etClock, type WatchlistIdea } from "@/lib/watchlist";
 import {
   OptionChain,
+  IdeaStatusPill,
+  type ChainFocus,
   breakeven,
   compactOcc,
   daysToExpiry,
@@ -143,22 +147,16 @@ export interface RecentContract {
   on: string;
 }
 
-/** "$2.09 · 27x · 09-28" — the datalist option's secondary text. */
-function contractLabel(c: RecentContract): string {
-  const parts: string[] = [];
-  if (c.refPremium !== null) {
-    parts.push(`$${c.refPremium.toFixed(2)}`);
-  }
-  if (c.contracts !== null) {
-    parts.push(`${c.contracts}x`);
-  }
-  parts.push(c.on);
-  return parts.join(" · ");
-}
+/** Today's watchlist as the panel holds it; a read is refreshed after this long. */
+const WATCHLIST_STALE_MS = 60_000;
 
-// Stable id tying the input's `list` to its <datalist>. Module-level: the panel renders once per
-// page, and a generated id would differ between the server and client renders.
-const RECENT_CONTRACTS_LIST_ID = "manual-entry-recent-contracts";
+type WatchlistResult =
+  | { ok: true; etDate: string; posted: boolean; ideas: WatchlistIdea[] }
+  | { ok: false; kind: "invalid" | "unavailable" | "disabled" | "error" };
+
+type WatchlistState =
+  | { state: "idle" | "loading" | "failed" }
+  | { state: "ok"; etDate: string; posted: boolean; ideas: WatchlistIdea[]; readAt: number };
 
 /**
  * The recent signal matching whatever OCC is currently typed, compared on the COMPACT form so a
@@ -183,6 +181,7 @@ export function ManualEntryPanel({
   optionChainAction,
   submitAction,
   statusAction,
+  watchlistAction,
 }: {
   strategies: StrategyOption[];
   // Compact OCCs the tenant already holds, so the confirm step can warn about adding to a position
@@ -191,7 +190,7 @@ export function ManualEntryPanel({
   heldOccs: string[];
   /**
    * Contracts from recent entry signals (accepted, or received and then rejected — e.g. on
-   * MAX_POSITIONS), newest first, offered as datalist suggestions.
+   * MAX_POSITIONS), newest first, offered as dropdown suggestions.
    * Suggestions only — the input still accepts anything typed by hand, which is the whole point of
    * a manual entry box. Empty when the signals read failed or the BFF predates /api/signals.
    */
@@ -212,6 +211,8 @@ export function ManualEntryPanel({
     idempotencyKey: string,
   ) => Promise<SubmitActionResult>;
   statusAction: (signalId: string, strategyId: string) => Promise<StatusView | null>;
+  /** Today's shared watchlist, for the dropdown and the chain's highlights. Display-only. */
+  watchlistAction: () => Promise<WatchlistResult>;
 }) {
   const [occ, setOcc] = useState("");
   const [qty, setQty] = useState(String(strategies[0]?.minContracts ?? 1));
@@ -227,6 +228,10 @@ export function ManualEntryPanel({
   // The underlying the chain drawer is showing (null = drawer closed), and the row picked from it.
   const [chainUnderlying, setChainUnderlying] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedContract | null>(null);
+  // Set when the chain opens from a watchlist idea: land on its expiry, side and strike. A fresh
+  // object per pick, so picking another idea on the same underlying re-lands.
+  const [chainFocus, setChainFocus] = useState<ChainFocus | null>(null);
+  const [watchlist, setWatchlist] = useState<WatchlistState>({ state: "idle" });
   usePanelOpen(step.kind !== "idle" || chainUnderlying !== null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   // clearTimers() alone does NOT stop the loops: if the component unmounts while a poll tick or a
@@ -402,6 +407,40 @@ export function ManualEntryPanel({
     timers.current.push(setTimeout(tick, POLL_INTERVAL_MS));
   };
 
+  /** (Re)load today's watchlist when it is first needed, failed, or older than a minute. */
+  const loadWatchlist = () => {
+    if (
+      watchlist.state === "loading" ||
+      (watchlist.state === "ok" && Date.now() - watchlist.readAt < WATCHLIST_STALE_MS)
+    ) {
+      return;
+    }
+    setWatchlist((w) => (w.state === "ok" ? w : { state: "loading" }));
+    void watchlistAction().then((r) => {
+      if (cancelled.current) return;
+      setWatchlist(r.ok ? { state: "ok", ...r, readAt: Date.now() } : { state: "failed" });
+    });
+  };
+  const watchlistIdeas = watchlist.state === "ok" ? watchlist.ideas : [];
+  const watchlistNote =
+    watchlist.state === "ok"
+      ? watchlist.posted
+        ? null
+        : "No watchlist has been posted today."
+      : watchlist.state === "failed"
+        ? "The watchlist is unavailable right now."
+        : "Loading the watchlist…";
+
+  const pickSuggestion = (s: Suggestion) => {
+    if (s.kind === "recent") {
+      setOcc(s.contract.occ);
+      return;
+    }
+    setOcc(s.idea.ticker);
+    setChainUnderlying(s.idea.ticker);
+    setChainFocus({ right: s.idea.right, strike: s.idea.strike });
+  };
+
   const pickFromChain = (p: PickedContract) => {
     clearTimers();
     setPicked(p);
@@ -426,7 +465,9 @@ export function ManualEntryPanel({
   // OCC open the same underlying.
   const typedUnderlying = occ.trim().toUpperCase().match(/^[A-Z]{1,6}/)?.[0] ?? null;
   const toggleChain = () => {
+    setChainFocus(null);
     setChainUnderlying((open) => (open !== null ? null : typedUnderlying));
+    loadWatchlist();
   };
 
   // The picked row is only "Back"-able while the quote in hand is for that same contract.
@@ -461,30 +502,16 @@ export function ManualEntryPanel({
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
-            {/* A real combo box: `list` adds a dropdown of recently signalled contracts WITHOUT
-                constraining the field, so hand-typing an OCC the system has never signalled works
-                exactly as before. The dropdown is browser-rendered, so it does not inherit the dark
-                theme — the trade for keeping the typing path untouched. */}
-            <input
-              type="text"
+            {/* Suggestions only: anything typed by hand is still accepted, exactly as before. */}
+            <ContractSearch
               value={occ}
-              onChange={(e) => setOcc(e.target.value)}
-              list={recentContracts.length > 0 ? RECENT_CONTRACTS_LIST_ID : undefined}
-              placeholder="NVDA 260821C00225000 or NVDA"
-              spellCheck={false}
-              className="w-64 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-600"
+              onChange={setOcc}
+              ideas={watchlistIdeas}
+              watchlistNote={watchlistNote}
+              recent={recentContracts}
+              onOpen={loadWatchlist}
+              onPick={pickSuggestion}
             />
-            {recentContracts.length > 0 && (
-              <datalist id={RECENT_CONTRACTS_LIST_ID}>
-                {recentContracts.map((c) => (
-                  // `label` is the browser's secondary text. Chrome and Firefox render it beside
-                  // the value; Safari has historically shown the value only — hence the hint line
-                  // below, which does not depend on browser chrome. Either way the text INSERTED
-                  // into the box is `value`, a clean OCC.
-                  <option key={c.occ} value={c.occ} label={contractLabel(c)} />
-                ))}
-              </datalist>
-            )}
             {strategies.length > 1 && (
               <select
                 value={strategyId}
@@ -516,9 +543,8 @@ export function ManualEntryPanel({
             >
               {step.kind === "quoting" && !modalOpen ? "Quoting…" : "Buy"}
             </button>
-            {/* basis-full puts this on its own line under the input row. Shown wherever the
-                browser does (or does not) render the datalist label, so the signal price is
-                visible in every browser once a contract is picked or typed. */}
+            {/* basis-full puts this on its own line under the input row, so the signal price stays
+                visible after a contract is picked or typed. */}
             {matchedSignal !== null && (
               <span className="basis-full text-xs text-slate-500">
                 signalled {matchedSignal.on} at{" "}
@@ -547,6 +573,11 @@ export function ManualEntryPanel({
             heldOccs={heldOccs.map(compactOcc)}
             signalledOccs={recentContracts.map((c) => compactOcc(c.occ))}
             selectedOcc={modalOpen && picked ? picked.row.occ : null}
+            ideas={watchlistIdeas.filter((i) => i.ticker === chainUnderlying)}
+            watchlistDate={
+              watchlist.state === "ok" && watchlist.posted ? watchlist.etDate : null
+            }
+            focus={chainFocus}
             expirationsAction={chainExpirationsAction}
             chainAction={optionChainAction}
             onPick={pickFromChain}
@@ -635,6 +666,14 @@ export function ManualEntryPanel({
                 <div className="text-amber-300">
                   You already hold this contract — this opens a SECOND position, it does not add
                   to the existing one.
+                </div>
+              )}
+              {canGoBack && picked?.idea?.status === "crossed" && picked.idea.crossed_at && (
+                <div className="text-slate-400">
+                  Watchlist idea triggered at {etClock(picked.idea.crossed_at)} ET
+                  {picked.idea.distance_pct !== null &&
+                    `; ${picked.idea.ticker} is now ${signedPct(picked.idea.distance_pct)} from the level`}
+                  .
                 </div>
               )}
             </div>
@@ -789,6 +828,7 @@ function ContractDetail({
   return (
     <>
       <div className="flex flex-col gap-3 px-4 py-4 text-xs">
+        {picked.idea && <WatchlistBox idea={picked.idea} />}
         <div className="flex items-baseline gap-2">
           <span className="text-xl font-semibold tabular-nums text-emerald-300">
             {fmtPrice(row.ask)}
@@ -883,4 +923,50 @@ function EntryOutcome({ status }: { status: StatusView | null }) {
         </span>
       );
   }
+}
+
+function signedPct(n: number): string {
+  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+}
+
+/**
+ * The watchlist idea this contract is: the plan, whether and when the stock crossed, and where it is
+ * now. Context, not a verdict — the box says so, because a triggered idea is not a reason to buy on
+ * its own.
+ */
+function WatchlistBox({ idea }: { idea: WatchlistIdea }) {
+  const crossed = idea.status === "crossed" && idea.crossed_at !== null;
+  const where =
+    idea.last === null || idea.distance_pct === null
+      ? null
+      : `${idea.ticker} last ${fmtPrice(idea.last)}, ${signedPct(idea.distance_pct)} from the level`;
+  const facts = crossed
+    ? `Crossed at ${etClock(idea.crossed_at as string)} ET.${where ? ` ${where}.` : ""}`
+    : idea.status === "unknown"
+      ? `Today's prices for ${idea.ticker} could not be read, so whether it crossed is unknown.`
+      : `${where ? `${where}. ` : ""}Not crossed today.`;
+  return (
+    <div
+      className={`flex flex-col gap-1.5 rounded-md border px-3 py-2.5 ${
+        crossed ? "border-amber-400/60 bg-amber-500/10" : "border-violet-400/50 bg-violet-500/10"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-violet-300">
+          Today&apos;s watchlist
+        </span>
+        <IdeaStatusPill idea={idea} />
+      </div>
+      <div className="text-slate-100">
+        Buy the {idea.strike}
+        {idea.right} when {idea.ticker} breaks {idea.direction === "ABOVE" ? "above" : "below"}{" "}
+        {fmtPrice(idea.level)}.
+      </div>
+      <div className="tabular-nums text-slate-400">{facts}</div>
+      <div className="text-[11px] text-slate-500">
+        From the author&apos;s daily list. Information only, not a recommendation. Nothing is bought
+        automatically.
+      </div>
+    </div>
+  );
 }

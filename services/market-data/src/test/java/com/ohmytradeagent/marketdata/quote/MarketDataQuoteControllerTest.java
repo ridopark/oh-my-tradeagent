@@ -250,4 +250,46 @@ class MarketDataQuoteControllerTest {
     mvc.perform(get("/md/chain/{u}", "NVDA").param("expiration", "2026-10-16").param("right", "X"))
         .andExpect(status().isBadRequest());
   }
+
+  // --- /live chain picker: watchlist crossing bars ---
+
+  @Test
+  void equityBars1m_returnsHighLowClose() throws Exception {
+    when(provider.equityBars1Min(
+            "NVDA", Instant.parse("2026-10-15T13:30:00Z"), Instant.parse("2026-10-15T14:58:00Z")))
+        .thenReturn(
+            Optional.of(
+                java.util.List.of(
+                    new com.ohmytradeagent.marketdata.provider.EquityBar(
+                        Instant.parse("2026-10-15T14:42:00Z"),
+                        new BigDecimal("181.20"),
+                        new BigDecimal("180.70"),
+                        new BigDecimal("181.06")))));
+
+    mvc.perform(
+            get("/md/equity/{t}/bars1m", "NVDA")
+                .param("start", "2026-10-15T13:30:00Z")
+                .param("end", "2026-10-15T14:58:00Z"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.bars[0].t").value("2026-10-15T14:42:00Z"))
+        .andExpect(jsonPath("$.bars[0].h").value(181.20))
+        .andExpect(jsonPath("$.bars[0].l").value(180.70))
+        .andExpect(jsonPath("$.bars[0].c").value(181.06));
+  }
+
+  @Test
+  void equityBars1m_unreadable_is503_notNoBars() throws Exception {
+    when(provider.equityBars1Min(
+            org.mockito.ArgumentMatchers.eq("NVDA"),
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any()))
+        .thenReturn(Optional.empty());
+
+    mvc.perform(
+            get("/md/equity/{t}/bars1m", "NVDA")
+                .param("start", "2026-10-15T13:30:00Z")
+                .param("end", "2026-10-15T14:58:00Z"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("bars_unavailable"));
+  }
 }

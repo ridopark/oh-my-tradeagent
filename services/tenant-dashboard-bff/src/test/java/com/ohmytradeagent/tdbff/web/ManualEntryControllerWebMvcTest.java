@@ -63,6 +63,7 @@ class ManualEntryControllerWebMvcTest {
   @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioCache portfolioCache;
   @MockitoBean private com.ohmytradeagent.tdbff.live.OpenOccCache openOccCache;
   @MockitoBean private MarketDataQuoteClient quotes;
+  @MockitoBean private com.ohmytradeagent.tdbff.watchlist.WatchlistToday watchlistToday;
   @MockitoBean private StrategyConfigReader strategyConfigs;
 
   private WorkflowStub stub;
@@ -239,6 +240,60 @@ class ManualEntryControllerWebMvcTest {
                 .header("X-Tenant-Id", "acme"))
         .andExpect(status().isServiceUnavailable())
         .andExpect(jsonPath("$.error").value("chain_unavailable"));
+  }
+
+  // ---------- watchlist ----------
+
+  @Test
+  void watchlist_returnsEachIdeaWithItsCrossing() throws Exception {
+    when(watchlistToday.today())
+        .thenReturn(
+            new com.ohmytradeagent.tdbff.watchlist.WatchlistToday.Today(
+                java.time.LocalDate.of(2026, 10, 15),
+                List.of(
+                    new com.ohmytradeagent.tdbff.watchlist.WatchlistToday.IdeaView(
+                        new com.ohmytradeagent.tdbff.watchlist.WatchlistDailyReader.Idea(
+                            "NVDA", "C", new BigDecimal("185"), "ABOVE", new BigDecimal("181.00")),
+                        "crossed",
+                        java.time.Instant.parse("2026-10-15T14:42:00Z"),
+                        new BigDecimal("182.40"),
+                        new BigDecimal("0.77")))));
+
+    mvc.perform(get("/api/entries/watchlist").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.et_date").value("2026-10-15"))
+        .andExpect(jsonPath("$.posted").value(true))
+        .andExpect(jsonPath("$.ideas[0].ticker").value("NVDA"))
+        .andExpect(jsonPath("$.ideas[0].right").value("C"))
+        .andExpect(jsonPath("$.ideas[0].strike").value(185))
+        .andExpect(jsonPath("$.ideas[0].direction").value("ABOVE"))
+        .andExpect(jsonPath("$.ideas[0].level").value(181.00))
+        .andExpect(jsonPath("$.ideas[0].status").value("crossed"))
+        .andExpect(jsonPath("$.ideas[0].crossed_at").value("2026-10-15T14:42:00Z"))
+        .andExpect(jsonPath("$.ideas[0].last").value(182.40))
+        .andExpect(jsonPath("$.ideas[0].distance_pct").value(0.77));
+  }
+
+  @Test
+  void watchlist_nothingPostedToday_isPostedFalse() throws Exception {
+    when(watchlistToday.today())
+        .thenReturn(
+            new com.ohmytradeagent.tdbff.watchlist.WatchlistToday.Today(
+                java.time.LocalDate.of(2026, 10, 15), null));
+
+    mvc.perform(get("/api/entries/watchlist").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.posted").value(false))
+        .andExpect(jsonPath("$.ideas").isEmpty());
+  }
+
+  @Test
+  void watchlist_unreadable_is503_notAnEmptyList() throws Exception {
+    when(watchlistToday.today()).thenThrow(new RuntimeException("db down"));
+
+    mvc.perform(get("/api/entries/watchlist").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("watchlist_unavailable"));
   }
 
   // ---------- manual entry ----------

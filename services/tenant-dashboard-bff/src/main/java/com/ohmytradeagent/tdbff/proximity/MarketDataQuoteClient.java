@@ -2,6 +2,7 @@ package com.ohmytradeagent.tdbff.proximity;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -146,6 +147,48 @@ public class MarketDataQuoteClient {
     }
   }
 
+  /**
+   * 1-minute bars (high/low/close) for {@code ticker} in {@code [start, end)}, oldest first, or
+   * null when they could not be read (market-data 503s on a provider failure). An empty list is a
+   * real "no bars yet".
+   */
+  public List<EquityBar> equityBars1m(String ticker, Instant start, Instant end) {
+    try {
+      Map<String, Object> body =
+          chainRest
+              .get()
+              .uri(
+                  u ->
+                      u.path("/md/equity/{t}/bars1m")
+                          .queryParam("start", start.toString())
+                          .queryParam("end", end.toString())
+                          .build(ticker))
+              .retrieve()
+              .body(MAP_TYPE);
+      return parseBars(body);
+    } catch (RuntimeException e) {
+      log.warn("market-data bars read failed for {}: {}", ticker, e.getMessage());
+      return null;
+    }
+  }
+
+  /** The {@code /md/equity/{t}/bars1m} wire shape; null when it is not that shape. */
+  static List<EquityBar> parseBars(Map<String, Object> body) {
+    if (body == null || !(body.get("bars") instanceof List<?> raw)) {
+      return null;
+    }
+    return raw.stream()
+        .map(r -> (Map<?, ?>) r)
+        .map(
+            r ->
+                new EquityBar(
+                    Instant.parse(String.valueOf(r.get("t"))),
+                    decimal(r.get("h")),
+                    decimal(r.get("l")),
+                    decimal(r.get("c"))))
+        .toList();
+  }
+
   /** The {@code /md/chain/{u}/expirations} wire shape; null when it is not that shape. */
   static ChainExpirations parseExpirations(Map<String, Object> body) {
     if (body == null || !(body.get("expirations") instanceof List<?> raw)) {
@@ -182,6 +225,9 @@ public class MarketDataQuoteClient {
 
   /** One NBBO snapshot. Any field may be null when the provider omitted it. */
   public record OptionQuote(BigDecimal bid, BigDecimal mid, BigDecimal ask) {}
+
+  /** One 1-minute bar's range. */
+  public record EquityBar(Instant t, BigDecimal high, BigDecimal low, BigDecimal close) {}
 
   /** Listed expirations, ascending, and the spot market-data probed them around (may be null). */
   public record ChainExpirations(BigDecimal spot, List<LocalDate> expirations) {}
