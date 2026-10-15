@@ -134,6 +134,113 @@ class ManualEntryControllerWebMvcTest {
     mvc.perform(get("/api/entries/quote").param("occ", OCC)).andExpect(status().isUnauthorized());
   }
 
+  // ---------- chain picker ----------
+
+  @Test
+  void chainExpirations_normalizesTheTicker_andReturnsSpotAndDates() throws Exception {
+    when(quotes.optionExpirations("NVDA"))
+        .thenReturn(
+            new MarketDataQuoteClient.ChainExpirations(
+                new BigDecimal("182.40"), List.of(java.time.LocalDate.of(2026, 10, 16))));
+
+    mvc.perform(
+            get("/api/entries/chain/expirations")
+                .param("underlying", " nvda ")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.underlying").value("NVDA"))
+        .andExpect(jsonPath("$.spot").value(182.40))
+        .andExpect(jsonPath("$.expirations[0]").value("2026-10-16"));
+    verify(quotes, never()).equityPrice(anyString());
+  }
+
+  @Test
+  void chainExpirations_readFailed_is503() throws Exception {
+    when(quotes.optionExpirations("NVDA")).thenReturn(null);
+
+    mvc.perform(
+            get("/api/entries/chain/expirations")
+                .param("underlying", "NVDA")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("chain_unavailable"));
+  }
+
+  @Test
+  void chain_returnsRows_withSpot() throws Exception {
+    when(quotes.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), "P"))
+        .thenReturn(
+            List.of(
+                new MarketDataQuoteClient.ChainRow(
+                    "NVDA261016P00180000",
+                    new BigDecimal("180"),
+                    new BigDecimal("2.10"),
+                    new BigDecimal("2.15"),
+                    new BigDecimal("2.20"),
+                    new BigDecimal("0.44"),
+                    new BigDecimal("-0.41"),
+                    1200L)));
+    when(quotes.equityPrice("NVDA")).thenReturn(new BigDecimal("182.40"));
+
+    mvc.perform(
+            get("/api/entries/chain")
+                .param("underlying", "NVDA")
+                .param("expiration", "2026-10-16")
+                .param("right", "P")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.spot").value(182.40))
+        .andExpect(jsonPath("$.contracts[0].occ").value("NVDA261016P00180000"))
+        .andExpect(jsonPath("$.contracts[0].ask").value(2.20))
+        .andExpect(jsonPath("$.contracts[0].volume").value(1200));
+  }
+
+  @Test
+  void chain_rejectsBadInput_beforeReadingMarketData() throws Exception {
+    org.junit.jupiter.api.Assertions.assertAll(
+        () ->
+            mvc.perform(
+                    get("/api/entries/chain")
+                        .param("underlying", "BRK.B")
+                        .param("expiration", "2026-10-16")
+                        .param("right", "C")
+                        .header("X-Tenant-Id", "acme"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("invalid_request")),
+        () ->
+            mvc.perform(
+                    get("/api/entries/chain")
+                        .param("underlying", "NVDA")
+                        .param("expiration", "2026-10-16")
+                        .param("right", "X")
+                        .header("X-Tenant-Id", "acme"))
+                .andExpect(status().isBadRequest()),
+        () ->
+            mvc.perform(
+                    get("/api/entries/chain")
+                        .param("underlying", "NVDA")
+                        .param("expiration", "10/16/2026")
+                        .param("right", "C")
+                        .header("X-Tenant-Id", "acme"))
+                .andExpect(status().isBadRequest()));
+
+    verify(quotes, never()).optionChain(anyString(), any(), anyString());
+  }
+
+  @Test
+  void chain_readFailed_is503() throws Exception {
+    when(quotes.optionChain(anyString(), any(), anyString())).thenReturn(null);
+
+    mvc.perform(
+            get("/api/entries/chain")
+                .param("underlying", "NVDA")
+                .param("expiration", "2026-10-16")
+                .param("right", "C")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("chain_unavailable"));
+  }
+
   // ---------- manual entry ----------
 
   @Test

@@ -64,6 +64,10 @@ import {
   getLivePromotion,
   getStrategyConfig,
   getOptionQuote,
+  getChainExpirations,
+  getOptionChain,
+  type ChainExpirationsResult,
+  type OptionChainResult,
   submitManualEntry,
   getEntryStatus,
   armPositionTrail,
@@ -257,6 +261,33 @@ async function quoteAction(occ: string): Promise<QuoteActionResult> {
     return { ok: false, kind: "error" };
   }
   return getOptionQuote(occ);
+}
+
+// The chain picker's reads. Read-only, but session-checked like the rest: the client island calls
+// them directly. A thrown BFF call (timeout, network) is an "error" result, not an exception, so
+// the picker can say the chain failed to load instead of the action crashing.
+async function chainExpirationsAction(underlying: string): Promise<ChainExpirationsResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  return getChainExpirations(underlying).catch(() => ({ ok: false, kind: "error" }) as const);
+}
+
+async function optionChainAction(
+  underlying: string,
+  expiration: string,
+  right: "C" | "P",
+): Promise<OptionChainResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  return getOptionChain(underlying, expiration, right).catch(
+    () => ({ ok: false, kind: "error" }) as const,
+  );
 }
 
 async function submitManualEntryAction(
@@ -675,6 +706,8 @@ export default async function LivePage() {
             )}
             recentContracts={recentSignalOccs}
             quoteAction={quoteAction}
+            chainExpirationsAction={chainExpirationsAction}
+            optionChainAction={optionChainAction}
             submitAction={submitManualEntryAction}
             statusAction={entryStatusAction}
           />

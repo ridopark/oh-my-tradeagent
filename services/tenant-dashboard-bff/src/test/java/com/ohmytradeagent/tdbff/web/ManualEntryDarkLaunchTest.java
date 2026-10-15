@@ -84,4 +84,24 @@ class ManualEntryDarkLaunchTest {
 
     verifyNoInteractions(client);
   }
+
+  @Test
+  void chain_flagUnset_404s() throws Exception {
+    mvc.perform(
+            get("/api/entries/chain/expirations")
+                .param("underlying", "NVDA")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isNotFound())
+        .andExpect(jsonPath("$.error").value("manual_entry_disabled"));
+    mvc.perform(
+            get("/api/entries/chain")
+                .param("underlying", "NVDA")
+                .param("expiration", "2026-10-16")
+                .param("right", "C")
+                .header("X-Tenant-Id", "acme"))
+        .andExpect(status().isNotFound())
+        .andExpect(jsonPath("$.error").value("manual_entry_disabled"));
+
+    verifyNoInteractions(quotes);
+  }
 }

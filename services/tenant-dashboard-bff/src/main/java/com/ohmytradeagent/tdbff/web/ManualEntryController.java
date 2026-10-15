@@ -11,6 +11,8 @@ import com.ohmytradeagent.tdbff.live.OpenOccCache;
 import com.ohmytradeagent.tdbff.platform.StrategyConfigReader;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainExpirations;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainRow;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.OptionQuote;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.client.WorkflowClient;
@@ -21,15 +23,19 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +56,9 @@ import org.springframework.web.bind.annotation.RestController;
  * <ul>
  *   <li>{@code GET /api/entries/quote?occ=…} — parse the operator's contract string and snapshot
  *       its NBBO, for the confirm step.
+ *   <li>{@code GET /api/entries/chain/expirations?underlying=…} and {@code GET
+ *       /api/entries/chain?underlying=…&expiration=…&right=C|P} — the /live chain picker's reads.
+ *       Display-only: a picked contract still goes through {@code /quote} before the confirm step.
  *   <li>{@code POST /api/entries/manual} — start a {@code CopytradeSignalWorkflow} with a synthetic
  *       {@code CopytradeSignalPayload{action:BTO, source:manual}}. This is the WHOLE point of the
  *       design: the entry then runs the exact path a Discord signal runs — strategy-enabled gate,
@@ -209,6 +218,93 @@ public class ManualEntryController {
     body.put("mid", q.mid());
     body.put("ask", q.ask());
     body.put("quoted_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+    return ResponseEntity.ok(body);
+  }
+
+  /**
+   * Listed expirations for the /live chain picker, plus the underlying's spot so the picker can
+   * place its at-the-money line. Read-only, but gated like {@link #quote}: it only exists to feed
+   * the manual-entry flow.
+   */
+  @GetMapping("/chain/expirations")
+  public ResponseEntity<Map<String, Object>> chainExpirations(
+      HttpServletRequest req, @RequestParam("underlying") String underlying) {
+    if (!manualEntryWriteEnabled) {
+      return disabled();
+    }
+    if (!allowedForTenant(ctx.tenantId(req))) {
+      return disabled();
+    }
+    String ticker = underlying.trim().toUpperCase(Locale.ROOT);
+    if (!UNDERLYING.matcher(ticker).matches()) {
+      return invalidRequest("underlying must be a 1-6 letter ticker");
+    }
+
+    ChainExpirations read = quotes.optionExpirations(ticker);
+    if (read == null) {
+      return chainUnavailable(ticker);
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("underlying", ticker);
+    body.put("spot", read.spot());
+    body.put("expirations", read.expirations().stream().map(LocalDate::toString).toList());
+    return ResponseEntity.ok(body);
+  }
+
+  /**
+   * One side of one expiry for the /live chain picker. Display-only: picking a row leads to {@link
+   * #quote}, which re-snapshots the contract before the confirm step, so nothing here ever prices
+   * an order.
+   */
+  @GetMapping("/chain")
+  public ResponseEntity<Map<String, Object>> chain(
+      HttpServletRequest req,
+      @RequestParam("underlying") String underlying,
+      @RequestParam("expiration") String expiration,
+      @RequestParam("right") String right) {
+    if (!manualEntryWriteEnabled) {
+      return disabled();
+    }
+    if (!allowedForTenant(ctx.tenantId(req))) {
+      return disabled();
+    }
+    String ticker = underlying.trim().toUpperCase(Locale.ROOT);
+    if (!UNDERLYING.matcher(ticker).matches()) {
+      return invalidRequest("underlying must be a 1-6 letter ticker");
+    }
+    if (!"C".equals(right) && !"P".equals(right)) {
+      return invalidRequest("right must be C or P");
+    }
+    LocalDate expiry;
+    try {
+      expiry = LocalDate.parse(expiration);
+    } catch (DateTimeParseException e) {
+      return invalidRequest("expiration must be YYYY-MM-DD");
+    }
+
+    List<ChainRow> rows = quotes.optionChain(ticker, expiry, right);
+    if (rows == null) {
+      return chainUnavailable(ticker);
+    }
+    List<Map<String, Object>> contracts = new ArrayList<>();
+    for (ChainRow r : rows) {
+      Map<String, Object> c = new LinkedHashMap<>();
+      c.put("occ", r.occ());
+      c.put("strike", r.strike());
+      c.put("bid", r.bid());
+      c.put("mid", r.mid());
+      c.put("ask", r.ask());
+      c.put("iv", r.iv());
+      c.put("delta", r.delta());
+      c.put("volume", r.volume());
+      contracts.add(c);
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("underlying", ticker);
+    body.put("expiration", expiry.toString());
+    body.put("right", right);
+    body.put("spot", quotes.equityPrice(ticker));
+    body.put("contracts", contracts);
     return ResponseEntity.ok(body);
   }
 
@@ -471,6 +567,19 @@ public class ManualEntryController {
       throw new IllegalArgumentException(field + " is required");
     }
     return value;
+  }
+
+  /** Same root grammar {@link OccParser} accepts, so a picked chain row always parses. */
+  private static final Pattern UNDERLYING = Pattern.compile("^[A-Z]{1,6}$");
+
+  private static ResponseEntity<Map<String, Object>> invalidRequest(String detail) {
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        .body(Map.of("error", "invalid_request", "detail", detail));
+  }
+
+  private static ResponseEntity<Map<String, Object>> chainUnavailable(String underlying) {
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .body(Map.of("error", "chain_unavailable", "underlying", underlying));
   }
 
   /** Dark-launch: the surface is off. JSON body so the client can branch on the reason. */

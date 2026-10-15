@@ -84,6 +84,29 @@ public interface MarketDataProvider {
   }
 
   /**
+   * Every {@code underlying} contract of one side ({@code right} = 'C' or 'P') expiring on {@code
+   * expiration}, strike ascending, for the /live chain picker. Display-only.
+   *
+   * <p>{@link Optional#empty()} means the chain could not be READ (provider error, or this provider
+   * has no chain surface) and is reported upstream as unavailable. An empty list is a real answer:
+   * nothing listed. Keeping the two apart is the point — an outage must never look like "no
+   * options".
+   */
+  default Optional<java.util.List<ChainContract>> optionChain(
+      String underlying, java.time.LocalDate expiration, char right) {
+    return Optional.empty();
+  }
+
+  /**
+   * The listed expirations for {@code underlying} from today on, with the spot they were probed
+   * around, for the /live chain picker. Display-only. Empty means unavailable, exactly as for
+   * {@link #optionChain}.
+   */
+  default Optional<OptionExpirations> optionExpirations(String underlying) {
+    return Optional.empty();
+  }
+
+  /**
    * Opens a push subscription for {@code occSymbol}. Each premium tick from the provider feed is
    * delivered to {@code onTick}. Subscriptions are independent: closing one does not affect other
    * subscribers on the same symbol.
