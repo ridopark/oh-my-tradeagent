@@ -1215,7 +1215,7 @@ class AlpacaMarketDataTest {
                 + "\"greeks\":{\"delta\":0.52}}},\"next_page_token\":null}"));
 
     java.util.List<ChainContract> chain =
-        provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C');
+        provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C').orElseThrow();
 
     assertThat(chain)
         .extracting(ChainContract::occ)
@@ -1245,8 +1245,22 @@ class AlpacaMarketDataTest {
   }
 
   @Test
-  void optionChain_5xx_returnsEmpty() {
+  void optionChain_5xx_isUnavailable_notAnEmptyChain() {
     server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"message\":\"down\"}"));
+    assertThat(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C')).isEmpty();
+  }
+
+  @Test
+  void optionChain_noContractsListed_isAnEmptyChain_notUnavailable() {
+    server.enqueue(json("{\"snapshots\":{},\"next_page_token\":null}"));
+    assertThat(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C'))
+        .hasValue(java.util.List.of());
+  }
+
+  @Test
+  void optionChain_laterPageFails_isUnavailable_notATruncatedLadder() {
+    server.enqueue(json("{\"snapshots\":{\"NVDA261016C00180000\":{}},\"next_page_token\":\"p2\"}"));
+    server.enqueue(new MockResponse().setResponseCode(429).setBody("{\"message\":\"rate\"}"));
     assertThat(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C')).isEmpty();
   }
 
@@ -1259,7 +1273,10 @@ class AlpacaMarketDataTest {
                 + "\"NVDA261023C00200000\":{},\"NVDA261016C00195000\":{},"
                 + "\"NVDA261016C00200000\":{}},\"next_page_token\":null}"));
 
-    assertThat(provider.optionExpirations("NVDA"))
+    com.ohmytradeagent.marketdata.provider.OptionExpirations read =
+        provider.optionExpirations("NVDA").orElseThrow();
+    assertThat(read.spot()).isEqualByComparingTo("200.00");
+    assertThat(read.expirations())
         .containsExactly(
             java.time.LocalDate.of(2026, 10, 16), java.time.LocalDate.of(2026, 10, 23));
     server.takeRequest(); // the spot read
@@ -1272,7 +1289,31 @@ class AlpacaMarketDataTest {
   }
 
   @Test
-  void optionExpirations_noSpot_returnsEmpty_withoutProbingTheChain() {
+  void optionExpirations_probeFails_isUnavailable() {
+    server.enqueue(json("{\"latestTrade\":{\"p\":200.00}}"));
+    server.enqueue(new MockResponse().setResponseCode(403).setBody("{\"message\":\"auth\"}"));
+    assertThat(provider.optionExpirations("NVDA")).isEmpty();
+  }
+
+  @Test
+  void optionExpirations_stopsAtThePageCap_andKeepsWhatItRead() {
+    server.enqueue(json("{\"latestTrade\":{\"p\":200.00}}"));
+    for (int page = 1; page <= 6; page++) {
+      server.enqueue(
+          json(
+              "{\"snapshots\":{\"NVDA2610"
+                  + (10 + page)
+                  + "C00200000\":{}},\"next_page_token\":\"p"
+                  + (page + 1)
+                  + "\"}"));
+    }
+
+    assertThat(provider.optionExpirations("NVDA").orElseThrow().expirations()).hasSize(5);
+    assertThat(server.getRequestCount()).isEqualTo(1 + 5);
+  }
+
+  @Test
+  void optionExpirations_noSpot_isUnavailable_withoutProbingTheChain() {
     server.enqueue(new MockResponse().setResponseCode(404).setBody("{}"));
     assertThat(provider.optionExpirations("NOPE")).isEmpty();
     assertThat(server.getRequestCount()).isEqualTo(1);

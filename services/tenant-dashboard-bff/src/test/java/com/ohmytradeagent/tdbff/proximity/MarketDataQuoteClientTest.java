@@ -2,6 +2,8 @@ package com.ohmytradeagent.tdbff.proximity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
@@ -54,11 +56,41 @@ class MarketDataQuoteClientTest {
   }
 
   @Test
-  void parseExpirations_readsIsoDates() {
-    assertThat(
-            MarketDataQuoteClient.parseExpirations(
-                Map.of("expirations", List.of("2026-10-16", "2026-10-23"))))
+  void parseExpirations_readsSpotAndIsoDates() {
+    MarketDataQuoteClient.ChainExpirations read =
+        MarketDataQuoteClient.parseExpirations(
+            Map.of("spot", 182.4, "expirations", List.of("2026-10-16", "2026-10-23")));
+    assertThat(read.spot()).isEqualByComparingTo("182.4");
+    assertThat(read.expirations())
         .containsExactly(LocalDate.of(2026, 10, 16), LocalDate.of(2026, 10, 23));
     assertThat(MarketDataQuoteClient.parseExpirations(Map.of())).isNull();
+  }
+
+  /**
+   * The outage path end to end on the BFF side: market-data answers a provider failure with 503
+   * (pinned by MarketDataQuoteControllerTest), and that must reach the controller as null — its
+   * "chain_unavailable" — never as an empty chain the picker would show as "nothing listed".
+   */
+  @Test
+  void marketData503_isNull_notAnEmptyChainOrExpirationList() throws Exception {
+    HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    server.createContext(
+        "/",
+        exchange -> {
+          byte[] body = "{\"error\":\"chain_unavailable\"}".getBytes();
+          exchange.getResponseHeaders().add("Content-Type", "application/json");
+          exchange.sendResponseHeaders(503, body.length);
+          exchange.getResponseBody().write(body);
+          exchange.close();
+        });
+    server.start();
+    try {
+      MarketDataQuoteClient client =
+          new MarketDataQuoteClient("http://127.0.0.1:" + server.getAddress().getPort());
+      assertThat(client.optionChain("NVDA", LocalDate.of(2026, 10, 16), "C")).isNull();
+      assertThat(client.optionExpirations("NVDA")).isNull();
+    } finally {
+      server.stop(0);
+    }
   }
 }

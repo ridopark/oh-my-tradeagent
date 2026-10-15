@@ -6,6 +6,7 @@ import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.Bar;
 import com.ohmytradeagent.marketdata.provider.ChainContract;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.OptionExpirations;
 import com.ohmytradeagent.marketdata.provider.OptionGreeks;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import com.ohmytradeagent.marketdata.provider.Quote;
@@ -468,7 +469,8 @@ public class AlpacaMarketData implements MarketDataProvider {
   }
 
   @Override
-  public List<ChainContract> optionChain(String underlying, LocalDate expiration, char right) {
+  public Optional<List<ChainContract>> optionChain(
+      String underlying, LocalDate expiration, char right) {
     List<ChainContract> out = new ArrayList<>();
     String token = null;
     try {
@@ -487,7 +489,7 @@ public class AlpacaMarketData implements MarketDataProvider {
                 .retrieve()
                 .body(JsonNode.class);
         if (body == null) {
-          break;
+          return Optional.empty();
         }
         body.path("snapshots")
             .fields()
@@ -495,28 +497,32 @@ public class AlpacaMarketData implements MarketDataProvider {
         token = nextPageToken(body);
       } while (token != null);
       out.sort(java.util.Comparator.comparing(ChainContract::strike));
-      return out;
+      return Optional.of(out);
     } catch (RuntimeException e) {
+      // Any page failing fails the whole read: a chain missing its later pages would look like a
+      // complete ladder with no far strikes.
       log.warn(
           "Alpaca optionChain failed for {} {} {}: {}",
           underlying,
           expiration,
           right,
           e.getMessage());
-      return List.of();
+      return Optional.empty();
     }
   }
 
   /**
    * Alpaca has no expirations endpoint on the data API, so the dates are read off the OCCs of the
    * calls struck within {@link #EXPIRATION_PROBE_BAND} of spot: every listed expiry has strikes
-   * near the money, and the band keeps the probe to about one page instead of the full chain.
+   * near the money, and the band keeps the probe to about one page instead of the full chain
+   * (measured: NVDA, 25 expirations, 273 contracts, one page). No spot means no band, which is
+   * reported as unavailable rather than guessed.
    */
   @Override
-  public List<LocalDate> optionExpirations(String underlying) {
+  public Optional<OptionExpirations> optionExpirations(String underlying) {
     Optional<BigDecimal> spot = snapshotEquityPrice(underlying);
     if (spot.isEmpty()) {
-      return List.of();
+      return Optional.empty();
     }
     BigDecimal lo = spot.get().multiply(BigDecimal.ONE.subtract(EXPIRATION_PROBE_BAND));
     BigDecimal hi = spot.get().multiply(BigDecimal.ONE.add(EXPIRATION_PROBE_BAND));
@@ -544,15 +550,25 @@ public class AlpacaMarketData implements MarketDataProvider {
                 .retrieve()
                 .body(JsonNode.class);
         if (body == null) {
-          break;
+          return Optional.empty();
         }
         body.path("snapshots").fieldNames().forEachRemaining(occ -> out.add(occExpiry(occ)));
         token = nextPageToken(body);
-      } while (token != null && ++pages < EXPIRATION_PROBE_MAX_PAGES);
-      return List.copyOf(out);
+        pages++;
+      } while (token != null && pages < EXPIRATION_PROBE_MAX_PAGES);
+      if (token != null) {
+        // Bounded on purpose (an operator is waiting), but say so: the later expirations are the
+        // ones missing, so the list still looks complete on screen.
+        log.warn(
+            "Alpaca optionExpirations for {} stopped at the {}-page cap; later expirations may be"
+                + " missing",
+            underlying,
+            EXPIRATION_PROBE_MAX_PAGES);
+      }
+      return Optional.of(new OptionExpirations(spot.get(), List.copyOf(out)));
     } catch (RuntimeException e) {
       log.warn("Alpaca optionExpirations failed for {}: {}", underlying, e.getMessage());
-      return List.of();
+      return Optional.empty();
     }
   }
 
@@ -570,6 +586,7 @@ public class AlpacaMarketData implements MarketDataProvider {
     JsonNode volume = snapshot.path("dailyBar").path("v");
     return new ChainContract(
         occ,
+        // Alpaca keys snapshots by COMPACT OCC, so the strike is the last 8 digits, in thousandths.
         new BigDecimal(occ.substring(occ.length() - 8)).movePointLeft(3),
         bid,
         bid != null && ask != null ? midPrice(bid, ask) : null,

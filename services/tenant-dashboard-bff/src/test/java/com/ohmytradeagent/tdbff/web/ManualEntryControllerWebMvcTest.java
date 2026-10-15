@@ -139,8 +139,9 @@ class ManualEntryControllerWebMvcTest {
   @Test
   void chainExpirations_normalizesTheTicker_andReturnsSpotAndDates() throws Exception {
     when(quotes.optionExpirations("NVDA"))
-        .thenReturn(List.of(java.time.LocalDate.of(2026, 10, 16)));
-    when(quotes.equityPrice("NVDA")).thenReturn(new BigDecimal("182.40"));
+        .thenReturn(
+            new MarketDataQuoteClient.ChainExpirations(
+                new BigDecimal("182.40"), List.of(java.time.LocalDate.of(2026, 10, 16))));
 
     mvc.perform(
             get("/api/entries/chain/expirations")
@@ -150,6 +151,7 @@ class ManualEntryControllerWebMvcTest {
         .andExpect(jsonPath("$.underlying").value("NVDA"))
         .andExpect(jsonPath("$.spot").value(182.40))
         .andExpect(jsonPath("$.expirations[0]").value("2026-10-16"));
+    verify(quotes, never()).equityPrice(anyString());
   }
 
   @Test

@@ -11,6 +11,7 @@ import com.ohmytradeagent.tdbff.live.OpenOccCache;
 import com.ohmytradeagent.tdbff.platform.StrategyConfigReader;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
+import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainExpirations;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainRow;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.OptionQuote;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
@@ -239,14 +240,14 @@ public class ManualEntryController {
       return invalidRequest("underlying must be a 1-6 letter ticker");
     }
 
-    List<LocalDate> expirations = quotes.optionExpirations(ticker);
-    if (expirations == null) {
+    ChainExpirations read = quotes.optionExpirations(ticker);
+    if (read == null) {
       return chainUnavailable(ticker);
     }
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("underlying", ticker);
-    body.put("spot", quotes.equityPrice(ticker));
-    body.put("expirations", expirations.stream().map(LocalDate::toString).toList());
+    body.put("spot", read.spot());
+    body.put("expirations", read.expirations().stream().map(LocalDate::toString).toList());
     return ResponseEntity.ok(body);
   }
 

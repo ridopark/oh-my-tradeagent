@@ -174,30 +174,45 @@ class MarketDataQuoteControllerTest {
   // --- /live chain picker ---
 
   @Test
-  void chainExpirations_returnsIsoDates() throws Exception {
+  void chainExpirations_returnsSpotAndIsoDates() throws Exception {
     when(provider.optionExpirations("NVDA"))
-        .thenReturn(java.util.List.of(java.time.LocalDate.of(2026, 10, 16)));
+        .thenReturn(
+            Optional.of(
+                new com.ohmytradeagent.marketdata.provider.OptionExpirations(
+                    new BigDecimal("182.40"),
+                    java.util.List.of(java.time.LocalDate.of(2026, 10, 16)))));
 
     mvc.perform(get("/md/chain/{u}/expirations", "NVDA"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.underlying").value("NVDA"))
+        .andExpect(jsonPath("$.spot").value(182.40))
         .andExpect(jsonPath("$.expirations[0]").value("2026-10-16"));
+  }
+
+  @Test
+  void chainExpirations_unreadable_is503_notAnEmptyList() throws Exception {
+    when(provider.optionExpirations("NVDA")).thenReturn(Optional.empty());
+
+    mvc.perform(get("/md/chain/{u}/expirations", "NVDA"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("chain_unavailable"));
   }
 
   @Test
   void chain_bindsExpirationAndRight_andReturnsRows() throws Exception {
     when(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'P'))
         .thenReturn(
-            java.util.List.of(
-                new com.ohmytradeagent.marketdata.provider.ChainContract(
-                    "NVDA261016P00180000",
-                    new BigDecimal("180"),
-                    new BigDecimal("2.10"),
-                    new BigDecimal("2.15"),
-                    new BigDecimal("2.20"),
-                    new BigDecimal("0.44"),
-                    new BigDecimal("-0.41"),
-                    1200L)));
+            Optional.of(
+                java.util.List.of(
+                    new com.ohmytradeagent.marketdata.provider.ChainContract(
+                        "NVDA261016P00180000",
+                        new BigDecimal("180"),
+                        new BigDecimal("2.10"),
+                        new BigDecimal("2.15"),
+                        new BigDecimal("2.20"),
+                        new BigDecimal("0.44"),
+                        new BigDecimal("-0.41"),
+                        1200L))));
 
     mvc.perform(get("/md/chain/{u}", "NVDA").param("expiration", "2026-10-16").param("right", "P"))
         .andExpect(status().isOk())
@@ -208,5 +223,31 @@ class MarketDataQuoteControllerTest {
         .andExpect(jsonPath("$.contracts[0].iv").value(0.44))
         .andExpect(jsonPath("$.contracts[0].delta").value(-0.41))
         .andExpect(jsonPath("$.contracts[0].volume").value(1200));
+  }
+
+  @Test
+  void chain_emptyButReadable_is200WithNoContracts() throws Exception {
+    when(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C'))
+        .thenReturn(Optional.of(java.util.List.of()));
+
+    mvc.perform(get("/md/chain/{u}", "NVDA").param("expiration", "2026-10-16").param("right", "C"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.contracts").isEmpty());
+  }
+
+  @Test
+  void chain_unreadable_is503_notAnEmptyChain() throws Exception {
+    when(provider.optionChain("NVDA", java.time.LocalDate.of(2026, 10, 16), 'C'))
+        .thenReturn(Optional.empty());
+
+    mvc.perform(get("/md/chain/{u}", "NVDA").param("expiration", "2026-10-16").param("right", "C"))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("chain_unavailable"));
+  }
+
+  @Test
+  void chain_rightOtherThanCOrP_is400() throws Exception {
+    mvc.perform(get("/md/chain/{u}", "NVDA").param("expiration", "2026-10-16").param("right", "X"))
+        .andExpect(status().isBadRequest());
   }
 }

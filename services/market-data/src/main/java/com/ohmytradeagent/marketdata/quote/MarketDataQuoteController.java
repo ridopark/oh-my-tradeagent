@@ -2,6 +2,7 @@ package com.ohmytradeagent.marketdata.quote;
 
 import com.ohmytradeagent.marketdata.provider.ChainContract;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
+import com.ohmytradeagent.marketdata.provider.OptionExpirations;
 import com.ohmytradeagent.marketdata.provider.PremiumFeedStatus;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -10,6 +11,9 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -100,31 +104,44 @@ public class MarketDataQuoteController {
   }
 
   /**
-   * {@code {underlying, expirations:[yyyy-mm-dd…]}} — listed expirations from today on, for the
-   * /live chain picker. Empty when the provider has none or the read failed.
+   * {@code {underlying, spot, expirations:[yyyy-mm-dd…]}} — listed expirations from today on, for
+   * the /live chain picker. 503 when they could not be read, so an outage is never mistaken for an
+   * underlying with no options.
    */
   @GetMapping("/md/chain/{underlying}/expirations")
-  public Map<String, Object> chainExpirations(@PathVariable("underlying") String underlying) {
+  public ResponseEntity<Map<String, Object>> chainExpirations(
+      @PathVariable("underlying") String underlying) {
+    Optional<OptionExpirations> read = provider.optionExpirations(underlying);
+    if (read.isEmpty()) {
+      return chainUnavailable(underlying);
+    }
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("underlying", underlying);
-    out.put(
-        "expirations",
-        provider.optionExpirations(underlying).stream().map(Object::toString).toList());
-    return out;
+    out.put("spot", read.get().spot());
+    out.put("expirations", read.get().expirations().stream().map(Object::toString).toList());
+    return ResponseEntity.ok(out);
   }
 
   /**
    * {@code {underlying, expiration, right, contracts:[{occ, strike, bid, mid, ask, iv, delta,
    * volume}]}} — one side of one expiry, strike ascending, for the /live chain picker. Market
-   * fields are null when the provider omitted them.
+   * fields are null when the provider omitted them; 503 when the chain could not be read.
    */
   @GetMapping("/md/chain/{underlying}")
-  public Map<String, Object> chain(
+  public ResponseEntity<Map<String, Object>> chain(
       @PathVariable("underlying") String underlying,
       @RequestParam("expiration") LocalDate expiration,
-      @RequestParam("right") char right) {
+      @RequestParam("right") String right) {
+    if (!"C".equals(right) && !"P".equals(right)) {
+      return ResponseEntity.badRequest().body(Map.of("error", "right must be C or P"));
+    }
+    Optional<List<ChainContract>> read =
+        provider.optionChain(underlying, expiration, right.charAt(0));
+    if (read.isEmpty()) {
+      return chainUnavailable(underlying);
+    }
     List<Map<String, Object>> rows = new ArrayList<>();
-    for (ChainContract c : provider.optionChain(underlying, expiration, right)) {
+    for (ChainContract c : read.get()) {
       Map<String, Object> row = new LinkedHashMap<>();
       row.put("occ", c.occ());
       row.put("strike", c.strike());
@@ -139,9 +156,14 @@ public class MarketDataQuoteController {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("underlying", underlying);
     out.put("expiration", expiration.toString());
-    out.put("right", String.valueOf(right));
+    out.put("right", right);
     out.put("contracts", rows);
-    return out;
+    return ResponseEntity.ok(out);
+  }
+
+  private static ResponseEntity<Map<String, Object>> chainUnavailable(String underlying) {
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .body(Map.of("error", "chain_unavailable", "underlying", underlying));
   }
 
   /** {@code {occ, bid, mid, ask}} — option NBBO (null fields when unavailable). */

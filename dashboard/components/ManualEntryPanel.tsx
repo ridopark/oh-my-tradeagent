@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { usePanelOpen } from "./LiveRefresh";
 import { Modal } from "./Modal";
+import { decideQuoteRefresh } from "@/lib/quoteRefresh";
 import {
   OptionChain,
   breakeven,
@@ -333,14 +334,17 @@ export function ManualEntryPanel({
     timers.current.push(
       setTimeout(async () => {
         const r = await quoteAction(target);
+        if (cancelled.current) return;
         // stepRef, not a setStep updater, decides: React may run an updater lazily at the next
         // render, too late to tell whether to re-arm. The updater re-checks anyway.
-        if (cancelled.current || stepRef.current.kind !== "confirm") return;
-        const next: Step = r.ok
-          ? { kind: "confirm", quote: r.quote, idempotencyKey: crypto.randomUUID() }
-          : { kind: "failed", message: quoteFailureText(r), inModal: true };
+        const decision = decideQuoteRefresh(stepRef.current.kind, r);
+        if (decision.kind === "drop") return;
+        const next: Step =
+          decision.kind === "replace"
+            ? { kind: "confirm", quote: decision.quote, idempotencyKey: crypto.randomUUID() }
+            : { kind: "failed", message: quoteFailureText(r as QuoteFailure), inModal: true };
         setStep((prev) => (prev.kind === "confirm" ? next : prev));
-        if (r.ok) scheduleRefresh(target, refreshesLeft - 1);
+        if (decision.kind === "replace") scheduleRefresh(target, refreshesLeft - 1);
       }, QUOTE_REFRESH_MS),
     );
   };
@@ -702,7 +706,9 @@ export function ManualEntryPanel({
   );
 }
 
-function quoteFailureText(r: Exclude<QuoteActionResult, { ok: true }>): string {
+type QuoteFailure = Exclude<QuoteActionResult, { ok: true }>;
+
+function quoteFailureText(r: QuoteFailure): string {
   const messages: Record<string, string> = {
     "invalid-occ": r.kind === "invalid-occ" ? r.detail : "",
     unavailable: "No quote available for that contract right now.",

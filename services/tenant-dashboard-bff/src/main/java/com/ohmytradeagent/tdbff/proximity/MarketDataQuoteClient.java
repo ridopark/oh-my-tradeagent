@@ -102,11 +102,11 @@ public class MarketDataQuoteClient {
   }
 
   /**
-   * Listed expirations for {@code underlying} from today on, ascending, or null when the read
-   * failed. Empty is a real answer (no listed options) only as far as market-data can tell — it is
-   * also fail-soft and returns an empty list when Alpaca errored.
+   * Listed expirations for {@code underlying} from today on (ascending) with the spot they were
+   * probed around, or null when they could not be read. market-data 503s on a provider failure, so
+   * an empty list here is a real "no listed options", never an outage.
    */
-  public List<LocalDate> optionExpirations(String underlying) {
+  public ChainExpirations optionExpirations(String underlying) {
     try {
       Map<String, Object> body =
           chainRest.get().uri("/md/chain/{u}/expirations", underlying).retrieve().body(MAP_TYPE);
@@ -119,7 +119,7 @@ public class MarketDataQuoteClient {
 
   /**
    * One side ({@code right} = "C" or "P") of one expiry for {@code underlying}, strike ascending,
-   * or null when the read failed.
+   * or null when it could not be read (market-data 503s on a provider failure, which lands here).
    */
   public List<ChainRow> optionChain(String underlying, LocalDate expiration, String right) {
     try {
@@ -147,11 +147,12 @@ public class MarketDataQuoteClient {
   }
 
   /** The {@code /md/chain/{u}/expirations} wire shape; null when it is not that shape. */
-  static List<LocalDate> parseExpirations(Map<String, Object> body) {
+  static ChainExpirations parseExpirations(Map<String, Object> body) {
     if (body == null || !(body.get("expirations") instanceof List<?> raw)) {
       return null;
     }
-    return raw.stream().map(d -> LocalDate.parse(d.toString())).toList();
+    return new ChainExpirations(
+        decimal(body.get("spot")), raw.stream().map(d -> LocalDate.parse(d.toString())).toList());
   }
 
   /** The {@code /md/chain/{u}} wire shape; null when it is not that shape. */
@@ -181,6 +182,9 @@ public class MarketDataQuoteClient {
 
   /** One NBBO snapshot. Any field may be null when the provider omitted it. */
   public record OptionQuote(BigDecimal bid, BigDecimal mid, BigDecimal ask) {}
+
+  /** Listed expirations, ascending, and the spot market-data probed them around (may be null). */
+  public record ChainExpirations(BigDecimal spot, List<LocalDate> expirations) {}
 
   /**
    * One chain row ({@code occ} is COMPACT). Market fields may be null when the provider omitted
