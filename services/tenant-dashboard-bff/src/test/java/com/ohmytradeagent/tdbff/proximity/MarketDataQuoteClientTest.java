@@ -89,8 +89,28 @@ class MarketDataQuoteClientTest {
           new MarketDataQuoteClient("http://127.0.0.1:" + server.getAddress().getPort());
       assertThat(client.optionChain("NVDA", LocalDate.of(2026, 10, 16), "C")).isNull();
       assertThat(client.optionExpirations("NVDA")).isNull();
+      assertThat(client.equityBars1m("NVDA", java.time.Instant.EPOCH, java.time.Instant.EPOCH))
+          .isNull();
     } finally {
       server.stop(0);
     }
+  }
+
+  /** The {@code /md/equity/{t}/bars1m} wire shape, pinned from the producer side too. */
+  @Test
+  void parseBars_readsTheExactShapeMarketDataEmits() {
+    List<MarketDataQuoteClient.EquityBar> bars =
+        MarketDataQuoteClient.parseBars(
+            Map.of(
+                "bars",
+                List.of(
+                    Map.of("t", "2026-10-15T14:42:00Z", "h", 181.20, "l", 180.70, "c", 181.06))));
+
+    assertThat(bars).hasSize(1);
+    assertThat(bars.get(0).t()).isEqualTo(java.time.Instant.parse("2026-10-15T14:42:00Z"));
+    assertThat(bars.get(0).high()).isEqualByComparingTo("181.20");
+    assertThat(bars.get(0).low()).isEqualByComparingTo("180.70");
+    assertThat(bars.get(0).close()).isEqualByComparingTo("181.06");
+    assertThat(MarketDataQuoteClient.parseBars(Map.of())).isNull();
   }
 }

@@ -79,9 +79,13 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   private final String triggerStrategyId;
   private final String coreTaskQueue;
 
+  // The shared daily copy for the /live chain picker. Null (legacy 2-arg constructor / mirror-only
+  // tests) skips the write.
+  private final WatchlistDailyRepository dailyRepository;
+
   public WatchlistMirrorActivitiesImpl(
       WebhookClient webhookClient, TenantWebhookResolver webhookResolver) {
-    this(webhookClient, webhookResolver, null, null, "", "orchestrator-core");
+    this(webhookClient, webhookResolver, null, null, "", "orchestrator-core", null);
   }
 
   @Autowired
@@ -91,7 +95,9 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
       WorkflowClient workflowClient,
       StrategyRegistry strategyRegistry,
       @Value("${watchlist.trigger.strategy-id:}") String triggerStrategyId,
-      @Value("${temporal.task-queue:orchestrator-core}") String coreTaskQueue) {
+      @Value("${temporal.task-queue:orchestrator-core}") String coreTaskQueue,
+      WatchlistDailyRepository dailyRepository) {
+    this.dailyRepository = dailyRepository;
     this.webhookClient = webhookClient;
     this.webhookResolver = webhookResolver;
     this.workflowClient = workflowClient;
@@ -103,6 +109,7 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
   @Override
   public void postWatchlistAlert(WatchlistMirrorPayload payload) {
     ParseResult parsed = WatchlistParser.parse(payload.getRawText());
+    recordDaily(payload, parsed);
     // Per-(tenant, etDate) dedup: post the digest only for the fan-out entry that wins today's
     // marker. Gates the POST only — maybeStartTriggerSession below still runs unconditionally.
     if (shouldPostDigest(payload)) {
@@ -118,6 +125,31 @@ public class WatchlistMirrorActivitiesImpl implements WatchlistMirrorActivities 
     // only on a clean parse, only for the configured trigger strategy, only when not explicitly
     // disabled. A start failure is caught + logged and never disrupts the mirror.
     maybeStartTriggerSession(payload, parsed);
+  }
+
+  /**
+   * Best-effort write of the shared daily list (display-only, for the /live chain picker). Same
+   * gate as the trigger session — a clean, non-empty parse — so the picker never shows an idea the
+   * watchlist strategy would not have armed. Any failure is logged and swallowed: it must never
+   * stop the digest post or the trigger session below.
+   */
+  private void recordDaily(WatchlistMirrorPayload payload, ParseResult parsed) {
+    if (dailyRepository == null || !parsed.clean() || parsed.rows().isEmpty()) {
+      return;
+    }
+    try {
+      dailyRepository.record(
+          payload.getEtDate(),
+          payload.getSourceMessageId(),
+          payload.getAuthor(),
+          WatchlistDailyRepository.ideasOf(parsed.rows()));
+    } catch (RuntimeException e) {
+      log.warn(
+          "watchlist daily record failed et_date={} msg={}: {}",
+          payload.getEtDate(),
+          payload.getSourceMessageId(),
+          e.getMessage());
+    }
   }
 
   /**

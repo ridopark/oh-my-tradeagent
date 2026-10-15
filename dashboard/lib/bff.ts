@@ -1,6 +1,7 @@
 import "server-only";
 import { auth } from "@/auth";
 import { occFromParts } from "@/lib/occ";
+import type { WatchlistIdea } from "@/lib/watchlist";
 
 // Server-ONLY client for the off-ingress tenant-dashboard BFF. Never import this from a client
 // component. It reads the verified tenant_id from the session and injects it as X-Tenant-Id behind
@@ -466,6 +467,8 @@ export interface OptionChainRow {
   volume: number | null;
 }
 
+export type { WatchlistIdea };
+
 export type ChainReadFailure = { ok: false; kind: "invalid" | "unavailable" | "disabled" | "error" };
 
 export type ChainExpirationsResult =
@@ -502,6 +505,19 @@ export async function getOptionChain(
   if (status !== 200) return chainFailure(status);
   const b = body as { spot: number | null; contracts: OptionChainRow[] };
   return { ok: true, spot: b.spot, contracts: b.contracts };
+}
+
+// Today's shared watchlist for the chain picker. `posted:false` = no list today (a real answer);
+// a read failure is `unavailable`, never an empty list that would look like "no ideas".
+export type WatchlistTodayResult =
+  | { ok: true; etDate: string; posted: boolean; ideas: WatchlistIdea[] }
+  | ChainReadFailure;
+
+export async function getWatchlistToday(): Promise<WatchlistTodayResult> {
+  const { status, body } = await bffGetRaw("/api/entries/watchlist");
+  if (status !== 200) return chainFailure(status);
+  const b = body as { et_date: string; posted: boolean; ideas: WatchlistIdea[] };
+  return { ok: true, etDate: b.et_date, posted: b.posted, ideas: b.ideas };
 }
 
 // Outcome of a submit. `quote-moved` carries both prices so the operator can see WHY it refused

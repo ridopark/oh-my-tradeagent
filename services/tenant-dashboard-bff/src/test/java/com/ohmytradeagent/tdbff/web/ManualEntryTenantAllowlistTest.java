@@ -51,6 +51,7 @@ class ManualEntryTenantAllowlistTest {
   @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioCache portfolioCache;
   @MockitoBean private com.ohmytradeagent.tdbff.live.OpenOccCache openOccCache;
   @MockitoBean private MarketDataQuoteClient quotes;
+  @MockitoBean private com.ohmytradeagent.tdbff.watchlist.WatchlistToday watchlistToday;
   @MockitoBean private StrategyConfigReader strategyConfigs;
 
   @Test
@@ -85,6 +86,9 @@ class ManualEntryTenantAllowlistTest {
                         .param("expiration", "2026-10-16")
                         .param("right", "C")
                         .header("X-Tenant-Id", "prod_real"))
+                .andExpect(status().isNotFound()),
+        () ->
+            mvc.perform(get("/api/entries/watchlist").header("X-Tenant-Id", "prod_real"))
                 .andExpect(status().isNotFound()),
         () ->
             mvc.perform(

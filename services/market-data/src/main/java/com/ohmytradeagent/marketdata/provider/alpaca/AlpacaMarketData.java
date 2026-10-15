@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.Bar;
 import com.ohmytradeagent.marketdata.provider.ChainContract;
+import com.ohmytradeagent.marketdata.provider.EquityBar;
 import com.ohmytradeagent.marketdata.provider.MarketDataProvider;
 import com.ohmytradeagent.marketdata.provider.OptionExpirations;
 import com.ohmytradeagent.marketdata.provider.OptionGreeks;
@@ -339,37 +340,86 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   @Override
   public List<Bar> stockBars1Min(String ticker, Instant start, Instant end) {
-    List<Bar> out = new ArrayList<>();
-    String token = null;
     try {
-      do {
-        String pageToken = token;
-        JsonNode body =
-            rest.get()
-                .uri(
-                    u ->
-                        u.path("/v2/stocks/{s}/bars")
-                            .queryParam("timeframe", "1Min")
-                            .queryParam("start", start.toString())
-                            .queryParam("end", end.toString())
-                            .queryParam("feed", "sip")
-                            .queryParam("adjustment", "raw")
-                            .queryParam("limit", 10000)
-                            .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
-                            .build(ticker))
-                .retrieve()
-                .body(JsonNode.class);
-        if (body == null) {
-          break;
-        }
-        addBars(body.path("bars"), end, out);
-        token = nextPageToken(body);
-      } while (token != null);
+      List<Bar> out = new ArrayList<>();
+      forEachStockBar(
+          ticker,
+          start,
+          end,
+          b -> {
+            if (b.path("c").isNumber()) {
+              out.add(new Bar(Instant.parse(b.path("t").asText()), b.path("c").doubleValue()));
+            }
+          });
       return out;
     } catch (RuntimeException e) {
       log.warn("Alpaca stockBars1Min failed for {}: {}", ticker, e.getMessage());
       return List.of();
     }
+  }
+
+  @Override
+  public Optional<List<EquityBar>> equityBars1Min(String ticker, Instant start, Instant end) {
+    try {
+      List<EquityBar> out = new ArrayList<>();
+      forEachStockBar(
+          ticker,
+          start,
+          end,
+          b -> {
+            if (b.path("h").isNumber() && b.path("l").isNumber() && b.path("c").isNumber()) {
+              out.add(
+                  new EquityBar(
+                      Instant.parse(b.path("t").asText()),
+                      b.path("h").decimalValue(),
+                      b.path("l").decimalValue(),
+                      b.path("c").decimalValue()));
+            }
+          });
+      return Optional.of(out);
+    } catch (RuntimeException e) {
+      // Any page failing fails the read: a session missing its later bars would look like a
+      // stock that never reached the level.
+      log.warn("Alpaca equityBars1Min failed for {}: {}", ticker, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Pages through {@code /v2/stocks/{s}/bars} (1Min, SIP, raw) and hands each bar starting strictly
+   * before {@code end} to {@code onBar} (Alpaca's end bound is inclusive). Throws on any failure;
+   * each caller decides what a failure means for it.
+   */
+  private void forEachStockBar(
+      String ticker, Instant start, Instant end, java.util.function.Consumer<JsonNode> onBar) {
+    String token = null;
+    do {
+      String pageToken = token;
+      JsonNode body =
+          rest.get()
+              .uri(
+                  u ->
+                      u.path("/v2/stocks/{s}/bars")
+                          .queryParam("timeframe", "1Min")
+                          .queryParam("start", start.toString())
+                          .queryParam("end", end.toString())
+                          .queryParam("feed", "sip")
+                          .queryParam("adjustment", "raw")
+                          .queryParam("limit", 10000)
+                          .queryParamIfPresent("page_token", Optional.ofNullable(pageToken))
+                          .build(ticker))
+              .retrieve()
+              .body(JsonNode.class);
+      if (body == null) {
+        break;
+      }
+      for (JsonNode b : body.path("bars")) {
+        if (Instant.parse(b.path("t").asText()).isBefore(end)) {
+          onBar.accept(b);
+        }
+      }
+      token = nextPageToken(body);
+    } while (token != null);
   }
 
   @Override

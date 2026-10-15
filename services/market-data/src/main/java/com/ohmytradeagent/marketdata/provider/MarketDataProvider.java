@@ -65,6 +65,17 @@ public interface MarketDataProvider {
   }
 
   /**
+   * 1-minute bars with high/low for a stock {@code ticker} with start time in {@code [start, end)},
+   * oldest first, for the /live chain picker. {@link Optional#empty()} means the bars could not be
+   * read; an empty list is a real "no bars yet" (e.g. before the open). Default empty
+   * (unavailable).
+   */
+  default Optional<java.util.List<EquityBar>> equityBars1Min(
+      String ticker, java.time.Instant start, java.time.Instant end) {
+    return Optional.empty();
+  }
+
+  /**
    * Historical 1-minute bars per OCC (compact or space-padded; result keyed by the caller's form)
    * with start time in {@code [start, end)}, oldest first. Symbols with no bars are absent. Default
    * empty.

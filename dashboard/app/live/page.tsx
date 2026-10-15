@@ -66,6 +66,8 @@ import {
   getOptionQuote,
   getChainExpirations,
   getOptionChain,
+  getWatchlistToday,
+  type WatchlistTodayResult,
   type ChainExpirationsResult,
   type OptionChainResult,
   submitManualEntry,
@@ -288,6 +290,15 @@ async function optionChainAction(
   return getOptionChain(underlying, expiration, right).catch(
     () => ({ ok: false, kind: "error" }) as const,
   );
+}
+
+async function watchlistTodayAction(): Promise<WatchlistTodayResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { ok: false, kind: "error" };
+  }
+  return getWatchlistToday().catch(() => ({ ok: false, kind: "error" }) as const);
 }
 
 async function submitManualEntryAction(
@@ -708,6 +719,7 @@ export default async function LivePage() {
             quoteAction={quoteAction}
             chainExpirationsAction={chainExpirationsAction}
             optionChainAction={optionChainAction}
+            watchlistAction={watchlistTodayAction}
             submitAction={submitManualEntryAction}
             statusAction={entryStatusAction}
           />

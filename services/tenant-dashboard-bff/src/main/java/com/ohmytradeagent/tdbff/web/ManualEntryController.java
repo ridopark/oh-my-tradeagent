@@ -14,6 +14,7 @@ import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainExpirations;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.ChainRow;
 import com.ohmytradeagent.tdbff.proximity.MarketDataQuoteClient.OptionQuote;
+import com.ohmytradeagent.tdbff.watchlist.WatchlistToday;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowExecutionAlreadyStarted;
@@ -59,6 +60,7 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /api/entries/chain/expirations?underlying=…} and {@code GET
  *       /api/entries/chain?underlying=…&expiration=…&right=C|P} — the /live chain picker's reads.
  *       Display-only: a picked contract still goes through {@code /quote} before the confirm step.
+ *   <li>{@code GET /api/entries/watchlist} — today's shared watchlist with each idea's crossing.
  *   <li>{@code POST /api/entries/manual} — start a {@code CopytradeSignalWorkflow} with a synthetic
  *       {@code CopytradeSignalPayload{action:BTO, source:manual}}. This is the WHOLE point of the
  *       design: the entry then runs the exact path a Discord signal runs — strategy-enabled gate,
@@ -127,6 +129,8 @@ public class ManualEntryController {
 
   private final OpenOccCache openOccCache;
 
+  private final WatchlistToday watchlistToday;
+
   /**
    * Tenants allowed to use manual entry, on top of the dark flag. EMPTY (the default) means the
    * flag alone governs — i.e. every tenant.
@@ -154,6 +158,7 @@ public class ManualEntryController {
       StrategyConfigReader strategyConfigs,
       PortfolioCache portfolioCache,
       OpenOccCache openOccCache,
+      WatchlistToday watchlistToday,
       @Value("${temporal.orchestrator-task-queue:orchestrator-core}") String orchestratorTaskQueue,
       @Value("${entries.manual.write-enabled:false}") boolean manualEntryWriteEnabled,
       @Value("${entries.manual.allowed-tenants:}") String allowedTenants) {
@@ -163,6 +168,7 @@ public class ManualEntryController {
     this.strategyConfigs = strategyConfigs;
     this.portfolioCache = portfolioCache;
     this.openOccCache = openOccCache;
+    this.watchlistToday = watchlistToday;
     this.orchestratorTaskQueue = orchestratorTaskQueue;
     this.manualEntryWriteEnabled = manualEntryWriteEnabled;
     this.allowedTenants =
@@ -305,6 +311,50 @@ public class ManualEntryController {
     body.put("right", right);
     body.put("spot", quotes.equityPrice(ticker));
     body.put("contracts", contracts);
+    return ResponseEntity.ok(body);
+  }
+
+  /**
+   * Today's shared watchlist for the /live chain picker: each idea with whether and when the stock
+   * crossed its level and where it is now. {@code posted:false} when no list was posted today; 503
+   * when the list itself cannot be read. Display-only — nothing here orders anything.
+   */
+  @GetMapping("/watchlist")
+  public ResponseEntity<Map<String, Object>> watchlist(HttpServletRequest req) {
+    if (!manualEntryWriteEnabled) {
+      return disabled();
+    }
+    if (!allowedForTenant(ctx.tenantId(req))) {
+      return disabled();
+    }
+
+    WatchlistToday.Today today;
+    try {
+      today = watchlistToday.today();
+    } catch (RuntimeException e) {
+      log.warn("watchlist read failed: {}", e.getMessage());
+      return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+          .body(Map.of("error", "watchlist_unavailable"));
+    }
+    List<Map<String, Object>> ideas = new ArrayList<>();
+    for (WatchlistToday.IdeaView v :
+        today.ideas() == null ? List.<WatchlistToday.IdeaView>of() : today.ideas()) {
+      Map<String, Object> i = new LinkedHashMap<>();
+      i.put("ticker", v.idea().ticker());
+      i.put("right", v.idea().right());
+      i.put("strike", v.idea().strike());
+      i.put("direction", v.idea().direction());
+      i.put("level", v.idea().level());
+      i.put("status", v.status());
+      i.put("crossed_at", v.crossedAt() == null ? null : v.crossedAt().toString());
+      i.put("last", v.last());
+      i.put("distance_pct", v.distancePct());
+      ideas.add(i);
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("et_date", today.etDate().toString());
+    body.put("posted", today.ideas() != null);
+    body.put("ideas", ideas);
     return ResponseEntity.ok(body);
   }
 

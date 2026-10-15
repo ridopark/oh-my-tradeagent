@@ -37,6 +37,7 @@ class ManualEntryDarkLaunchTest {
   @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioCache portfolioCache;
   @MockitoBean private com.ohmytradeagent.tdbff.live.OpenOccCache openOccCache;
   @MockitoBean private MarketDataQuoteClient quotes;
+  @MockitoBean private com.ohmytradeagent.tdbff.watchlist.WatchlistToday watchlistToday;
   @MockitoBean private StrategyConfigReader strategyConfigs;
 
   @Test
@@ -103,5 +104,14 @@ class ManualEntryDarkLaunchTest {
         .andExpect(jsonPath("$.error").value("manual_entry_disabled"));
 
     verifyNoInteractions(quotes);
+  }
+
+  @Test
+  void watchlist_flagUnset_404s() throws Exception {
+    mvc.perform(get("/api/entries/watchlist").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isNotFound())
+        .andExpect(jsonPath("$.error").value("manual_entry_disabled"));
+
+    verifyNoInteractions(watchlistToday);
   }
 }
