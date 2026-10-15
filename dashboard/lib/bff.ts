@@ -255,6 +255,65 @@ export async function forcePositionExit(
   return { ok: false };
 }
 
+// A broker lot nothing manages (GET /api/portfolio `unmanaged_positions`). `occ` is compact.
+export interface UnmanagedPosition {
+  occ: string;
+  qty: number;
+  current_price: string | number | null;
+  unrealized_pl: string | number | null;
+  unrealized_intraday_pl: string | number | null;
+}
+
+// Typed result of POST /api/positions/adopt. Non-throwing, like its siblings:
+//   ADOPTED        — a PositionWorkflow now manages the lot.
+//   ALREADY_OWNED  — something already manages it; nothing changed.
+//   PENDING        — the adoption is still running; the next refresh shows the outcome.
+//   REFUSED_*      — nothing changed; `reason` says why for REFUSED_UNSAFE.
+//   disabled       — 404 {"error":"adopt_disabled"}: the BFF dark flag is off.
+export type AdoptResult = {
+  outcome:
+    | "ADOPTED"
+    | "ALREADY_OWNED"
+    | "PENDING"
+    | "REFUSED_NOT_HELD"
+    | "REFUSED_NO_ANCHOR"
+    | "REFUSED_UNSAFE"
+    | "disabled"
+    | "error";
+  reason?: string | null;
+  qty?: number | null;
+};
+
+// Hand an unmanaged broker lot to a PositionWorkflow under `strategyId`'s config.
+export async function adoptPosition(
+  occ: string,
+  strategyId: string,
+  operatorId?: string,
+): Promise<AdoptResult> {
+  const { status, body } = await bffPost(
+    "/api/positions/adopt",
+    { occ, strategy_id: strategyId },
+    operatorId ? { "X-Operator-Id": operatorId } : undefined,
+  );
+  const b = (body ?? {}) as { error?: string; outcome?: string; reason?: string; qty?: number };
+  if (status === 404 && b.error === "adopt_disabled") {
+    return { outcome: "disabled" };
+  }
+  const known = [
+    "ADOPTED",
+    "ALREADY_OWNED",
+    "PENDING",
+    "REFUSED_NOT_HELD",
+    "REFUSED_NO_ANCHOR",
+    "REFUSED_UNSAFE",
+  ] as const;
+  const outcome = known.find((k) => k === b.outcome);
+  if (outcome && (status === 200 || status === 202 || status === 409)) {
+    return { outcome, reason: b.reason ?? null, qty: b.qty ?? null };
+  }
+  return { outcome: "error" };
+}
+
 // Typed result of arming a per-position trailing stop (POST /api/positions/arm-trail). Same
 // non-throwing contract as its siblings, with one extra outcome that matters more here than
 // anywhere else on the page:
@@ -807,6 +866,12 @@ export interface Portfolio {
    * count/sum are 0 — NOT an empty book; render them as unknown. Absent on a BFF predating #934.
    */
   open_positions_degraded?: boolean;
+  /**
+   * Broker lots of this tenant's account that no workflow manages (bought directly at the broker,
+   * typically). Null when the managed book is degraded (unknown — never "everything unmanaged");
+   * absent on a BFF that predates the Adopt button.
+   */
+  unmanaged_positions?: UnmanagedPosition[] | null;
   open_positions_count: number;
   sum_open_notional: string | number;
   sum_open_notional_basis: string;

@@ -11,13 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class Outcome(StrEnum):
     """
-    ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation).
+    ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation). REFUSED_UNSAFE: an operator adoption of an unrecorded lot was refused because taking ownership could misfire (see reason).
     """
 
     adopted = "ADOPTED"
     already_owned = "ALREADY_OWNED"
     refused_not_held = "REFUSED_NOT_HELD"
     refused_no_anchor = "REFUSED_NO_ANCHOR"
+    refused_unsafe = "REFUSED_UNSAFE"
 
 
 class AdoptionResult(BaseModel):
@@ -31,7 +32,7 @@ class AdoptionResult(BaseModel):
     schema_version: Annotated[int, Field(ge=1)]
     outcome: Outcome
     """
-    ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation).
+    ADOPTED: a PositionWorkflow owner was reconstructed + started for the orphan. ALREADY_OWNED: a live PositionWorkflow already owns the OCC (idempotency no-op). REFUSED_NOT_HELD: the broker does not actually hold the lot (phantom guard). REFUSED_NO_ANCHOR: no entry_signal_id could be anchored from the journal, so the canonical workflow id cannot be built (documented known limitation). REFUSED_UNSAFE: an operator adoption of an unrecorded lot was refused because taking ownership could misfire (see reason).
     """
     workflow_id: str | None = None
     """
@@ -44,4 +45,8 @@ class AdoptionResult(BaseModel):
     qty: int | None = None
     """
     On ADOPTED, the broker-derived contract quantity the owner was reconstructed with. Null otherwise.
+    """
+    reason: str | None = None
+    """
+    On REFUSED_UNSAFE, why: condor_leg (one wing of a defined-risk combo), open_sell_order (a SELL for the OCC is already working at the broker), or expired (the contract is past its last trading moment). Null otherwise.
     """

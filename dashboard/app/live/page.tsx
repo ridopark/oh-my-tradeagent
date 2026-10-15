@@ -35,6 +35,7 @@ import {
 } from "@/components/ForceExitButton";
 import { TrimButton, type TrimActionResult } from "@/components/TrimButton";
 import { TrailLivenessProvider } from "@/components/TrailLiveness";
+import { UnmanagedPositions } from "@/components/UnmanagedPositions";
 import {
   FloorBreachProvider,
   FloorBreachBadge,
@@ -77,6 +78,8 @@ import {
   type TruePeakAnchor,
   forcePositionExit,
   trimPosition,
+  adoptPosition,
+  type AdoptResult,
   NotAuthenticatedError,
   tradeFill,
   type Order,
@@ -122,6 +125,12 @@ const STOP_LOSS_WRITE_ENABLED =
 // separate from trim/force-exit: OPENING a position is a categorically bigger capability than
 // reducing one, and must be armable (and disarmable) on its own.
 const MANUAL_ENTRY_WRITE_ENABLED = process.env.MANUAL_ENTRY_WRITE_ENABLED === "true";
+
+// Dark-by-default "Adopt" on the "Not managed by the system" list, paired with the BFF's
+// `positions.adopt.write-enabled`. Adopting places no order, but the owner it starts sells on its
+// expiry-day timers and on the author's sells, so it is armed on its own like the other writes. The
+// list itself renders regardless: an unmanaged lot is worth knowing about either way.
+const ADOPT_WRITE_ENABLED = process.env.ADOPT_WRITE_ENABLED === "true";
 
 // Inline server action: re-verifies the session, threads the verified operator email into the BFF
 // force-close call (X-Operator-Id → audit attribution), and revalidates /live so a placed/cleared
@@ -256,6 +265,24 @@ async function armAnchorsAction(
 // Deliberately NOT revalidating /live on submit: the entry takes up to the ~90s entry TTL to
 // resolve, and a revalidate would remount the panel and destroy the poll that is reporting the
 // outcome. The operator refreshes (or uses "New entry") once the terminal state is shown.
+// Inline server action for "Adopt": same session re-verification and operator attribution as
+// forceExitAction. No revalidatePath here — the dialog shows the outcome and refreshes /live itself
+// when it closes; revalidating now would drop the row and unmount the dialog mid-read.
+async function adoptAction(occ: string, strategyId: string): Promise<AdoptResult> {
+  "use server";
+  const s = await auth();
+  if (!s?.tenantId) {
+    return { outcome: "error" };
+  }
+  const operator = s.user?.email ?? s.user?.name ?? undefined;
+  try {
+    return await adoptPosition(occ, strategyId, operator);
+  } catch (err) {
+    console.error("adoptPosition failed", err);
+    return { outcome: "error" };
+  }
+}
+
 async function quoteAction(occ: string): Promise<QuoteActionResult> {
   "use server";
   const s = await auth();
@@ -411,10 +438,10 @@ export default async function LivePage() {
     return null;
   });
 
-  // Manual-entry panel inputs. Read ONLY when the flag is on — with it off /live issues exactly the
-  // same BFF calls it always has. Degrades to an empty list on failure, which renders no panel
-  // rather than a panel whose strategy picker cannot be satisfied.
-  const strategies = MANUAL_ENTRY_WRITE_ENABLED
+  // Manual-entry panel + Adopt inputs. Read ONLY when one of their flags is on — with both off /live
+  // issues exactly the same BFF calls it always has. Degrades to an empty list on failure, which
+  // renders no panel (and no Adopt button) rather than a strategy picker that cannot be satisfied.
+  const strategies = MANUAL_ENTRY_WRITE_ENABLED || ADOPT_WRITE_ENABLED
     ? await getStrategyConfig()
         .then((r) =>
           r.items.map((i) => ({
@@ -707,6 +734,14 @@ export default async function LivePage() {
           </>
           )}
         </section>
+
+        {!positionsDegraded && (portfolio.unmanaged_positions?.length ?? 0) > 0 && (
+          <UnmanagedPositions
+            positions={portfolio.unmanaged_positions ?? []}
+            strategyIds={strategies.map((st) => st.strategyId)}
+            adoptAction={ADOPT_WRITE_ENABLED && strategies.length > 0 ? adoptAction : null}
+          />
+        )}
 
         {MANUAL_ENTRY_WRITE_ENABLED && strategies.length > 0 && (
           <ManualEntryPanel

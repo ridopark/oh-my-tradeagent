@@ -12,7 +12,9 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -67,6 +69,37 @@ public class PortfolioService {
 
   private static final Logger log = LoggerFactory.getLogger(PortfolioService.class);
   private static final ZoneId MARKET_TZ = ZoneId.of("America/New_York");
+
+  /**
+   * Broker lots of this tenant's own account that no running PositionWorkflow manages — bought
+   * directly at the broker, typically — for the /live "Not managed" list and its Adopt button. A
+   * lot an owner partly covers is NOT listed (recon pages that shape separately); an empty or
+   * failed marks read lists nothing. Informational: the adoption workflow re-checks broker truth
+   * and every owner before acting.
+   */
+  static List<Map<String, Object>> unmanaged(
+      Map<String, BrokerPositionsClient.PositionMarks> marksByOcc, List<OpenPosition> managed) {
+    Set<String> owned = new HashSet<>();
+    for (OpenPosition p : managed) {
+      owned.add(BrokerPositionsClient.compactOcc(p.contractSymbol()));
+    }
+    List<Map<String, Object>> out = new ArrayList<>();
+    for (Map.Entry<String, BrokerPositionsClient.PositionMarks> e : marksByOcc.entrySet()) {
+      BrokerPositionsClient.PositionMarks m = e.getValue();
+      if (owned.contains(e.getKey()) || m.brokerQty() == null || m.brokerQty() <= 0) {
+        continue;
+      }
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("occ", e.getKey());
+      row.put("qty", m.brokerQty());
+      row.put("current_price", m.currentPrice());
+      row.put("unrealized_pl", m.unrealizedPl());
+      row.put("unrealized_intraday_pl", m.unrealizedIntradayPl());
+      out.add(row);
+    }
+    out.sort(Comparator.comparing(r -> (String) r.get("occ")));
+    return out;
+  }
 
   /** OCC root (1-6 alphanumeric) followed by the YYMMDD + right + strike block. */
   private static final Pattern OCC_ROOT = Pattern.compile("^([A-Z0-9]{1,6})\\d{6}[CP]\\d{8}$");
@@ -318,6 +351,9 @@ public class PortfolioService {
     // that knows this flag must render them as unknown, not as an empty book.
     body.put("open_positions_degraded", positionsDegraded);
     body.put("open_positions_count", positionItems.size());
+    // Null (unknown), never [], when the managed book is degraded: every broker lot would otherwise
+    // read as unmanaged and invite an Adopt against a position that already has an owner.
+    body.put("unmanaged_positions", positionsDegraded ? null : unmanaged(marksByOcc, positions));
     body.put("sum_open_notional", sumOpenNotional);
     body.put("sum_open_notional_basis", "cost_basis_at_entry"); // NOT live mark
     body.put("realized_pnl_today", realizedTodayDegraded ? null : realizedToday);

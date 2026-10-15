@@ -26,6 +26,10 @@
       "type": "string",
       "minLength": 1,
       "description": "Operator who triggered the adoption (from X-Operator-Id). Recorded in the PositionAdopted audit provenance."
+    },
+    "allow_unrecorded": {
+      "type": "boolean",
+      "description": "Operator-only (the /live Adopt button). When true and no journal row anchors the OCC (a lot bought outside the system, e.g. directly at the broker), adopt it anyway under a synthesized entry_signal_id ('adopt:<run id>') with qty and entry premium from broker truth, after refusing when any running PositionWorkflow already owns the OCC for this tenant or on this broker account. Absent/false keeps the original REFUSED_NO_ANCHOR behavior; recon auto-adoption never sets it."
     }
   }
 }
