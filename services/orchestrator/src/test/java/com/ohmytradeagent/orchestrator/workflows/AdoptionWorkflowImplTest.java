@@ -18,6 +18,7 @@ import com.ohmytradeagent.contract.ArmChandelierPayload;
 import com.ohmytradeagent.contract.ArmTrailRequest;
 import com.ohmytradeagent.contract.ArmTrailResult;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.BrokerOpenOrder;
 import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.ForceCloseRequest;
@@ -43,6 +44,7 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -472,6 +474,206 @@ class AdoptionWorkflowImplTest {
     verify(exec, never()).journalReconcileToFilled(anyString(), anyLong(), any(), any());
     verify(positionLookup, never())
         .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  // Unrecorded adoption refuses an expired contract against the real clock the test env runs on,
+  // so these tests use a far-future contract rather than OCC (already past).
+  private static final String LIVE_OCC = "UNH   301220C00400000";
+  private static final String LIVE_COMPACT = "UNH301220C00400000";
+
+  private AdoptionResult runAdoptUnrecorded(String occ) {
+    AdoptionWorkflowInput in = input(occ);
+    in.setAllowUnrecorded(true);
+    return newAdoptionStub().adopt(in);
+  }
+
+  private void stubUnrecordedLot(BigDecimal avgEntryPrice) {
+    BrokerPosition lot = brokerLot(10L, avgEntryPrice);
+    lot.setOptionSymbol(LIVE_COMPACT);
+    when(exec.brokerGetPositionByOcc(eq(TENANT), eq(STRATEGY), anyString())).thenReturn(lot);
+    when(exec.journalListFilledByOcc(eq(TENANT), eq(STRATEGY), anyString())).thenReturn(List.of());
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of());
+    when(positionLookup.isPositionWorkflowRunning(anyString())).thenReturn(false);
+  }
+
+  @Test
+  void unrecorded_operatorAdopt_startsOwnerFromBrokerTruth_withoutTouchingTheJournal() {
+    // A lot bought directly at the broker: no journal row. The operator's Adopt (allow_unrecorded)
+    // still takes ownership, keyed on the padded OCC and a synthesized signal id.
+    StrategyConfig cfg = config(Boolean.FALSE);
+    cfg.setBrokerAccountId("acct-1");
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(cfg);
+    stubUnrecordedLot(new BigDecimal("1.25"));
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ADOPTED);
+    assertThat(result.getEntrySignalId()).startsWith("adopt:");
+    String expectedWfId =
+        WorkflowIds.position(TENANT, STRATEGY, LIVE_OCC, result.getEntrySignalId());
+    assertThat(result.getWorkflowId()).isEqualTo(expectedWfId);
+    PositionWorkflowInput started = awaitEntry(STARTED, expectedWfId);
+    assertThat(started.getContractSymbol()).isEqualTo(LIVE_OCC);
+    assertThat(started.getQty()).isEqualTo(10L);
+    assertThat(started.getEntryPremium()).isEqualByComparingTo("1.25");
+    assertThat(started.getEodForceFlatten()).isEqualTo(Boolean.FALSE);
+    FillSignalPayload fill = awaitEntry(FILLS, expectedWfId);
+    assertThat(fill.getFilledQty()).isEqualTo(10L);
+    assertThat(fill.getBrokerOrderId()).isEqualTo(result.getEntrySignalId());
+    verify(positionLookup).hasRunningOwnerForOcc(TENANT, LIVE_OCC);
+    verify(positionLookup).hasRunningOwnerForOccOnAccount("acct-1", LIVE_OCC);
+    verify(exec, never()).journalReconcileToFilled(any(), anyLong(), any(), any());
+    verify(positionLookup).cachePositionMapping(TENANT, STRATEGY, LIVE_OCC, expectedWfId);
+
+    ArgumentCaptor<AuditEvent> auditCaptor = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(auditCaptor.capture());
+    Map<String, Object> adopted =
+        firstOfKind(auditCaptor.getAllValues(), "PositionAdopted").getSubject();
+    assertThat(adopted).containsEntry("unrecorded", true).containsEntry("broker_order_id", null);
+    Map<String, Object> entry = firstOfKind(auditCaptor.getAllValues(), "EntryFilled").getSubject();
+    assertThat(entry)
+        .containsEntry("option_symbol", LIVE_OCC)
+        .containsEntry("recovery", "adopted_unrecorded");
+    assertThat(((Number) entry.get("filled_qty")).longValue()).isEqualTo(10L);
+  }
+
+  @Test
+  void unrecorded_withoutTheOperatorFlag_isStillRefused() {
+    // Recon's auto-adoption never sets allow_unrecorded: an unrecorded lot only pages.
+    stubUnrecordedLot(new BigDecimal("1.25"));
+
+    AdoptionResult result = runAdopt(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_ownedByAnotherSignalForThisTenant_isAlreadyOwned() {
+    // A second Adopt press, or a copytrade owner under its own signal id: the fresh synthesized id
+    // can't collide with it, so only the by-OCC probe stops a second owner.
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    when(positionLookup.hasRunningOwnerForOcc(TENANT, LIVE_OCC)).thenReturn(true);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    assertThat(STARTED).isEmpty();
+    verify(positionLookup, never())
+        .cachePositionMapping(anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void unrecorded_secondPress_findsTheCachedOwner_evenWhenVisibilityMissesIt() {
+    // Visibility lags a just-started owner (#960) and reads false on an outage; the pos:* cache
+    // the first adoption wrote synchronously is what stops the second press.
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    String first = WorkflowIds.position(TENANT, STRATEGY, LIVE_OCC, "adopt:run-1");
+    when(positionLookup.findPositionWorkflowId(TENANT, STRATEGY, LIVE_OCC)).thenReturn(first);
+    when(positionLookup.isPositionWorkflowRunning(first)).thenReturn(true);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_ownedByASiblingTenantOnTheSameAccount_isAlreadyOwned() {
+    StrategyConfig cfg = config(Boolean.FALSE);
+    cfg.setBrokerAccountId(" acct-1 ");
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(cfg);
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    when(positionLookup.hasRunningOwnerForOccOnAccount("acct-1", LIVE_OCC)).thenReturn(true);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.ALREADY_OWNED);
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_condorLeg_isRefusedUnsafe() {
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    when(positionLookup.isCondorLegOcc(TENANT, LIVE_OCC)).thenReturn(true);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_UNSAFE);
+    assertThat(result.getReason()).isEqualTo("condor_leg");
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_runningCondorHold_isRefusedUnsafe() {
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    when(positionLookup.hasRunningCondorOwnerForOcc(TENANT, LIVE_OCC)).thenReturn(true);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getReason()).isEqualTo("condor_leg");
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_withASellAlreadyWorkingAtTheBroker_isRefusedUnsafe() {
+    // The tenant's own resting sell on Alpaca: an owner's exit would sell the lot twice.
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    BrokerOpenOrder buyElsewhere = new BrokerOpenOrder();
+    buyElsewhere.setOptionSymbol(LIVE_COMPACT);
+    buyElsewhere.setSide(BrokerOpenOrder.Side.BUY);
+    BrokerOpenOrder sell = new BrokerOpenOrder();
+    sell.setOptionSymbol(LIVE_COMPACT);
+    sell.setSide(BrokerOpenOrder.Side.SELL);
+    when(exec.brokerListOpenOrders(TENANT, STRATEGY)).thenReturn(List.of(buyElsewhere, sell));
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getReason()).isEqualTo("open_sell_order");
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_openBuyOnly_doesNotBlock() {
+    stubUnrecordedLot(new BigDecimal("1.25"));
+    BrokerOpenOrder buy = new BrokerOpenOrder();
+    buy.setOptionSymbol(LIVE_COMPACT);
+    buy.setSide(BrokerOpenOrder.Side.BUY);
+    when(exec.brokerListOpenOrders(TENANT, STRATEGY)).thenReturn(List.of(buy));
+
+    assertThat(runAdoptUnrecorded(LIVE_COMPACT).getOutcome())
+        .isEqualTo(AdoptionResult.Outcome.ADOPTED);
+  }
+
+  @Test
+  void unrecorded_pastItsExpiryClose_isRefusedUnsafe() {
+    // The test env clock starts at real now; an OCC that expired yesterday is past its close.
+    LocalDate yesterday = LocalDate.now(java.time.ZoneId.of("America/New_York")).minusDays(1);
+    String expired =
+        "UNH"
+            + yesterday.format(java.time.format.DateTimeFormatter.ofPattern("yyMMdd"))
+            + "C00400000";
+    BrokerPosition lot = brokerLot(10L, new BigDecimal("1.25"));
+    lot.setOptionSymbol(expired);
+    when(exec.brokerGetPositionByOcc(eq(TENANT), eq(STRATEGY), anyString())).thenReturn(lot);
+    when(exec.journalListFilledByOcc(eq(TENANT), eq(STRATEGY), anyString())).thenReturn(List.of());
+    when(exec.journalDumpOpen(TENANT, STRATEGY)).thenReturn(List.of());
+
+    AdoptionResult result = runAdoptUnrecorded(expired);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_UNSAFE);
+    assertThat(result.getReason()).isEqualTo("expired");
+    assertThat(STARTED).isEmpty();
+  }
+
+  @Test
+  void unrecorded_withoutABrokerCostBasis_isRefused() {
+    stubUnrecordedLot(null);
+
+    AdoptionResult result = runAdoptUnrecorded(LIVE_COMPACT);
+
+    assertThat(result.getOutcome()).isEqualTo(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
+    assertThat(STARTED).isEmpty();
   }
 
   @Test

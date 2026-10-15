@@ -3,6 +3,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 import com.ohmytradeagent.contract.AdoptionResult;
 import com.ohmytradeagent.contract.AdoptionWorkflowInput;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.contract.BrokerOpenOrder;
 import com.ohmytradeagent.contract.BrokerPosition;
 import com.ohmytradeagent.contract.FillSignalPayload;
 import com.ohmytradeagent.contract.JournalEntry;
@@ -22,8 +23,12 @@ import io.temporal.workflow.Workflow;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,6 +68,8 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
   static final String VERSION_ADOPTION = "adoption-v1";
 
   private static final String KIND_POSITION_ADOPTED = "PositionAdopted";
+
+  private static final LocalTime ET_CLOSE = LocalTime.of(16, 0);
 
   /**
    * EntryFilled cost-basis audit kind (registered in {@code AuditEventKinds.ENTRY_KINDS}/{@code
@@ -129,15 +136,72 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     // Without
     // an entry_signal_id we cannot build the canonical workflow id, so refuse.
     JournalEntry anchor = resolveAnchor(exec, tenantId, strategyId, occ, adoptionVersion >= 3);
-    if (anchor == null || anchor.getSignalId() == null || anchor.getSignalId().isBlank()) {
+    boolean anchored =
+        anchor != null && anchor.getSignalId() != null && !anchor.getSignalId().isBlank();
+    // An unrecorded lot (bought outside the system, e.g. directly at the broker) has no journal
+    // row at all. Only the operator's explicit Adopt reaches past the refusal; recon never sets
+    // allow_unrecorded, and an input recorded before the field existed reads it as null.
+    boolean unrecorded = !anchored && Boolean.TRUE.equals(in.getAllowUnrecorded());
+    if (!anchored && !unrecorded) {
       return refused(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
     }
-    String entrySignalId = anchor.getSignalId();
-    // Issue #246/#243: canonicalize the OCC to the journal anchor's option_symbol — the padded
-    // 21-char OccSymbol.of form the live owner was spawned + registered under. The operator may
-    // supply the broker/audit compact OCC, so every identity/discovery key must use this canonical
-    // form. Mirrors ReconciliationWorkflowImpl.
-    String canonicalOcc = anchor.getOptionSymbol();
+    BigDecimal entryPremium = brokerLot.getAvgEntryPrice();
+    if (unrecorded && (entryPremium == null || entryPremium.signum() <= 0)) {
+      // No journal and no broker cost basis: nothing to anchor the stops and P&L on.
+      return refused(AdoptionResult.Outcome.REFUSED_NO_ANCHOR);
+    }
+    String entrySignalId;
+    String canonicalOcc;
+    String intentKey;
+    String brokerOrderId;
+    OffsetDateTime filledAt;
+    if (anchored) {
+      entrySignalId = anchor.getSignalId();
+      // Issue #246/#243: canonicalize the OCC to the journal anchor's option_symbol — the padded
+      // 21-char OccSymbol.of form the live owner was spawned + registered under. The operator may
+      // supply the broker/audit compact OCC, so every identity/discovery key must use this
+      // canonical form. Mirrors ReconciliationWorkflowImpl.
+      canonicalOcc = anchor.getOptionSymbol();
+      intentKey = anchor.getIntentKey();
+      brokerOrderId = anchor.getBrokerOrderId();
+      // Prefer the anchor's submitted_at as the fill timestamp; fall back to the adoption instant
+      // (the adoption time, NOT the true entry time) when the journal carries no submitted_at.
+      filledAt = anchor.getSubmittedAt() != null ? anchor.getSubmittedAt() : workflowNow();
+    } else {
+      canonicalOcc = OccSymbol.padded(occ);
+      String unsafe = unrecordedRefusal(exec, tenantId, strategyId, canonicalOcc);
+      if (unsafe != null) {
+        AdoptionResult r = refused(AdoptionResult.Outcome.REFUSED_UNSAFE);
+        r.setReason(unsafe);
+        return r;
+      }
+      // The anchor-matched owner check below cannot see an owner started under some OTHER signal
+      // id, and this branch mints a fresh one. Ask by OCC instead — this tenant's strategies, then
+      // anyone on the same broker account (a sibling tenant's lot must never get a second owner).
+      // The cached owner goes first: adoption writes it synchronously and the running check is a
+      // describe, so a second Adopt press finds the first owner even while Visibility lags (#960)
+      // or is down (the Visibility probes below return false on an outage).
+      String cachedOwner =
+          positionLookup.findPositionWorkflowId(tenantId, strategyId, canonicalOcc);
+      if (cachedOwner != null && positionLookup.isPositionWorkflowRunning(cachedOwner)) {
+        return refused(AdoptionResult.Outcome.ALREADY_OWNED);
+      }
+      if (positionLookup.hasRunningOwnerForOcc(tenantId, canonicalOcc)) {
+        return refused(AdoptionResult.Outcome.ALREADY_OWNED);
+      }
+      String accountId = config == null ? null : config.getBrokerAccountId();
+      if (accountId != null
+          && !accountId.isBlank()
+          && positionLookup.hasRunningOwnerForOccOnAccount(accountId.trim(), canonicalOcc)) {
+        return refused(AdoptionResult.Outcome.ALREADY_OWNED);
+      }
+      // Deterministic on replay (the run id is recorded); unique per Adopt press. No broker order
+      // exists, so the fill carries the same synthetic id — it can never match a real broker fill.
+      entrySignalId = "adopt:" + Workflow.getInfo().getRunId();
+      intentKey = null;
+      brokerOrderId = entrySignalId;
+      filledAt = workflowNow();
+    }
     String posWfId = WorkflowIds.position(tenantId, strategyId, canonicalOcc, entrySignalId);
 
     // Idempotency guard: never double-own. If a live PositionWorkflow already owns the OCC, no-op.
@@ -147,11 +211,6 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
 
     // 3. Reconstruct PositionWorkflowInput from broker truth + journal + config.
     long qty = brokerLot.getQty();
-    BigDecimal entryPremium = brokerLot.getAvgEntryPrice();
-    // Prefer the anchor's submitted_at as the fill timestamp; fall back to the adoption instant
-    // (the adoption time, NOT the true entry time) when the journal carries no submitted_at.
-    OffsetDateTime filledAt =
-        anchor.getSubmittedAt() != null ? anchor.getSubmittedAt() : workflowNow();
 
     PositionWorkflowInput posInput =
         buildInput(tenantId, strategyId, canonicalOcc, entrySignalId, qty, entryPremium, config);
@@ -176,21 +235,24 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     // 5. Forward onFill within the TTL so the first-fill gate wakes and PositionEntered fires with
     // the real qty (instead of PositionNeverFilled).
     FillSignalPayload fill = new FillSignalPayload();
-    fill.setBrokerOrderId(anchor.getBrokerOrderId());
+    fill.setBrokerOrderId(brokerOrderId);
     fill.setFilledQty(qty);
     fill.setAvgFillPrice(entryPremium);
     fill.setFilledAt(filledAt);
     child.onFill(fill);
 
     // 6. Terminalize the journal row, seed discovery, emit PositionAdopted provenance.
-    exec.journalReconcileToFilled(anchor.getIntentKey(), qty, entryPremium, filledAt);
+    if (anchored) {
+      // An unrecorded lot has no journal row to terminalize.
+      exec.journalReconcileToFilled(intentKey, qty, entryPremium, filledAt);
+    }
     positionLookup.cachePositionMapping(tenantId, strategyId, canonicalOcc, posWfId);
 
     Map<String, Object> subject = new LinkedHashMap<>();
     subject.put("option_symbol", canonicalOcc);
     subject.put("entry_signal_id", entrySignalId);
-    subject.put("intent_key", anchor.getIntentKey());
-    subject.put("broker_order_id", anchor.getBrokerOrderId());
+    subject.put("intent_key", intentKey);
+    subject.put("broker_order_id", anchored ? brokerOrderId : null);
     subject.put("qty", qty);
     subject.put("entry_premium", entryPremium);
     subject.put("workflow_id", posWfId);
@@ -200,6 +262,9 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
         "evidence",
         "operator-triggered adoption -> broker truth confirms lot held -> reconstructed"
             + " PositionWorkflowInput started + onFill forwarded");
+    if (unrecorded) {
+      subject.put("unrecorded", true);
+    }
     audit.log(auditEvent(tenantId, strategyId, entrySignalId, posWfId, operatorId, subject));
 
     // Emit an EntryFilled cost-basis row so the dashboard RealizedPnlCalculator can offset the
@@ -210,8 +275,8 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
       entrySubject.put("option_symbol", canonicalOcc);
       entrySubject.put("filled_qty", qty);
       entrySubject.put("avg_fill_price", entryPremium);
-      entrySubject.put("broker_order_id", anchor.getBrokerOrderId());
-      entrySubject.put("recovery", "adopted");
+      entrySubject.put("broker_order_id", anchored ? brokerOrderId : null);
+      entrySubject.put("recovery", unrecorded ? "adopted_unrecorded" : "adopted");
       audit.log(
           entryFilledEvent(tenantId, strategyId, entrySignalId, posWfId, operatorId, entrySubject));
     }
@@ -223,6 +288,44 @@ public class AdoptionWorkflowImpl implements AdoptionWorkflow {
     result.setEntrySignalId(entrySignalId);
     result.setQty(qty);
     return result;
+  }
+
+  /**
+   * Why taking ownership of an UNRECORDED lot could misfire, or null. Recon's auto-adopt applies
+   * the same three refusals before it adopts a journaled lot; an unrecorded one reaches here only
+   * by an operator's Adopt, so they are re-checked rather than assumed.
+   *
+   * <ul>
+   *   <li>{@code condor_leg} — one wing of a defined-risk combo: an owner that sells it leaves the
+   *       paired short naked (#901).
+   *   <li>{@code open_sell_order} — a SELL for this OCC is already working at the broker (the
+   *       operator's own, typically): the owner's exit would sell the lot a second time.
+   *   <li>{@code expired} — past the contract's last trading moment: there is nothing to sell and
+   *       the owner would linger open (#434).
+   * </ul>
+   */
+  private String unrecordedRefusal(
+      ReconciliationExecActivity exec, String tenantId, String strategyId, String paddedOcc) {
+    if (positionLookup.isCondorLegOcc(tenantId, paddedOcc)
+        || positionLookup.hasRunningCondorOwnerForOcc(tenantId, paddedOcc)) {
+      return "condor_leg";
+    }
+    String compactOcc = OccSymbol.compact(paddedOcc);
+    for (BrokerOpenOrder o : exec.brokerListOpenOrders(tenantId, strategyId)) {
+      if (o.getSide() == BrokerOpenOrder.Side.SELL
+          && compactOcc.equals(OccSymbol.compact(o.getOptionSymbol()))) {
+        return "open_sell_order";
+      }
+    }
+    LocalDate expiry = OccSymbol.expiryOf(paddedOcc);
+    ZonedDateTime etNow =
+        Instant.ofEpochMilli(Workflow.currentTimeMillis()).atZone(ZoneId.of("America/New_York"));
+    if (expiry != null
+        && (expiry.isBefore(etNow.toLocalDate())
+            || (expiry.isEqual(etNow.toLocalDate()) && !etNow.toLocalTime().isBefore(ET_CLOSE)))) {
+      return "expired";
+    }
+    return null;
   }
 
   private static AdoptionResult refused(AdoptionResult.Outcome outcome) {

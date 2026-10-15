@@ -319,6 +319,81 @@ class PortfolioServiceTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  void brokerLotsNoWorkflowManages_areListedUnmanaged() {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme"))
+        .thenReturn(
+            List.of(
+                new OpenPosition(
+                    "wf1",
+                    "s1",
+                    "AMZN  261012C00265000",
+                    1,
+                    new BigDecimal("2.00"),
+                    new BigDecimal("200.00"))));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+    when(accountEquity.snapshotFor("acme", "alpaca-live"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-live", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                "AMZN261012C00265000",
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("2.10"), new BigDecimal("10"), new BigDecimal("5"), 1L),
+                "NVDA261016C00225000",
+                new BrokerPositionsClient.PositionMarks(
+                    new BigDecimal("1.40"), new BigDecimal("-250"), new BigDecimal("-90"), 10L)));
+
+    List<Map<String, Object>> unmanaged =
+        (List<Map<String, Object>>) service.portfolio("acme").get("unmanaged_positions");
+
+    assertThat(unmanaged).hasSize(1);
+    assertThat(unmanaged.get(0))
+        .containsEntry("occ", "NVDA261016C00225000")
+        .containsEntry("qty", 10L)
+        .containsEntry("current_price", new BigDecimal("1.40"))
+        .containsEntry("unrealized_pl", new BigDecimal("-250"));
+  }
+
+  @Test
+  void unmanagedIsUnknown_notEveryLot_whenTheManagedBookIsDegraded() {
+    // A failed positions read would otherwise show every broker lot as unmanaged — an invitation
+    // to Adopt positions that already have owners.
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
+    when(positionsReader.openPositions("acme")).thenThrow(new IllegalStateException("down"));
+    when(realizedPnl.computeRealized(eq("acme"), any(), any(LocalDate.class)))
+        .thenReturn(rp("0", "0"));
+    when(strategyRegistry.brokerTarget("acme", "s1")).thenReturn("alpaca-live");
+    when(accountEquity.snapshotFor("acme", "alpaca-live"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(new BigDecimal("10000"), null));
+    when(brokerPositions.marksFor("alpaca-live", "acme", "s1"))
+        .thenReturn(
+            Map.of(
+                "NVDA261016C00225000",
+                new BrokerPositionsClient.PositionMarks(null, null, null, 10L)));
+
+    Map<String, Object> body = service.portfolio("acme");
+
+    assertThat(body).containsEntry("unmanaged_positions", null);
+  }
+
+  @Test
+  void unmanaged_skipsLotsWithoutAPositiveQty() {
+    assertThat(
+            PortfolioService.unmanaged(
+                Map.of(
+                    "A261016C00001000",
+                    new BrokerPositionsClient.PositionMarks(null, null, null, null),
+                    "B261016C00001000",
+                    new BrokerPositionsClient.PositionMarks(null, null, null, 0L)),
+                List.of()))
+        .isEmpty();
+  }
+
+  @Test
   void aGenuinelyEmptyBookIsNotFlaggedDegraded() {
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("s1"));
     when(positionsReader.openPositions("acme")).thenReturn(List.of());

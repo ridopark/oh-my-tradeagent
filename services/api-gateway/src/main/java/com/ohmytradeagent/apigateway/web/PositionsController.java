@@ -254,7 +254,7 @@ public class PositionsController {
     HttpStatus status =
         switch (result.getOutcome()) {
           case ADOPTED, ALREADY_OWNED -> HttpStatus.OK;
-          case REFUSED_NOT_HELD, REFUSED_NO_ANCHOR -> HttpStatus.CONFLICT;
+          case REFUSED_NOT_HELD, REFUSED_NO_ANCHOR, REFUSED_UNSAFE -> HttpStatus.CONFLICT;
         };
     return ResponseEntity.status(status).body(result);
   }
