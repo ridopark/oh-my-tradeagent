@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { ideaLabel, type WatchlistIdea } from "@/lib/watchlist";
 import { IdeaStatusPill } from "./OptionChain";
+import { fmtCurrency } from "./Pnl";
 import type { RecentContract } from "./ManualEntryPanel";
 
 // The manual-entry contract box: free typing exactly as before (a full OCC, or a ticker to browse),
@@ -138,7 +139,16 @@ export function ContractSearch({
                   active === i ? "bg-slate-800" : "hover:bg-slate-800/60"
                 }`}
               >
-                <span className="font-semibold text-slate-100">{idea.ticker}</span>
+                <span className="flex flex-col leading-tight">
+                  <span className="font-semibold text-slate-100">{idea.ticker}</span>
+                  {/* The stock's last 1-minute close, the price the status pill measures from. */}
+                  <span
+                    className="text-[10px] tabular-nums text-slate-400"
+                    title={`${idea.ticker} last 1-minute close`}
+                  >
+                    {fmtCurrency(idea.last)}
+                  </span>
+                </span>
                 <span className="tabular-nums text-slate-400">{ideaLabel(idea)}</span>
                 <IdeaStatusPill idea={idea} />
               </button>
