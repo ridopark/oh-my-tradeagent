@@ -257,16 +257,19 @@ export function ManualEntryPanel({
     };
   }, []);
 
+  /** The modal's chain (a watchlist Buy) ends with the modal; it must not reappear inline. */
+  const endModalChain = () => {
+    if (!chainInModal) return;
+    setChainInModal(false);
+    setChainUnderlying(null);
+    setChainFocus(null);
+  };
+
   const reset = () => {
     clearTimers();
     setStep({ kind: "idle" });
     setModalOpen(false);
-    if (chainInModal) {
-      // The chain belonged to the modal; do not leave it open inline once the modal is gone.
-      setChainInModal(false);
-      setChainUnderlying(null);
-      setChainFocus(null);
-    }
+    endModalChain();
   };
 
   /**
@@ -278,6 +281,7 @@ export function ManualEntryPanel({
     if (step.kind === "submitting") return;
     if (step.kind === "tracking") {
       setModalOpen(false);
+      endModalChain();
       return;
     }
     reset();
@@ -472,9 +476,16 @@ export function ManualEntryPanel({
     setStep(chainInModal ? { kind: "chain" } : { kind: "detail" });
   };
 
+  // An entry whose outcome is not known yet. Replacing the step now would stop its outcome poll, so
+  // a watchlist Buy waits; once the outcome is final, Buy may replace it.
+  const entryInFlight =
+    step.kind === "submitting" ||
+    (step.kind === "tracking" &&
+      (step.status === null || step.status.state === "PENDING" || step.status.state === "SUBMITTED"));
+
   /** A watchlist row's Buy: open the chain in the modal, landed on the idea's contract. */
   const buyFromWatchlist = (idea: WatchlistIdea) => {
-    if (stepRef.current.kind === "submitting") return;
+    if (entryInFlight) return;
     clearTimers();
     setOcc(idea.ticker);
     setChainUnderlying(idea.ticker);
@@ -484,7 +495,7 @@ export function ManualEntryPanel({
     setModalOpen(true);
     loadWatchlist();
   };
-  useRegisterBuyIdea(buyFromWatchlist);
+  useRegisterBuyIdea(buyFromWatchlist, entryInFlight);
 
   const alreadyHeld =
     step.kind === "confirm" && heldOccs.includes(step.quote.occ.replace(/\s+/g, ""));

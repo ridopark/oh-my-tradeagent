@@ -83,9 +83,15 @@ export function WatchlistBoard({
                 {buyIdea && (
                   <button
                     type="button"
-                    onClick={() => buyIdea(idea)}
+                    disabled={buyIdea.busy}
+                    onClick={() => buyIdea.buy(idea)}
                     aria-label={`Buy ${idea.ticker} ${idea.strike}${idea.right}`}
-                    className="rounded border border-emerald-500/50 bg-emerald-600/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20"
+                    title={
+                      buyIdea.busy
+                        ? "Your last entry is still in flight; see Manual entry for its outcome."
+                        : undefined
+                    }
+                    className="rounded border border-emerald-500/50 bg-emerald-600/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-transparent disabled:text-slate-600"
                   >
                     Buy
                   </button>
