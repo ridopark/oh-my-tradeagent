@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   Line,
   LineChart,
@@ -95,10 +95,17 @@ function ChartTooltip({
 
 export function AccountValueChart({
   onData,
+  toolbarEnd,
+  replacement,
 }: {
   // Lift the fetched history to the parent so the header's +$X (Y%) reads the SAME profit_loss /
   // base_value the chart drew — one fetch, one baseline.
   onData?: (h: PortfolioHistory) => void;
+  // Rendered at the right end of the range-tab row (the Chart | Watchlist toggle).
+  toolbarEnd?: ReactNode;
+  // When set, shown in place of the range tabs and the chart. This component stays mounted, so
+  // history keeps polling and onData keeps the header's figures current.
+  replacement?: ReactNode;
 }) {
   const [range, setRange] = useState<Range>("1D");
   const [data, setData] = useState<PortfolioHistory | null>(null);
@@ -155,84 +162,95 @@ export function AccountValueChart({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-1">
-        {RANGES.map((r) => (
-          <button
-            key={r}
-            type="button"
-            onClick={() => setRange(r)}
-            className={`rounded px-3 py-1 text-sm ${
-              r === range
-                ? "bg-slate-700 font-semibold text-slate-100"
-                : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-            }`}
-          >
-            {r}
-          </button>
-        ))}
-      </div>
-
-      {stale && (
-        <div className="rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-300">
-          Reconnecting - showing the last received data.
-        </div>
-      )}
-
-      <div className="h-64 w-full rounded border border-slate-800 bg-slate-900 p-2">
-        {!hasData ? (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500">
-            {data ? "Account history unavailable." : "Loading account history..."}
-          </div>
+      <div className="flex items-start justify-between gap-2">
+        {replacement ? (
+          <span />
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart
-              data={points}
-              margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
-            >
-              <XAxis
-                dataKey="t"
-                tickFormatter={xTickFor(range)}
-                tick={{ fill: "#64748b", fontSize: 11 }}
-                tickLine={false}
-                axisLine={{ stroke: "#334155" }}
-                minTickGap={40}
-              />
-              <YAxis
-                domain={["auto", "auto"]}
-                tickFormatter={usdTick}
-                tick={{ fill: "#64748b", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-                width={72}
-              />
-              <Tooltip
-                content={(props) => <ChartTooltip {...props} range={range} />}
-                cursor={{ stroke: "#64748b", strokeDasharray: "3 3" }}
-                isAnimationActive={false}
-              />
-              <ReferenceLine
-                y={data?.base_value}
-                stroke="#64748b"
-                strokeDasharray="4 4"
-              />
-              <Line
-                type="monotone"
-                dataKey="equity"
-                stroke={lineColor}
-                strokeWidth={2}
-                dot={false}
-                activeDot={{
-                  r: 4,
-                  fill: lineColor,
-                  stroke: "#0f172a",
-                  strokeWidth: 2,
-                }}
-                isAnimationActive={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
+          <div className="flex flex-wrap gap-1">
+            {RANGES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => setRange(r)}
+                className={`rounded px-3 py-1 text-sm ${
+                  r === range
+                    ? "bg-slate-700 font-semibold text-slate-100"
+                    : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                }`}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
         )}
+        {toolbarEnd}
       </div>
+
+      {replacement ?? (
+        <>
+          {stale && (
+            <div className="rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-300">
+              Reconnecting - showing the last received data.
+            </div>
+          )}
+
+          <div className="h-64 w-full rounded border border-slate-800 bg-slate-900 p-2">
+            {!hasData ? (
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                {data ? "Account history unavailable." : "Loading account history..."}
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart
+                  data={points}
+                  margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+                >
+                  <XAxis
+                    dataKey="t"
+                    tickFormatter={xTickFor(range)}
+                    tick={{ fill: "#64748b", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={{ stroke: "#334155" }}
+                    minTickGap={40}
+                  />
+                  <YAxis
+                    domain={["auto", "auto"]}
+                    tickFormatter={usdTick}
+                    tick={{ fill: "#64748b", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={72}
+                  />
+                  <Tooltip
+                    content={(props) => <ChartTooltip {...props} range={range} />}
+                    cursor={{ stroke: "#64748b", strokeDasharray: "3 3" }}
+                    isAnimationActive={false}
+                  />
+                  <ReferenceLine
+                    y={data?.base_value}
+                    stroke="#64748b"
+                    strokeDasharray="4 4"
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="equity"
+                    stroke={lineColor}
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{
+                      r: 4,
+                      fill: lineColor,
+                      stroke: "#0f172a",
+                      strokeWidth: 2,
+                    }}
+                    isAnimationActive={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

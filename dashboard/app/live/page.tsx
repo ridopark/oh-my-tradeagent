@@ -669,6 +669,8 @@ export default async function LivePage() {
           accountScope={portfolio.account_equity_scope}
           todayPl={todayPl}
           todayPlPct={todayPlPct}
+          // The BFF serves the watchlist behind the manual-entry flag, so the toggle follows it.
+          watchlistAction={MANUAL_ENTRY_WRITE_ENABLED ? watchlistTodayAction : null}
         />
 
         <section>
