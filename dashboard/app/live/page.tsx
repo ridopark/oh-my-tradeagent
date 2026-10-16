@@ -7,6 +7,7 @@ import { etDateOf, latestFundsRejection } from "@/lib/funding";
 import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { DataTable, type Column } from "@/components/DataTable";
 import { LiveAccount } from "@/components/LiveAccount";
+import { WatchlistBuyBridge } from "@/components/WatchlistBuyBridge";
 import { AccountGuardBanner } from "@/components/AccountGuardBanner";
 import { LiveActivationBanner } from "@/components/LiveActivationBanner";
 import { LocalTime } from "@/components/LocalTime";
@@ -648,6 +649,7 @@ export default async function LivePage() {
       {/* Also full-bleed and OUTSIDE <main>, for the same reason as the guard bar above: a tenant
           that cannot place orders at all should not be told so in an inset card. */}
       <LiveActivationBanner promotion={livePromotion} />
+      <WatchlistBuyBridge>
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-6">
         <div>
           <div className="mb-1 flex flex-wrap items-center justify-between gap-x-6 gap-y-1">
@@ -787,6 +789,7 @@ export default async function LivePage() {
           />
         </section>
       </main>
+      </WatchlistBuyBridge>
       </FloorBreachProvider>
     </TrailLivenessProvider>
     </LiveMarksProvider>

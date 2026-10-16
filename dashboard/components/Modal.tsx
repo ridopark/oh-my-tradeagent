@@ -11,19 +11,22 @@ export function Modal({
   onClose,
   title,
   subtitle,
+  wide = false,
   children,
 }: {
   open: boolean;
   onClose: () => void;
   title: ReactNode;
   subtitle?: ReactNode;
+  // Room for a table such as the option chain.
+  wide?: boolean;
   children: ReactNode;
 }) {
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-slate-950/75" />
       <div className="fixed inset-0 flex items-end justify-center sm:items-center sm:p-4">
-        <DialogPanel className="max-h-[90vh] w-full overflow-y-auto rounded-t-xl border border-slate-700 bg-slate-900 pb-[env(safe-area-inset-bottom)] shadow-2xl sm:max-w-lg sm:rounded-lg">
+        <DialogPanel className={`max-h-[90vh] w-full overflow-y-auto rounded-t-xl border border-slate-700 bg-slate-900 pb-[env(safe-area-inset-bottom)] shadow-2xl sm:rounded-lg ${wide ? "sm:max-w-3xl" : "sm:max-w-lg"}`}>
           <div className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-3">
             <div className="min-w-0">
               <DialogTitle className="text-sm font-semibold text-slate-100">{title}</DialogTitle>

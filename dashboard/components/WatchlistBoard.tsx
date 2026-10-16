@@ -6,6 +6,7 @@ import type { WatchlistTodayResult } from "@/lib/bff";
 import { ideaLabel } from "@/lib/watchlist";
 import { IdeaStatusPill } from "./OptionChain";
 import { fmtCurrency } from "./Pnl";
+import { useBuyIdea } from "./WatchlistBuyBridge";
 
 // The BFF caches bars 30s, so a faster poll would only re-read the same answer.
 const POLL_MS = 60_000;
@@ -21,6 +22,8 @@ export function WatchlistBoard({
   action: () => Promise<WatchlistTodayResult>;
 }) {
   const [result, setResult] = useState<WatchlistTodayResult | null>(null);
+  // Null when /live has no manual-entry panel to buy through: then rows have no Buy button.
+  const buyIdea = useBuyIdea();
   // /live's 15s refresh can hand a new action reference each time; read the latest through a ref so
   // a refresh does not restart the poll.
   const actionRef = useRef(action);
@@ -64,7 +67,7 @@ export function WatchlistBoard({
             {result.ideas.map((idea) => (
               <li
                 key={`${idea.ticker}${idea.right}${idea.strike}`}
-                className="grid grid-cols-[4.5rem_1fr_auto] items-center gap-2 border-t border-slate-800 px-1 py-1.5 text-sm"
+                className={`grid ${buyIdea ? "grid-cols-[4.5rem_1fr_auto]" : "grid-cols-[4.5rem_1fr]"} items-center gap-2 border-t border-slate-800 px-1 py-1.5 text-sm`}
               >
                 <span className="flex flex-col leading-tight">
                   <span className="font-semibold text-slate-100">{idea.ticker}</span>
@@ -72,8 +75,27 @@ export function WatchlistBoard({
                     {fmtCurrency(idea.last)}
                   </span>
                 </span>
-                <span className="tabular-nums text-slate-300">{ideaLabel(idea)}</span>
-                <IdeaStatusPill idea={idea} />
+                {/* Label and pill share a cell so the pill drops under the label on a phone. */}
+                <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="tabular-nums text-slate-300">{ideaLabel(idea)}</span>
+                  <IdeaStatusPill idea={idea} />
+                </span>
+                {buyIdea && (
+                  <button
+                    type="button"
+                    disabled={buyIdea.busy}
+                    onClick={() => buyIdea.buy(idea)}
+                    aria-label={`Buy ${idea.ticker} ${idea.strike}${idea.right}`}
+                    title={
+                      buyIdea.busy
+                        ? "Your last entry is still in flight; see Manual entry for its outcome."
+                        : undefined
+                    }
+                    className="rounded border border-emerald-500/50 bg-emerald-600/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-transparent disabled:text-slate-600"
+                  >
+                    Buy
+                  </button>
+                )}
               </li>
             ))}
           </ul>

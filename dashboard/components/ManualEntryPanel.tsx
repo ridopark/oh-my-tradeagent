@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { usePanelOpen } from "./LiveRefresh";
 import { Modal } from "./Modal";
+import { useRegisterBuyIdea } from "./WatchlistBuyBridge";
 import { decideQuoteRefresh } from "@/lib/quoteRefresh";
 import { ContractSearch, type Suggestion } from "./ContractSearch";
 import { etClock, type WatchlistIdea } from "@/lib/watchlist";
@@ -107,6 +108,8 @@ const POLL_CEILING_MS = 120_000;
 
 type Step =
   | { kind: "idle" }
+  // The chain inside the modal, opened by a watchlist row's Buy (WatchlistBuyBridge).
+  | { kind: "chain" }
   | { kind: "detail" }
   | { kind: "quoting" }
   | { kind: "confirm"; quote: QuoteView; idempotencyKey: string }
@@ -232,6 +235,8 @@ export function ManualEntryPanel({
   // object per pick, so picking another idea on the same underlying re-lands.
   const [chainFocus, setChainFocus] = useState<ChainFocus | null>(null);
   const [watchlist, setWatchlist] = useState<WatchlistState>({ state: "idle" });
+  // True while the chain is shown in the modal (a watchlist Buy) rather than inline in the panel.
+  const [chainInModal, setChainInModal] = useState(false);
   usePanelOpen(step.kind !== "idle" || chainUnderlying !== null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   // clearTimers() alone does NOT stop the loops: if the component unmounts while a poll tick or a
@@ -252,10 +257,19 @@ export function ManualEntryPanel({
     };
   }, []);
 
+  /** The modal's chain (a watchlist Buy) ends with the modal; it must not reappear inline. */
+  const endModalChain = () => {
+    if (!chainInModal) return;
+    setChainInModal(false);
+    setChainUnderlying(null);
+    setChainFocus(null);
+  };
+
   const reset = () => {
     clearTimers();
     setStep({ kind: "idle" });
     setModalOpen(false);
+    endModalChain();
   };
 
   /**
@@ -267,6 +281,7 @@ export function ManualEntryPanel({
     if (step.kind === "submitting") return;
     if (step.kind === "tracking") {
       setModalOpen(false);
+      endModalChain();
       return;
     }
     reset();
@@ -445,15 +460,42 @@ export function ManualEntryPanel({
     clearTimers();
     setPicked(p);
     setOcc(p.row.occ);
+    if (chainInModal) {
+      // From a watchlist Buy: the chain row already showed bid/ask, so go straight to the fresh
+      // quote, qty and Confirm. "Back" returns to the chain.
+      void requestQuote(p.row.occ, true);
+      return;
+    }
     setStep({ kind: "detail" });
     setModalOpen(true);
   };
 
-  /** Back from the confirm step (or a refusal) to the picked contract's details. */
+  /** Back from the confirm step (or a refusal) to the picked contract's details, or the chain. */
   const backToDetail = () => {
     clearTimers();
-    setStep({ kind: "detail" });
+    setStep(chainInModal ? { kind: "chain" } : { kind: "detail" });
   };
+
+  // An entry whose outcome is not known yet. Replacing the step now would stop its outcome poll, so
+  // a watchlist Buy waits; once the outcome is final, Buy may replace it.
+  const entryInFlight =
+    step.kind === "submitting" ||
+    (step.kind === "tracking" &&
+      (step.status === null || step.status.state === "PENDING" || step.status.state === "SUBMITTED"));
+
+  /** A watchlist row's Buy: open the chain in the modal, landed on the idea's contract. */
+  const buyFromWatchlist = (idea: WatchlistIdea) => {
+    if (entryInFlight) return;
+    clearTimers();
+    setOcc(idea.ticker);
+    setChainUnderlying(idea.ticker);
+    setChainFocus({ right: idea.right, strike: idea.strike });
+    setChainInModal(true);
+    setStep({ kind: "chain" });
+    setModalOpen(true);
+    loadWatchlist();
+  };
+  useRegisterBuyIdea(buyFromWatchlist, entryInFlight);
 
   const alreadyHeld =
     step.kind === "confirm" && heldOccs.includes(step.quote.occ.replace(/\s+/g, ""));
@@ -567,7 +609,7 @@ export function ManualEntryPanel({
 
         {/* Hidden while an entry's outcome is shown in the panel: picking a new contract would
             replace the step and drop the outcome's poll. "New entry" brings it back. */}
-        {chainUnderlying !== null && !trackingInPanel && (
+        {chainUnderlying !== null && !trackingInPanel && !chainInModal && (
           <OptionChain
             underlying={chainUnderlying}
             heldOccs={heldOccs.map(compactOcc)}
@@ -588,9 +630,34 @@ export function ManualEntryPanel({
       <Modal
         open={modalOpen}
         onClose={closeModal}
-        title={modalTitle(step, picked)}
-        subtitle={modalSubtitle(step, picked)}
+        title={
+          step.kind === "chain" ? `Buy ${chainUnderlying} · option chain` : modalTitle(step, picked)
+        }
+        subtitle={
+          step.kind === "chain"
+            ? "Pick a contract — the watchlist one is highlighted"
+            : modalSubtitle(step, picked)
+        }
+        wide={step.kind === "chain"}
       >
+        {step.kind === "chain" && chainUnderlying !== null && (
+          <div className="px-4 pb-4">
+            <OptionChain
+              underlying={chainUnderlying}
+              heldOccs={heldOccs.map(compactOcc)}
+              signalledOccs={recentContracts.map((c) => compactOcc(c.occ))}
+              selectedOcc={null}
+              ideas={watchlistIdeas.filter((i) => i.ticker === chainUnderlying)}
+              watchlistDate={
+                watchlist.state === "ok" && watchlist.posted ? watchlist.etDate : null
+              }
+              focus={chainFocus}
+              expirationsAction={chainExpirationsAction}
+              chainAction={optionChainAction}
+              onPick={pickFromChain}
+            />
+          </div>
+        )}
         {step.kind === "detail" && picked && (
           <ContractDetail
             picked={picked}
