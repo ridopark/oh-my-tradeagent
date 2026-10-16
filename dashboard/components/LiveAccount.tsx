@@ -1,10 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AccountValueChart } from "@/components/AccountValueChart";
 import { fmtCurrency } from "@/components/Pnl";
+import { WatchlistBoard } from "@/components/WatchlistBoard";
 // Type-only import (erased at compile): lib/bff is server-only, only its shape crosses here.
-import type { PortfolioHistory } from "@/lib/bff";
+import type { PortfolioHistory, WatchlistTodayResult } from "@/lib/bff";
+
+type View = "chart" | "watchlist";
+// Per-browser memory of the operator's last view, so a morning spent on the watchlist survives a
+// reload. Storage can be unavailable (private window, blocked site data): then it is just "chart".
+const VIEW_KEY = "live.accountView";
 
 // Structure (a): the chart owns the history fetch and lifts each frame up via onData. The "today"
 // line prefers the live intraday figure (todayPl = equity - last_equity, from the same live account
@@ -18,6 +24,7 @@ export function LiveAccount({
   accountScope,
   todayPl,
   todayPlPct,
+  watchlistAction,
 }: {
   accountValue: number | null;
   accountScope: string;
@@ -25,8 +32,28 @@ export function LiveAccount({
   // (then the "today" line falls back to the chart's last completed daily bar).
   todayPl?: number | null;
   todayPlPct?: number | null;
+  // Today's watchlist read. Null where the watchlist is not available (the manual-entry flag is
+  // off): then there is no toggle and the chart shows alone.
+  watchlistAction?: (() => Promise<WatchlistTodayResult>) | null;
 }) {
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
+  const [view, setView] = useState<View>("chart");
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(VIEW_KEY) === "watchlist") setView("watchlist");
+    } catch {
+      // storage unavailable: stay on the chart
+    }
+  }, []);
+  const choose = (v: View) => {
+    setView(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // storage unavailable: the choice lasts until reload
+    }
+  };
+  const showWatchlist = view === "watchlist";
 
   return (
     <section className="flex flex-col gap-4">
@@ -37,8 +64,40 @@ export function LiveAccount({
         todayPl={todayPl ?? null}
         todayPlPct={todayPlPct ?? null}
       />
-      <AccountValueChart onData={setHistory} />
+      <AccountValueChart
+        onData={setHistory}
+        toolbarEnd={watchlistAction ? <ViewToggle view={view} onChange={choose} /> : null}
+        replacement={
+          showWatchlist && watchlistAction ? <WatchlistBoard action={watchlistAction} /> : null
+        }
+      />
     </section>
+  );
+}
+
+function ViewToggle({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+  const views: [View, string][] = [
+    ["chart", "Chart"],
+    ["watchlist", "Watchlist"],
+  ];
+  return (
+    <div className="flex shrink-0 rounded border border-slate-700 p-0.5">
+      {views.map(([v, label]) => (
+        <button
+          key={v}
+          type="button"
+          aria-pressed={view === v}
+          onClick={() => onChange(v)}
+          className={`rounded px-2.5 py-0.5 text-sm ${
+            view === v
+              ? "bg-slate-700 font-semibold text-slate-100"
+              : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }
 
