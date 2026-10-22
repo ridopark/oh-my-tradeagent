@@ -16,6 +16,7 @@ export function ActivateButton({
   action,
   intent,
   writeEnabled,
+  renew = false,
 }: {
   tenantId: string;
   strategyId: string;
@@ -23,16 +24,20 @@ export function ActivateButton({
   // "activate" arms live trading; "deactivate" revokes it. Drives label + color only.
   intent: "activate" | "deactivate";
   writeEnabled: boolean;
+  // An "activate" on a still-VALID approval: same call (it writes a fresh 30-day approval), but
+  // labelled "Renew" so it doesn't read as if the strategy were not live.
+  renew?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const disabled = !writeEnabled || pending;
   const activate = intent === "activate";
+  const verb = activate ? (renew ? "Renew" : "Activate") : "Deactivate";
 
   return (
     <button
       type="button"
       disabled={disabled}
-      aria-label={`${activate ? "Activate" : "Deactivate"} live for ${tenantId}/${strategyId}`}
+      aria-label={`${verb} live for ${tenantId}/${strategyId}`}
       onClick={() => {
         if (disabled) return;
         const formData = new FormData();
@@ -49,7 +54,7 @@ export function ActivateButton({
           : "border-amber-500/60 bg-amber-600/20 text-amber-300 hover:bg-amber-600/30"
       }`}
     >
-      {pending ? "…" : activate ? "Activate live" : "Deactivate"}
+      {pending ? "…" : activate ? `${verb} live` : verb}
     </button>
   );
 }
