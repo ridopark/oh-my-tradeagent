@@ -9,11 +9,15 @@ Read-only REST on the DATA key (opra feed; entitlement verified 2026-10-04). ~3 
 
 Usage: option_quote_collector.py --out /data/option-quotes [--underlyings SPY,QQQ,XSP]
        [--interval 60] [--once]
+       option_quote_collector.py --out /data/option-quotes-watchlist --watchlist
+       --watchlist: instead of 0DTE chains, poll today's watchlist tickers (audit TriggerArmed,
+       refreshed every 10 min) — every expiry within 10 calendar days (0-8 DTE, incl. next Friday's
+       weekly; the author's median is ~8 DTE), strikes within +-5% of spot (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
 Deploy (operator): homelab crontab @reboot or k8s Deployment; session crons die with the session
 (see reference_prod_real_monitoring). Files: <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz
 """
-import argparse, gzip, json, os, sys, time, urllib.request, urllib.parse
-from datetime import datetime, date
+import argparse, gzip, json, os, shlex, subprocess, sys, time, urllib.request, urllib.parse
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
@@ -37,11 +41,27 @@ def get(url, headers, tries=5):
                 raise
             time.sleep(2 ** i)
 
-def snapshot_rows(u, headers, now_iso):
+DEFAULT_PSQL = "kubectl exec -i -n copytrade postgres-0 -- psql -U temporal -d orchestrator -tA"
+
+def snapshot_params(today, spot=None, expiry_days=10, band=0.05):
+    """0DTE chain by default; with a spot, the watchlist window (expiry range + strike band)."""
+    if spot is None:
+        return {"feed": "opra", "limit": 1000, "expiration_date": today.isoformat()}
+    return {"feed": "opra", "limit": 1000, "expiration_date_gte": today.isoformat(),
+            "expiration_date_lte": (today + timedelta(days=expiry_days)).isoformat(),
+            "strike_price_gte": round(spot * (1 - band), 2), "strike_price_lte": round(spot * (1 + band), 2)}
+
+def watchlist_tickers(psql_cmd, today):
+    q = ("SELECT DISTINCT subject->>'ticker' FROM audit_log WHERE kind='TriggerArmed' AND "
+         f"(occurred_at AT TIME ZONE 'America/New_York')::date = '{today.isoformat()}';")
+    r = subprocess.run(shlex.split(psql_cmd), input=q, capture_output=True, text=True, check=True)
+    return sorted(t.strip() for t in r.stdout.splitlines() if t.strip())
+
+def snapshot_rows(u, headers, now_iso, params=None):
     rows, token = [], None
-    exp = datetime.now(ET).strftime("%Y-%m-%d")
+    base = params or snapshot_params(datetime.now(ET).date())
     while True:
-        q = {"feed": "opra", "limit": 1000, "expiration_date": exp}
+        q = dict(base)
         if token:
             q["page_token"] = token
         d = get(f"https://data.alpaca.markets/v1beta1/options/snapshots/{u}?"
@@ -73,16 +93,29 @@ def main():
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--env", default=os.path.join(os.path.dirname(__file__), "../../.env"))
+    ap.add_argument("--watchlist", action="store_true")
+    ap.add_argument("--psql", default=DEFAULT_PSQL)
     a = ap.parse_args()
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+    tickers, refreshed = [], 0.0
     while True:
         now = datetime.now(ET)
         if a.once or in_session(now):
             now_iso = now.isoformat(timespec="seconds")
-            for u in a.underlyings.split(","):
+            if a.watchlist and time.time() - refreshed > 600:
                 try:
-                    rows = snapshot_rows(u, headers, now_iso) + [underlying_row(u, headers, now_iso)]
+                    tickers, refreshed = watchlist_tickers(a.psql, now.date()), time.time()
+                except Exception as e:
+                    print(f"{now_iso} watchlist lookup ERROR {e}", file=sys.stderr, flush=True)
+            for u in (tickers if a.watchlist else a.underlyings.split(",")):
+                try:
+                    if a.watchlist:
+                        und = underlying_row(u, headers, now_iso)
+                        spot = und["lp"] or und["ap"]
+                        rows = snapshot_rows(u, headers, now_iso, snapshot_params(now.date(), spot)) + [und]
+                    else:
+                        rows = snapshot_rows(u, headers, now_iso) + [underlying_row(u, headers, now_iso)]
                     day_dir = os.path.join(a.out, u)
                     os.makedirs(day_dir, exist_ok=True)
                     with gzip.open(os.path.join(day_dir, f"{now.date()}.ndjson.gz"), "at") as f:
