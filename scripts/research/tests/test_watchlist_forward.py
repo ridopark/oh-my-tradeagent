@@ -19,6 +19,11 @@ wf = importlib.util.module_from_spec(_spec)
 sys.modules["watchlist_forward"] = wf
 _spec.loader.exec_module(wf)  # type: ignore[union-attr]
 
+_aspec = importlib.util.spec_from_file_location("watchlist_forward_analysis", SCRIPT_PATH.parent / "watchlist_forward_analysis.py")
+wfa = importlib.util.module_from_spec(_aspec)
+sys.modules["watchlist_forward_analysis"] = wfa
+_aspec.loader.exec_module(wfa)  # type: ignore[union-attr]
+
 
 def bars(closes, start_m=0, opens=None, highs=None, lows=None):
     out = []
@@ -93,7 +98,127 @@ class FlowTest(unittest.TestCase):
         self.assertIsNone(wf.tag(None))
 
 
+def write_day(out, day, legs, stock, files=("legs.json", "stock_1m.ndjson.gz")):
+    folder = pathlib.Path(out, "raw", day)
+    folder.mkdir(parents=True, exist_ok=True)
+    if "legs.json" in files:
+        (folder / "legs.json").write_text(wf.json.dumps({"legs": legs, "watchlist_daily": None}))
+    if "stock_1m.ndjson.gz" in files:
+        wf.write_gz(str(folder / "stock_1m.ndjson.gz"), stock)
+    wf.manifest(str(folder))
+
+
+class CheckTest(unittest.TestCase):
+    def test_flow_only_day_is_not_captured(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = pathlib.Path(d, "raw", "2026-10-23"); folder.mkdir(parents=True)
+            wf.write_gz(str(folder / "flow.ndjson.gz"), [])
+            wf.manifest(str(folder))
+            self.assertEqual(wfa.missing_days(d, ["2026-10-23"]), ["2026-10-23"])
+            write_day(d, "2026-10-23", [], [])
+            self.assertEqual(wfa.missing_days(d, ["2026-10-23"]), [])
+
+    def test_explained_gaps_need_a_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d, "explained_gaps.json")
+            p.write_text('{"2026-10-26": "homelab power outage"}')
+            self.assertEqual(wfa.missing_days(d, ["2026-10-26", "2026-10-27"]), ["2026-10-27"])
+            p.write_text('["2026-10-26"]')
+            with self.assertRaises(SystemExit):
+                wfa.missing_days(d, ["2026-10-26"])
+            p.write_text('{"2026-10-26": ""}')
+            with self.assertRaises(SystemExit):
+                wfa.missing_days(d, ["2026-10-26"])
+
+
+def day_bars(sym, day, closes, opens=None):
+    return [dict(b, s=sym, d=day, v=1) for b in bars(closes, opens=opens)]
+
+
+class ScoreDayTest(unittest.TestCase):
+    def test_armed_after_open_excluded_and_four_placebos(self):
+        with tempfile.TemporaryDirectory() as d:
+            legs = [{"s": "SPY", "dir": "ABOVE", "lvl": 100.0, "armed_at": "2026-10-23T13:20:00+00:00"},
+                    {"s": "QQQ", "dir": "ABOVE", "lvl": 100.0, "armed_at": "2026-10-23T13:31:00+00:00"}]
+            stock = day_bars("SPY", "2026-10-23", [99] * 10 + [100.5] * 380) + day_bars("QQQ", "2026-10-23", [99] * 390)
+            write_day(d, "2026-10-23", legs, stock)
+            rows = wf.score_day(dt.date(2026, 10, 23), d)
+            spy = [r for r in rows if r["s"] == "SPY"]
+            qqq = [r for r in rows if r["s"] == "QQQ"]
+            self.assertEqual([r["status"] for r in qqq], ["armed_after_open"])   # 09:31 ET: excluded, no placebos
+            self.assertEqual(sum(r["arm"] == "real" for r in spy), 1)
+            self.assertEqual(sum(r["arm"].startswith("placebo") for r in spy), 4)
+
+    def test_append_scores_idempotent(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows = [{"d": "2026-10-23", "s": "SPY", "dir": "ABOVE", "lvl": 100.0, "arm": "real", "status": "fired", "r60": 0.01}]
+            wf.append_scores(d, dt.date(2026, 10, 23), rows)
+            first = pathlib.Path(d, "scores.csv").read_text()
+            wf.append_scores(d, dt.date(2026, 10, 23), rows)
+            self.assertEqual(pathlib.Path(d, "scores.csv").read_text(), first)
+
+
+def scores_csv(path, rows):
+    import csv
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=wf.COLS)
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in wf.COLS})
+
+
+def synthetic(days, real_r60, plac_r60, f2=None, tags=None):
+    """One real + one placebo fired leg per day, with fixed outcomes (+ small day noise)."""
+    rows = []
+    for i in range(days):
+        d = f"2026-{11 + i // 28:02d}-{1 + i % 28:02d}"
+        noise, pnoise = ((i * 37) % 11 - 5) * 1e-4, ((i * 53) % 13 - 6) * 1e-4
+        tg = tags[i % len(tags)] if tags else ""
+        r = real_r60[tg] if isinstance(real_r60, dict) else real_r60
+        rows.append({"d": d, "s": "SPY", "dir": "ABOVE", "lvl": 100, "arm": "real", "status": "fired", "trig_m": 30,
+                     "r60": r + noise, "f2_net": "" if f2 is None else f2 + noise, "f3_tag": tg})
+        rows.append({"d": d, "s": "SPY", "dir": "ABOVE", "lvl": 101, "arm": "placebo+0.010", "status": "fired",
+                     "trig_m": 40, "r60": plac_r60 + pnoise})
+    return rows
+
+
+class AnalyzeDecisionTest(unittest.TestCase):
+    ON = dt.date(2027, 4, 23)
+
+    def run_analyze(self, rows):
+        with tempfile.TemporaryDirectory() as d:
+            scores_csv(pathlib.Path(d, "scores.csv"), rows)
+            return wfa.analyze(d, self.ON, reps=2000)
+
+    def test_holm_step_down(self):
+        self.assertEqual(wfa.holm({"F1": 0.01, "F2": 0.04, "F3": 0.03}), {"F1": 0.03, "F2": 0.06, "F3": 0.06})
+        self.assertEqual(wfa.holm({"F1": 0.5, "F2": None}), {"F1": 0.5, "F2": None})
+
+    def test_strong_effects_pass_and_null_is_not_shown(self):
+        res = self.run_analyze(synthetic(60, 0.0060, 0.0, f2=0.0040))
+        self.assertEqual(res["F1"]["decision"], "PASS")
+        self.assertEqual(res["F2"]["decision"], "PASS")
+        res = self.run_analyze(synthetic(60, 0.00002, 0.0, f2=0.00002))
+        self.assertEqual(res["F1"]["decision"], "NOT_SHOWN")
+
+    def test_negative_metric_is_kill(self):
+        res = self.run_analyze(synthetic(60, -0.0030, 0.0, f2=-0.0010))
+        self.assertEqual((res["F1"]["decision"], res["F2"]["decision"]), ("KILL", "KILL"))
+
+    def test_f3_difference_and_disagree_gate(self):
+        tags = ["AGREE", "SILENT", "SILENT", "DISAGREE"]
+        res = self.run_analyze(synthetic(80, {"AGREE": 0.0080, "SILENT": 0.0, "DISAGREE": 0.0010}, 0.0, tags=tags))
+        self.assertAlmostEqual(res["F3"]["metric"], 0.0080, places=3)
+        self.assertEqual(res["F3"]["decision"], "PASS")
+        res = self.run_analyze(synthetic(80, {"AGREE": 0.0080, "SILENT": 0.0, "DISAGREE": 0.0090}, 0.0, tags=tags))
+        self.assertNotEqual(res["F3"]["decision"], "PASS")                  # AGREE - DISAGREE <= 0 blocks a PASS
+
+
 class AnalysisGuardTest(unittest.TestCase):
+    def test_amended_analyze_refuses_before_analysis_date(self):
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(SystemExit):
+            wfa.analyze(d, dt.date(2027, 4, 22))
+
     def test_refuses_before_analysis_date(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(SystemExit):
             wf.analyze(d, dt.date(2027, 4, 22))
