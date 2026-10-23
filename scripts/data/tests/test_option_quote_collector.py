@@ -31,6 +31,16 @@ class SnapshotParamsTest(unittest.TestCase):
         self.assertNotIn("expiration_date", p)
 
 
+class WatchlistSpotTest(unittest.TestCase):
+    def test_last_trade_then_ask(self):
+        self.assertEqual(oqc.watchlist_spot({"lp": 200.5, "ap": 201.0}), 200.5)
+        self.assertEqual(oqc.watchlist_spot({"lp": None, "ap": 201.0}), 201.0)
+
+    def test_no_usable_spot_is_none_never_the_0dte_default(self):
+        for und in ({"lp": None, "ap": None}, {"lp": 0, "ap": 0}, {"lp": None, "ap": 0.0}, {}):
+            self.assertIsNone(oqc.watchlist_spot(und))
+
+
 class WatchlistTickersTest(unittest.TestCase):
     def test_parses_psql_output(self):
         cmd = f'{sys.executable} -c "import sys; sys.stdin.read(); print(\'SPY\'); print(\'\'); print(\'AMD\')"'

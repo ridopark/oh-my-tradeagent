@@ -11,8 +11,9 @@ Usage: option_quote_collector.py --out /data/option-quotes [--underlyings SPY,QQ
        [--interval 60] [--once]
        option_quote_collector.py --out /data/option-quotes-watchlist --watchlist
        --watchlist: instead of 0DTE chains, poll today's watchlist tickers (audit TriggerArmed,
-       refreshed every 10 min) — every expiry within 10 calendar days (0-8 DTE, incl. next Friday's
-       weekly; the author's median is ~8 DTE), strikes within +-5% of spot (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
+       refreshed every 10 min and on a new ET date) — every expiry within 10 calendar days (0-10 DTE:
+       covers next Friday's weekly and the author's ~8-DTE median), strikes within +-5% of spot.
+       A ticker with no usable spot (no last trade and no ask) is skipped for that cycle (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
 Deploy (operator): homelab crontab @reboot or k8s Deployment; session crons die with the session
 (see reference_prod_real_monitoring). Files: <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz
 """
@@ -51,6 +52,12 @@ def snapshot_params(today, spot=None, expiry_days=10, band=0.05):
             "expiration_date_lte": (today + timedelta(days=expiry_days)).isoformat(),
             "strike_price_gte": round(spot * (1 - band), 2), "strike_price_lte": round(spot * (1 + band), 2)}
 
+def watchlist_spot(und):
+    """Spot for the strike band, or None when the snapshot has neither a last trade nor an ask —
+    the caller must then SKIP the ticker (snapshot_params(today, None) is the 0DTE default query)."""
+    spot = und.get("lp") or und.get("ap")
+    return spot if spot and spot > 0 else None
+
 def watchlist_tickers(psql_cmd, today):
     q = ("SELECT DISTINCT subject->>'ticker' FROM audit_log WHERE kind='TriggerArmed' AND "
          f"(occurred_at AT TIME ZONE 'America/New_York')::date = '{today.isoformat()}';")
@@ -64,7 +71,7 @@ def snapshot_rows(u, headers, now_iso, params=None):
         q = dict(base)
         if token:
             q["page_token"] = token
-        d = get(f"https://data.alpaca.markets/v1beta1/options/snapshots/{u}?"
+        d = get(f"https://data.alpaca.markets/v1beta1/options/snapshots/{urllib.parse.quote(u)}?"
                 + urllib.parse.urlencode(q), headers)
         for sym, s in (d.get("snapshots") or {}).items():
             qt, tr = s.get("latestQuote") or {}, s.get("latestTrade") or {}
@@ -98,21 +105,26 @@ def main():
     a = ap.parse_args()
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
-    tickers, refreshed = [], 0.0
+    tickers, refreshed, refreshed_day = [], 0.0, None
     while True:
         now = datetime.now(ET)
         if a.once or in_session(now):
             now_iso = now.isoformat(timespec="seconds")
-            if a.watchlist and time.time() - refreshed > 600:
+            # refresh every 10 min, on a new ET date, and every cycle while the list is still empty
+            if a.watchlist and (not tickers or refreshed_day != now.date() or time.time() - refreshed > 600):
                 try:
-                    tickers, refreshed = watchlist_tickers(a.psql, now.date()), time.time()
+                    tickers, refreshed, refreshed_day = watchlist_tickers(a.psql, now.date()), time.time(), now.date()
                 except Exception as e:
                     print(f"{now_iso} watchlist lookup ERROR {e}", file=sys.stderr, flush=True)
             for u in (tickers if a.watchlist else a.underlyings.split(",")):
                 try:
                     if a.watchlist:
                         und = underlying_row(u, headers, now_iso)
-                        spot = und["lp"] or und["ap"]
+                        spot = watchlist_spot(und)
+                        if spot is None:
+                            print(f"{now_iso} {u}: WARN no spot (no last trade/ask) — skipped this cycle",
+                                  file=sys.stderr, flush=True)
+                            continue
                         rows = snapshot_rows(u, headers, now_iso, snapshot_params(now.date(), spot)) + [und]
                     else:
                         rows = snapshot_rows(u, headers, now_iso) + [underlying_row(u, headers, now_iso)]

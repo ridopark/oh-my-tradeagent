@@ -39,9 +39,14 @@ if [ "$dow" -le 5 ]; then
   eod_ok "$OUT/raw/$today" || problems+=("today's end-of-day capture is missing ($today)")
   [ -f "$OUT/raw/$today/flow.ndjson.gz" ] || problems+=("today's 10:35 ET option-flow capture is missing ($today)")
 fi
+# Days explained in explained_gaps.json (a list of dates or a {date: reason} map) are not re-alerted.
+explained=$(python3 -c 'import json,sys
+try: print(" ".join(json.load(open(sys.argv[1]))))
+except FileNotFoundError: pass' "$OUT/explained_gaps.json" 2>/dev/null)
 for d in "$OUT"/raw/*/; do
   day=$(basename "$d")
   [ "$day" = "$today" ] && continue
+  case " $explained " in *" $day "*) continue ;; esac
   [ -f "$d/manifest.json" ] && ! eod_ok "$d" && problems+=("end-of-day files missing for $day (flow-only folder)")
 done
 
@@ -77,7 +82,8 @@ payload=$(python3 -c 'import json,sys;print(json.dumps({"embeds":[{"title":"🟡
 code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Content-Type: application/json" -d "$payload" "$wh")
 if [ "$code" = "204" ]; then
   log "posted alert to staging_paper Discord (HTTP 204)"
-  echo "$sig" > "$STATE_DIR/last_sig"
+  # a TEST post must not dedupe away a real alert with the same problem set later that day
+  [ -n "${TEST:-}" ] || echo "$sig" > "$STATE_DIR/last_sig"
 else
   log "WARN: Discord post returned HTTP $code — alert may not have delivered"
 fi
