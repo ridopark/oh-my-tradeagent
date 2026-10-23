@@ -32,10 +32,18 @@ log "check: $(printf '%s' "$check_out" | tail -1)"
 if [ "$rc" -ne 0 ]; then
   problems+=("completeness check failed: $(printf '%s' "$check_out" | tail -1)")
 fi
+# capture-flow ALSO writes manifest.json, so a manifest alone does not prove the end-of-day capture
+# ran (the frozen `check` counts a day by its manifest). Require the EOD files themselves.
+eod_ok() { [ -f "$1/legs.json" ] && [ -f "$1/stock_1m.ndjson.gz" ]; }
 if [ "$dow" -le 5 ]; then
-  [ -f "$OUT/raw/$today/manifest.json" ] || problems+=("today's end-of-day capture is missing ($today)")
+  eod_ok "$OUT/raw/$today" || problems+=("today's end-of-day capture is missing ($today)")
   [ -f "$OUT/raw/$today/flow.ndjson.gz" ] || problems+=("today's 10:35 ET option-flow capture is missing ($today)")
 fi
+for d in "$OUT"/raw/*/; do
+  day=$(basename "$d")
+  [ "$day" = "$today" ] && continue
+  [ -f "$d/manifest.json" ] && ! eod_ok "$d" && problems+=("end-of-day files missing for $day (flow-only folder)")
+done
 
 if [ "${#problems[@]}" -eq 0 ]; then
   log "OK"
