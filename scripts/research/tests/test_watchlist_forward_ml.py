@@ -29,7 +29,7 @@ class FeatureTest(unittest.TestCase):
     def test_features_are_pre_trigger_and_prior_day_spy(self):
         S = sess([100] * 20 + [101] * 370); S["PMH"], S["PML"] = 100.5, 99.0
         prev = sess([98, 99, 100, 101, 100] * 78); prevs = [prev] * 5
-        f = ml.features(S, prevs, sess([500] * 390), [490, 495, 500], 100.4, 1, 20, dt.date(2026, 10, 27), 0.0)
+        f = ml.features(S, prevs, sess([500] * 390), [490, 495, 500], 100.4, 1, 20, dt.date(2026, 10, 26), 0.0)   # 2026-10-26 is a Monday
         self.assertAlmostEqual(f["spy_prev"], 500 / 495 - 1)            # prior session's SPY return, never the same day's
         self.assertAlmostEqual(f["mom5"], 101 / 100 - 1); self.assertEqual(f["dow"], 0.0); self.assertEqual(f["round"], 0.0)
         self.assertAlmostEqual(f["dist_PMH"], (100.4 / 100.5 - 1) * 1e4)
