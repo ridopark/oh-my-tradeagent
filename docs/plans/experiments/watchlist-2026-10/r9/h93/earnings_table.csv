@@ -1,0 +1,83 @@
+s,nasdaq_date,nasdaq_time,fq,news_ts,news_headline,timing_source,news_vs_nasdaq,timing,effective_session
+ORCL,2026-06-10,time-not-supplied,May/2026,2026-06-10 16:05,"Oracle Q4 Adj. EPS $2.11 Beats $1.96 Estimate, Sales $19.184B Beat $19.095B Estimate",alpaca_news(benzinga),same_day,after_close,2026-06-11
+ADBE,2026-06-11,time-not-supplied,May/2026,2026-06-11 16:05,"Adobe Q2 Adj. EPS $5.96 Beats $5.82 Estimate, Sales $6.618B Beat $6.456B Estimate",alpaca_news(benzinga),same_day,after_close,2026-06-12
+MU,2026-06-24,time-not-supplied,May/2026,2026-06-24 16:02,"Micron Technology Q3 Adj. EPS $25.11 Beats $20.63 Estimate, Sales $41.456B Beat $35.590B Estimate",alpaca_news(benzinga),same_day,after_close,2026-06-25
+TSM,2026-07-16,time-not-supplied,Jun/2026,2026-07-16 01:32,"Taiwan Semiconductor Q2 EPS $4.31 Beats $3.77 Estimate, Sales $40.200B Beat $39.760B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-16
+UNH,2026-07-16,time-not-supplied,Jun/2026,2026-07-16 05:55,"UnitedHealth Group Q2 Adj. EPS $6.38 Beats $4.86 Estimate, Sales $112.032B Beat $110.825B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-16
+NOC,2026-07-21,time-not-supplied,Jun/2026,2026-07-21 06:50,"Northrop Grumman Q2 Adj. EPS $6.77 Misses $6.82 Estimate, Sales $10.876B Beat $10.803B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-21
+GOOGL,2026-07-22,time-not-supplied,Jun/2026,2026-07-22 16:04,"Alphabet Q2 EPS $9.11 Beats $2.87 Estimate, Sales $119.796B Beat $116.639B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-23
+TSLA,2026-07-22,time-not-supplied,Jun/2026,2026-07-22 16:07,"Tesla Q2 Adj. EPS $0.33 Misses $0.50 Estimate, Sales $28.236B Beat $25.706B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-23
+IBM,2026-07-22,time-not-supplied,Jun/2026,2026-07-22 16:09,"IBM Q2 Adj. EPS $2.93 Beats $2.86 Estimate, Sales $17.162B Beat $16.860B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-23
+NOW,2026-07-22,time-not-supplied,Jun/2026,2026-07-22 16:10,"ServiceNow Q2 Adj. EPS $0.90 Beats $0.85 Estimate, Sales $3.987B Beat $3.928B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-23
+INTC,2026-07-23,time-not-supplied,Jun/2026,2026-07-23 16:01,"Intel Q2 Adj. EPS $0.42 Beats $0.21 Estimate, Sales $16.128B Beat $14.417B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-24
+STX,2026-07-28,time-not-supplied,Jun/2026,2026-07-28 16:09,"Seagate Tech Hldgs Q4 Adj. EPS $5.71 Beats $5.09 Estimate, Sales $3.629B Beat $3.485B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-29
+MSFT,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:06,"Microsoft Q4 Adj. EPS $4.74 Beats $4.24 Estimate, Sales $90.007B Beat $87.621B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-30
+META,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:02,Meta Platforms Sees Q3 Sales $61.000B-$64.000B vs $62.680B Est,alpaca_news(benzinga),same_day,after_close,2026-07-30
+SKHY,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 08:12,"SK Hynix Preliminary Q2 Revenue ₩79.3 Trillion Up From ₩22.2 Trillion, Up ~257% YoY; Operating Profit Up 557%",alpaca_news(benzinga),same_day,pre_open,2026-07-29
+LRCX,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:07,"Lam Research Q4 Adj. EPS $1.82 Beats $1.68 Estimate, Sales $6.722B Beat $6.665B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-30
+ARM,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:09,ARM Holdings Sees Q2 Adj EPS $0.43-$0.51 vs $0.43 Est; Sees Sales $880.000M-$1.880B vs $1.339B Est,alpaca_news(benzinga),same_day,after_close,2026-07-30
+QCOM,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:00,"Qualcomm Q3 Adj. EPS $2.21 Misses $2.23 Estimate, Sales $9.947B Beat $9.668B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-30
+HOOD,2026-07-29,time-not-supplied,Jun/2026,2026-07-29 16:06,"Robinhood Markets Q2 EPS $0.62 Beats $0.42 Estimate, Sales $1.308B Beat $1.281B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-30
+AAPL,2026-07-30,time-not-supplied,Jun/2026,2026-07-30 16:30,"Apple Q3 EPS $2.02 Beats $1.89 Estimate, Sales $109.417B Beat $108.651B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-31
+AMZN,2026-07-30,time-not-supplied,Jun/2026,2026-07-30 16:02,"Amazon.com Q2 EPS $5.75 Beats $1.82 Estimate, Sales $200.606B Beat $196.460B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-31
+MA,2026-07-30,time-not-supplied,Jun/2026,2026-07-30 08:06,"Mastercard Q2 Adj. EPS $5.04 Beats $4.77 Estimate, Sales $9.277B Beat $9.068B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-30
+COIN,2026-07-30,time-not-supplied,Jun/2026,2026-07-30 16:09,"Coinbase Glb Q2 Adj. EPS $(0.40) Misses $(0.11) Estimate, Sales $1.220B Miss $1.316B Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-31
+RDDT,2026-07-30,time-not-supplied,Jun/2026,2026-07-30 16:09,"Reddit Q2 EPS $1.25 Beats $0.95 Estimate, Sales $804.905M Beat $730.255M Estimate",alpaca_news(benzinga),same_day,after_close,2026-07-31
+CVX,2026-07-31,time-not-supplied,Jun/2026,2026-07-31 06:15,"Chevron Q2 Adj. EPS $6.06 Beats $5.56 Estimate, Sales $70.055B Beat $61.970B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-31
+MRNA,2026-07-31,time-not-supplied,Jun/2026,2026-07-31 07:00,"Moderna Q2 EPS $(1.97) Beats $(2.10) Estimate, Sales $145.000M Beat $102.998M Estimate",alpaca_news(benzinga),same_day,pre_open,2026-07-31
+PLTR,2026-08-03,time-not-supplied,Jun/2026,2026-08-03 16:05,Palantir Technologies Sees Q3 Sales $2.160B-$2.164B vs $1.997B Est,alpaca_news(benzinga),same_day,after_close,2026-08-04
+ON,2026-08-03,time-not-supplied,Jun/2026,2026-08-03 16:05,"ON Semiconductor Q2 Adj. EPS $0.74 Beats $0.71 Estimate, Sales $1.603B Beat $1.588B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-04
+SPCX,2026-08-04,time-not-supplied,Jun/2026,2026-08-04 16:03,"SpaceX Q2 EPS $(0.09) Beats $(0.24) Estimate, Sales $7.814B Beat $6.934B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-05
+AMD,2026-08-04,time-not-supplied,Jun/2026,2026-08-04 16:15,"Advanced Micro Devices Q2 Adj. EPS $1.66 Beats $1.61 Estimate, Sales $11.536B Beat $11.284B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-05
+CAT,2026-08-04,time-not-supplied,Jun/2026,2026-08-04 06:33,"Caterpillar Q2 Adj. EPS $8.17 Beats $5.71 Estimate, Sales $20.500B Beat $18.358B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-08-04
+MCD,2026-08-04,time-not-supplied,Jun/2026,2026-08-04 07:01,"McDonald's Q2 Adj. EPS $3.38 Beats $3.32 Estimate, Sales $7.099B Miss $7.128B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-08-04
+SPOT,2026-08-04,time-not-supplied,Jun/2026,2026-08-04 06:03,"Spotify Technology Q2 EPS $3.03 Misses $3.29 Estimate, Sales $5.554B Miss $5.600B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-08-04
+SNDK,2026-08-05,time-not-supplied,Jun/2026,2026-08-05 16:11,"SanDisk Q4 Adj. EPS $39.25 Beats $34.45 Estimate, Sales $8.965B Beat $8.394B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-06
+WDC,2026-08-05,time-not-supplied,Jun/2026,2026-08-05 16:03,"Western Digital Q4 Adj. EPS $3.56 Beats $3.29 Estimate, Sales $3.747B Beat $3.692B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-06
+NET,2026-08-06,time-not-supplied,Jun/2026,2026-08-06 16:47,Cloudflare Sees Q3 Adj EPS $0.34 vs $0.32 Est; Sees Sales $736.000M-$737.000M vs $722.047M Est,alpaca_news(benzinga),same_day,after_close,2026-08-07
+TWLO,2026-08-06,time-not-supplied,Jun/2026,2026-08-06 16:10,"Twilio Q2 Adj. EPS $1.47 Beats $1.32 Estimate, Sales $1.499B Beat $1.429B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-07
+AAOI,2026-08-06,time-not-supplied,Jun/2026,2026-08-06 16:11,"Applied Optoelectronics Q2 Adj. EPS $(0.28) Misses $0.01 Estimate, Sales $191.922M Beat $190.478M Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-07
+RKLB,2026-08-10,time-not-supplied,Jun/2026,2026-08-10 16:06,"Rocket Lab USA Q2 EPS $(0.08) Misses $(0.07) Estimate, Sales $234.066M Beat $231.346M Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-11
+RIOT,2026-08-10,time-not-supplied,Jun/2026,2026-08-10 16:09,Riot Platforms Q2 Sales $174.200M Beat $152.064M Estimate,alpaca_news(benzinga),same_day,after_close,2026-08-11
+CRWV,2026-08-11,time-not-supplied,Jun/2026,2026-08-11 16:13,"CoreWeave Q2 Adj. EPS $(1.03) Beats $(1.22) Estimate, Sales $2.575B Beat $2.560B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-12
+SMCI,2026-08-11,time-not-supplied,Jun/2026,2026-08-11 16:05,"Super Micro Computer Q4 Adj. EPS $1.70 Beats $0.62 Estimate, Sales $11.120B Miss $12.332B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-12
+NBIS,2026-08-12,time-not-supplied,Jun/2026,2026-08-12 07:43,"Nebius Group N.V. - Class A Ordinary Shares Q2 Adj. EPS $(0.68) Misses $(0.62) Estimate, Sales $582.300M Beat $572.747M Estimate",alpaca_news(benzinga),same_day,pre_open,2026-08-12
+TGT,2026-08-19,time-not-supplied,Jul/2026,2026-08-19 06:31,"Target Q2 Adj. EPS $4.11 Beats $2.33 Estimate, Sales $26.539B Beat $26.141B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-08-19
+NVDA,2026-08-26,time-not-supplied,Jul/2026,2026-08-26 16:21,"NVIDIA Q2 Adj. EPS $2.22 Beats $2.10 Estimate, Sales $96.221B Beat $92.179B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-27
+CRWD,2026-08-26,time-not-supplied,Jul/2026,2026-08-26 16:07,"CrowdStrike Holdings Q2 Adj. EPS $0.31 Beats $0.29 Estimate, Sales $1.471B Beat $1.440B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-27
+CRM,2026-08-26,time-not-supplied,Jul/2026,2026-08-26 16:02,"Salesforce Q2 Adj. EPS $5.90 Beats $3.27 Estimate, Sales $11.345B Beat $11.320B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-27
+MRVL,2026-08-27,time-not-supplied,Jul/2026,2026-08-27 16:06,"Marvell Tech Q2 Adj. EPS $0.94 Beats $0.92 Estimate, Sales $2.739B Beat $2.710B Estimate",alpaca_news(benzinga),same_day,after_close,2026-08-28
+IREN,2026-08-27,time-not-supplied,Jun/2026,2026-08-27 16:12,Iris Energy Q4 Sales $137.200M Miss $142.320M Estimate,alpaca_news(benzinga),same_day,after_close,2026-08-28
+DELL,2026-09-01,time-not-supplied,Jul/2026,2026-09-01 16:05,"Dell Technologies Q2 Adj. EPS $7.04 Beats $4.91 Estimate, Sales $46.971B Beat $44.953B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-02
+PANW,2026-09-01,time-not-supplied,Jul/2026,2026-09-01 16:07,"Palo Alto Networks Q4 Adj. EPS $1.02 Beats $0.98 Estimate, Sales $3.410B Beat $3.352B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-02
+AVGO,2026-09-02,time-not-supplied,Jul/2026,2026-09-02 16:15,"Broadcom Q3 Adj. EPS $3.32 Beats $3.24 Estimate, Sales $13.088B Miss $29.362B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-03
+SNOW,2026-09-02,time-not-supplied,Jul/2026,2026-09-02 16:06,"Snowflake Q2 Adj. EPS $0.62 Beats $0.45 Estimate, Sales $1.547B Beat $1.482B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-03
+ZS,2026-09-03,time-not-supplied,Jul/2026,2026-09-03 16:06,"Zscaler Q4 Adj. EPS $1.19 Beats $1.08 Estimate, Sales $898.185M Beat $877.364M Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-04
+ORCL,2026-09-10,time-not-supplied,Aug/2026,2026-09-10 16:10,"Oracle Q1 Adj. EPS $1.92 Beats $1.74 Estimate, Sales $19.300B Beat $19.144B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-11
+ADBE,2026-09-10,time-not-supplied,Aug/2026,2026-09-10 16:05,"Adobe Q3 Adj. EPS $6.13 Beats $6.09 Estimate, Sales $6.760B Beat $6.693B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-11
+COST,2026-09-24,time-not-supplied,Aug/2026,2026-09-24 16:15,"Costco Wholesale Q4 EPS $6.75 Beats $6.52 Estimate, Sales $95.723B Beat $94.859B Estimate",alpaca_news(benzinga),same_day,after_close,2026-09-25
+MU,2026-09-30,time-not-supplied,Aug/2026,2026-09-30 16:01,"Micron Technology Q4 Adj. EPS $33.42 Beats $31.45 Estimate, Sales $54.229B Beat $50.751B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-01
+UNH,2026-10-13,time-not-supplied,Sep/2026,2026-10-13 05:55,"UnitedHealth Group Q3 Adj. EPS $4.69 Beats $4.15 Estimate, Sales $112.694B Beat $111.403B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-10-13
+TSM,2026-10-15,time-not-supplied,Sep/2026,2026-10-15 01:50,"Taiwan Semiconductor Q3 EPS $4.60 Beats $4.45 Estimate, Sales $46.720B Beat $45.620B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-10-15
+SPCX,2026-10-20,time-not-supplied,Sep/2026,2026-10-20 16:02,"SpaceX Q3 EPS $0.35 Beats $0.12 Estimate, Sales $14.575B Beat $12.738B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-21
+NOC,2026-10-20,time-not-supplied,Sep/2026,2026-10-20 06:07,"Northrop Grumman Q3 EPS $7.89 Beats $7.18 Estimate, Sales $11.122B Miss $11.140B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-10-20
+META,2026-10-21,time-not-supplied,Sep/2026,2026-10-21 16:03,"Meta Platforms Q3 Adj. EPS $7.40 Beats $5.74 Estimate, Sales $64.601B Beat $63.373B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-22
+TSLA,2026-10-21,time-not-supplied,Sep/2026,2026-10-21 16:07,"Tesla Q3 Adj. EPS $0.48 Beats $0.43 Estimate, Sales $28.046B Beat $27.883B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-22
+LRCX,2026-10-21,time-not-supplied,Sep/2026,2026-10-21 16:06,"Lam Research Q1 Adj. EPS $2.20 Beats $2.18 Estimate, Sales $8.219B Beat $8.153B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-22
+IBM,2026-10-21,time-not-supplied,Sep/2026,2026-10-21 16:10,"IBM Q3 Adj. EPS $2.95 Beats $2.86 Estimate, Sales $17.103B Beat $16.822B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-22
+WDC,2026-10-22,time-after-hours,Sep/2026,2026-10-22 16:01,"Western Digital Q1 Adj. EPS $4.64 Beats $4.07 Estimate, Sales $4.381B Beat $4.131B Estimate",alpaca_news(benzinga),same_day,after_close,2026-10-23
+SPOT,2026-10-22,time-pre-market,Sep/2026,2026-10-22 06:03,"Spotify Technology Q3 EPS $2.85 Misses $3.11 Estimate, Sales $5.719B Miss $5.730B Estimate",alpaca_news(benzinga),same_day,pre_open,2026-10-22
+STX,2026-10-27,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-28
+HOOD,2026-10-27,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-28
+GOOGL,2026-10-28,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-29
+MSFT,2026-10-28,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-29
+NOW,2026-10-28,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-29
+AMZN,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+MA,2026-10-29,time-pre-market,Sep/2026,,,nasdaq_scheduled,,pre_open,2026-10-29
+INTC,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+CAT,2026-10-29,time-pre-market,Sep/2026,,,nasdaq_scheduled,,pre_open,2026-10-29
+SNDK,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+COIN,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+TWLO,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+RDDT,2026-10-29,time-after-hours,Sep/2026,,,nasdaq_scheduled,,after_close,2026-10-30
+CVX,2026-10-30,time-pre-market,Sep/2026,,,nasdaq_scheduled,,pre_open,2026-10-30

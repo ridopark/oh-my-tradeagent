@@ -1,0 +1,69 @@
+## Tag counts (real legs)
+
+tag   AGREE  DISAGREE  SILENT
+half                         
+FIT      24         4      64
+TEST     16         3      59
+
+## Tag counts (placebo legs, A5 scope)
+
+tag   AGREE  DISAGREE  NA_baseline  SILENT
+half                                      
+FIT     191        61            3     552
+TEST    141        18            0     489
+
+## Mean outcomes per tag (real, bps)
+
+                n  r60_bps  rclose_bps  ndays
+half tag                                     
+FIT  AGREE     24     -1.3        -2.5     17
+     DISAGREE   4     29.6        37.9      3
+     SILENT    64    -13.7       -17.6     36
+TEST AGREE     16      7.7        31.4     12
+     DISAGREE   3     -8.7       -24.5      3
+     SILENT    59      2.5         1.8     30
+
+## Mean outcomes per tag (placebo, bps)
+
+                 n  r60_bps  rclose_bps
+half tag                               
+FIT  AGREE     191      6.6        17.1
+     DISAGREE   61    -13.4       -15.7
+     SILENT    552     -3.9        -8.0
+TEST AGREE     141      7.7        12.2
+     DISAGREE   18     -7.0        11.9
+     SILENT    489      3.4         0.4
+
+## Contrasts (day-clustered bootstrap, B=10000, 95% CI, bps)
+
+half outcome           contrast  nA  nB  est_bps  lo_bps  hi_bps  excl0
+ FIT     r60       AGREE-SILENT  23  60     12.4   -41.9    50.4  False
+ FIT     r60     AGREE-DISAGREE  23   4    -31.0   -88.3    20.1  False
+ FIT     r60 AGREE-placeboAGREE  23 181     -7.9   -71.2    33.4  False
+ FIT  rclose       AGREE-SILENT  24  64     15.1   -58.7    75.8  False
+ FIT  rclose     AGREE-DISAGREE  24   4    -40.3  -119.5    34.1  False
+ FIT  rclose AGREE-placeboAGREE  24 191    -19.6  -104.0    42.9  False
+TEST     r60       AGREE-SILENT  16  56      5.1   -21.5    31.5  False
+TEST     r60     AGREE-DISAGREE  16   3     16.4    -7.8    37.2  False
+TEST     r60 AGREE-placeboAGREE  16 135     -0.1   -23.1    21.1  False
+TEST  rclose       AGREE-SILENT  16  59     29.6   -10.0    72.0  False
+TEST  rclose     AGREE-DISAGREE  16   3     55.9    12.0   103.6   True
+TEST  rclose AGREE-placeboAGREE  16 141     19.2   -10.4    49.4  False
+
+## Pass rule
+
+AGREE-SILENT r60 > 0 with CI excl 0 in FIT and TEST: False
+AGREE-DISAGREE r60 point > 0 in both halves: False
+**H9.2 FAIL**
+
+TEST AGREE-SILENT r60 t (est / ((hi-lo)/3.92)) = 0.38
+
+## Coverage gaps (real legs)
+
+none
+
+Placebo legs NA: 3 of 1455
+
+FIT Spearman(z, r60) = +0.038, (z, rclose) = +0.078, n=92
+
+TEST Spearman(z, r60) = +0.158, (z, rclose) = +0.164, n=78
