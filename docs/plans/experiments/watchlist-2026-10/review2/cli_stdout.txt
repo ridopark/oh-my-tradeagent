@@ -1,0 +1,23 @@
+I've written the review to `review2/REVIEW.md`. Of the seven claims, only R2's direction and R6's total survive cleanly. R2's size is wrong, R1 is weakened by the pre-registration's own pass rule, R3 is too small to conclude anything, and R4, R5 and R7 are weakened.
+
+| Claim | Verdict | Main reason |
+|---|---|---|
+| R1 | **Weakened** | No definition shows more bounce than placebo. But volume-profile levels break about 1.5 percentage points less often than placebo in both decade halves, and that passes PREREG4's own rule. Real, but too small to trade. |
+| R2 | **Direction holds, size wrong** | Bounce was measured from the level, which adds about +4.3 bps of mechanical offset. Measured from the touch price, 5-minute pivots continue **−5.5 to −6.6 bps** over 30 minutes, not 1–2. It shows up in 12/12 symbols and 11/11 years, also measured from the next bar's open, and it is not look-ahead. |
+| R3 | **Numbers hold, inconclusive** | 114 touches come from only 22 days. No script in the folder produces the input file, and 16 touches fall on a post day before that day's post, which can't be checked without the level. |
+| R4 | **Weakened** | The drift reproduces, but the intervals are about ±15 bps. There is no code for the variance ratio; I get 1.15 [0.79, 1.59]. "A trail can't add value" holds for stock P&L, not for options that lose value while held. |
+| R5 | **Weakened** | My re-run on all 26 triggers finds no trail significantly different from holding. One +703% trade produces the whole +17% hold mean. Random entries timed near the author's give +90% to +144%, so the random comparison is noise. The author's real SPY/QQQ trades were 3–6 days to expiry, but the quote data is same-day-expiry only, so half the pre-registered tests silently produced nothing. |
+| R6 | **Holds, with a correction** | +$34,179 reproduces from the fills. Through 08-19 the figure is +$9.3k rather than ~+$8k. Because the accounts copy the same signals, resampling by signal widens the per-trade interval to [−11%, +22%]. Without the top 3 trades the total is −$1.3k. |
+| R7 | **Weakened** | Kelly = 0 is the search's lower bound, not an estimate; the unconstrained optimum is about −0.06. "Equity per day dominates drawdown" is true by how drawdown is computed. Each half of the out-of-sample split has about 20 signals. |
+
+On the specific risks you raised:
+- **Splits:** the minute data is unadjusted, but levels more than 3% from the prior close are filtered out, so splits only cost a few touches.
+- **Clustering:** resampling by day instead of by symbol-day changes the intervals by less than 0.2 bps.
+- **Placebo timing:** controlling for time of touch doesn't change the break results.
+- **Bid/ask:** buying at the ask and selling at the bid is handled correctly.
+
+One correction to the sub-agent that rebuilt the P&L: it said the INTC 08-03 lots (−$13.4k) may not have expired worthless, putting the 08-19 figure as high as +$22.7k. The same order in the paper account sold for $0.01 that afternoon, and INTC never got above 91.68 against a 95 strike, so marking them at zero is right to within about $0.5k. Two other leftover lots (META, −$10.8k; NVDA, −$2.0k) still have no recorded exit.
+
+The bugs table and what to test next are in the review; the first suggestion is to test the 5-minute-pivot continuation as a costed stock strategy.
+
+I accidentally wrote one stray copy of a script outside the workspace, at `/tmp/tmp/claude-1000/.../wl/review2/splits.py`. Deleting it needed approval I didn't have, so please remove it.

@@ -1,0 +1,83 @@
+s,D,nasdaq_time,name,fq
+ORCL,2026-06-10,time-not-supplied,Oracle Corporation,May/2026
+ADBE,2026-06-11,time-not-supplied,Adobe Inc.,May/2026
+MU,2026-06-24,time-not-supplied,"Micron Technology, Inc.",May/2026
+TSM,2026-07-16,time-not-supplied,Taiwan Semiconductor Manufacturing Company Ltd.,Jun/2026
+UNH,2026-07-16,time-not-supplied,UnitedHealth Group Incorporated,Jun/2026
+NOC,2026-07-21,time-not-supplied,Northrop Grumman Corporation,Jun/2026
+GOOGL,2026-07-22,time-not-supplied,Alphabet Inc.,Jun/2026
+TSLA,2026-07-22,time-not-supplied,"Tesla, Inc. ",Jun/2026
+IBM,2026-07-22,time-not-supplied,International Business Machines Corporation,Jun/2026
+NOW,2026-07-22,time-not-supplied,"ServiceNow, Inc.",Jun/2026
+INTC,2026-07-23,time-not-supplied,Intel Corporation,Jun/2026
+STX,2026-07-28,time-not-supplied,Seagate Technology Holdings PLC,Jun/2026
+MSFT,2026-07-29,time-not-supplied,Microsoft Corporation,Jun/2026
+META,2026-07-29,time-not-supplied,"Meta Platforms, Inc.",Jun/2026
+SKHY,2026-07-29,time-not-supplied,SK hynix Inc.,Jun/2026
+LRCX,2026-07-29,time-not-supplied,Lam Research Corporation,Jun/2026
+ARM,2026-07-29,time-not-supplied,Arm Holdings plc,Jun/2026
+QCOM,2026-07-29,time-not-supplied,QUALCOMM Incorporated,Jun/2026
+HOOD,2026-07-29,time-not-supplied,"Robinhood Markets, Inc.",Jun/2026
+AAPL,2026-07-30,time-not-supplied,Apple Inc.,Jun/2026
+AMZN,2026-07-30,time-not-supplied,"Amazon.com, Inc.",Jun/2026
+MA,2026-07-30,time-not-supplied,Mastercard Incorporated,Jun/2026
+COIN,2026-07-30,time-not-supplied,"Coinbase Global, Inc.",Jun/2026
+RDDT,2026-07-30,time-not-supplied,"Reddit, Inc.",Jun/2026
+CVX,2026-07-31,time-not-supplied,Chevron Corporation,Jun/2026
+MRNA,2026-07-31,time-not-supplied,"Moderna, Inc.",Jun/2026
+PLTR,2026-08-03,time-not-supplied,Palantir Technologies Inc.,Jun/2026
+ON,2026-08-03,time-not-supplied,ON Semiconductor Corporation,Jun/2026
+SPCX,2026-08-04,time-not-supplied,Space Exploration Technologies Corp.,Jun/2026
+AMD,2026-08-04,time-not-supplied,"Advanced Micro Devices, Inc.",Jun/2026
+CAT,2026-08-04,time-not-supplied,"Caterpillar, Inc.",Jun/2026
+MCD,2026-08-04,time-not-supplied,McDonald's Corporation,Jun/2026
+SPOT,2026-08-04,time-not-supplied,Spotify Technology S.A.,Jun/2026
+SNDK,2026-08-05,time-not-supplied,Sandisk Corporation,Jun/2026
+WDC,2026-08-05,time-not-supplied,Western Digital Corporation,Jun/2026
+NET,2026-08-06,time-not-supplied,"Cloudflare, Inc.",Jun/2026
+TWLO,2026-08-06,time-not-supplied,Twilio Inc.,Jun/2026
+AAOI,2026-08-06,time-not-supplied,"Applied Optoelectronics, Inc.",Jun/2026
+RKLB,2026-08-10,time-not-supplied,Rocket Lab Corporation,Jun/2026
+RIOT,2026-08-10,time-not-supplied,"Riot Platforms, Inc.",Jun/2026
+CRWV,2026-08-11,time-not-supplied,"CoreWeave, Inc.",Jun/2026
+SMCI,2026-08-11,time-not-supplied,"Super Micro Computer, Inc.",Jun/2026
+NBIS,2026-08-12,time-not-supplied,Nebius Group N.V.,Jun/2026
+TGT,2026-08-19,time-not-supplied,Target Corporation,Jul/2026
+NVDA,2026-08-26,time-not-supplied,NVIDIA Corporation,Jul/2026
+CRWD,2026-08-26,time-not-supplied,"CrowdStrike Holdings, Inc.",Jul/2026
+CRM,2026-08-26,time-not-supplied,"Salesforce, Inc.",Jul/2026
+MRVL,2026-08-27,time-not-supplied,"Marvell Technology, Inc.",Jul/2026
+IREN,2026-08-27,time-not-supplied,IREN Limited,Jun/2026
+DELL,2026-09-01,time-not-supplied,Dell Technologies Inc.,Jul/2026
+PANW,2026-09-01,time-not-supplied,"Palo Alto Networks, Inc.",Jul/2026
+AVGO,2026-09-02,time-not-supplied,Broadcom Inc.,Jul/2026
+SNOW,2026-09-02,time-not-supplied,Snowflake Inc.,Jul/2026
+ZS,2026-09-03,time-not-supplied,"Zscaler, Inc.",Jul/2026
+ORCL,2026-09-10,time-not-supplied,Oracle Corporation,Aug/2026
+ADBE,2026-09-10,time-not-supplied,Adobe Inc.,Aug/2026
+COST,2026-09-24,time-not-supplied,Costco Wholesale Corporation,Aug/2026
+MU,2026-09-30,time-not-supplied,"Micron Technology, Inc.",Aug/2026
+UNH,2026-10-13,time-not-supplied,UnitedHealth Group Incorporated,Sep/2026
+TSM,2026-10-15,time-not-supplied,Taiwan Semiconductor Manufacturing Company Ltd.,Sep/2026
+SPCX,2026-10-20,time-not-supplied,Space Exploration Technologies Corp.,Sep/2026
+NOC,2026-10-20,time-not-supplied,Northrop Grumman Corporation,Sep/2026
+META,2026-10-21,time-not-supplied,"Meta Platforms, Inc.",Sep/2026
+TSLA,2026-10-21,time-not-supplied,"Tesla, Inc. ",Sep/2026
+LRCX,2026-10-21,time-not-supplied,Lam Research Corporation,Sep/2026
+IBM,2026-10-21,time-not-supplied,International Business Machines Corporation,Sep/2026
+WDC,2026-10-22,time-after-hours,Western Digital Corporation,Sep/2026
+SPOT,2026-10-22,time-pre-market,Spotify Technology S.A.,Sep/2026
+STX,2026-10-27,time-after-hours,Seagate Technology Holdings PLC,Sep/2026
+HOOD,2026-10-27,time-after-hours,"Robinhood Markets, Inc.",Sep/2026
+GOOGL,2026-10-28,time-after-hours,Alphabet Inc.,Sep/2026
+MSFT,2026-10-28,time-after-hours,Microsoft Corporation,Sep/2026
+NOW,2026-10-28,time-after-hours,"ServiceNow, Inc.",Sep/2026
+AMZN,2026-10-29,time-after-hours,"Amazon.com, Inc.",Sep/2026
+MA,2026-10-29,time-pre-market,Mastercard Incorporated,Sep/2026
+INTC,2026-10-29,time-after-hours,Intel Corporation,Sep/2026
+CAT,2026-10-29,time-pre-market,"Caterpillar, Inc.",Sep/2026
+SNDK,2026-10-29,time-after-hours,Sandisk Corporation,Sep/2026
+COIN,2026-10-29,time-after-hours,"Coinbase Global, Inc.",Sep/2026
+TWLO,2026-10-29,time-after-hours,Twilio Inc.,Sep/2026
+RDDT,2026-10-29,time-after-hours,"Reddit, Inc.",Sep/2026
+CVX,2026-10-30,time-pre-market,Chevron Corporation,Sep/2026

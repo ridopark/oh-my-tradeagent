@@ -1,0 +1,44 @@
+listed pairs in daily bars: 482 of 482 | with IV: 359
+listed missing IV by ticker: {'QQQ': 70, 'SPCX': 6, 'CRWV': 5, 'NBIS': 5, 'SKHY': 5, 'TSM': 5, 'AAOI': 4, 'ARM': 3, 'IREN': 3, 'IWM': 2, 'RKLB': 2, 'SNOW': 2, 'SPY': 2, 'CAT': 1, 'GLD': 1, 'INTC': 1, 'MRVL': 1, 'NET': 1, 'RIOT': 1, 'SNDK': 1, 'SPOT': 1, 'ZS': 1}
+universe obs with IV: 10043 of 11731 | tickers never with IV: ['AAOI', 'ARM', 'BK', 'CRWV', 'GLD', 'IREN', 'IWM', 'NBIS', 'NET', 'QQQ', 'RIOT', 'RKLB', 'SKHY', 'SNOW', 'SPCX', 'SPOT', 'TSM', 'ZS']
+chain dates present: 87 | atm dist>5% dropped: 0 | one-sided strike: 57
+DTE of IV expiry: {'count': 10043.0, 'mean': 14.873245046300907, 'std': 3.092957367348267, 'min': 7.0, '25%': 14.0, '50%': 15.0, '75%': 16.0, 'max': 37.0}
+abs ret>40% (split check): [{'s': 'CRWD', 'd': '2026-07-02', 'ret': -0.7489711934156379}, {'s': 'MRNA', 'd': '2026-08-19', 'ret': 1.7696950444726811}]
+zero-move floor hits cc: 68
+               set half    y       control  n_listed  days  n_control  listed_mean  ctrl_mean    diff      lo      hi
+           primary  FIT y_cc cross-section       196    45       5622      -0.6877    -0.7624  0.0747 -0.0882  0.2377
+           primary  FIT y_cc within-ticker       196    45       1542      -0.6877    -0.6718 -0.0159 -0.1815  0.1497
+           primary  FIT y_hl cross-section       196    45       5622       0.1269     0.1349 -0.0080 -0.0670  0.0509
+           primary  FIT y_hl within-ticker       196    45       1542       0.1269     0.1291 -0.0023 -0.0748  0.0703
+           primary  FIT y_oc cross-section       196    45       5622      -1.1438    -0.9605 -0.1832 -0.3899  0.0234
+           primary  FIT y_oc within-ticker       196    45       1542      -1.1438    -0.8671 -0.2767 -0.4819 -0.0715
+           primary TEST y_cc cross-section       163    35       4060      -0.7728    -0.8393  0.0665 -0.1615  0.2946
+           primary TEST y_cc within-ticker       163    35        946      -0.7728    -0.8954  0.1226 -0.1432  0.3885
+           primary TEST y_hl cross-section       163    35       4060       0.1020     0.1288 -0.0268 -0.0923  0.0388
+           primary TEST y_hl within-ticker       163    35        946       0.1020     0.0091  0.0929  0.0061  0.1798
+           primary TEST y_oc cross-section       163    35       4060      -0.8954    -0.9754  0.0800 -0.1223  0.2823
+           primary TEST y_oc within-ticker       163    35        946      -0.8954    -1.1398  0.2445  0.0220  0.4669
+excl_postopen_arms  FIT y_cc cross-section       191    44       5622      -0.6998    -0.7701  0.0703 -0.0968  0.2375
+excl_postopen_arms  FIT y_cc within-ticker       191    44       1493      -0.6998    -0.6706 -0.0292 -0.1970  0.1386
+excl_postopen_arms  FIT y_hl cross-section       191    44       5622       0.1200     0.1311 -0.0111 -0.0713  0.0491
+excl_postopen_arms  FIT y_hl within-ticker       191    44       1493       0.1200     0.1284 -0.0084 -0.0819  0.0650
+excl_postopen_arms  FIT y_oc cross-section       191    44       5622      -1.1480    -0.9678 -0.1802 -0.3923  0.0319
+excl_postopen_arms  FIT y_oc within-ticker       191    44       1493      -1.1480    -0.8650 -0.2830 -0.4933 -0.0727
+excl_postopen_arms TEST y_cc cross-section       163    35       4060      -0.7728    -0.8393  0.0665 -0.1615  0.2946
+excl_postopen_arms TEST y_cc within-ticker       163    35        946      -0.7728    -0.8954  0.1226 -0.1432  0.3885
+excl_postopen_arms TEST y_hl cross-section       163    35       4060       0.1020     0.1288 -0.0268 -0.0923  0.0388
+excl_postopen_arms TEST y_hl within-ticker       163    35        946       0.1020     0.0091  0.0929  0.0061  0.1798
+excl_postopen_arms TEST y_oc cross-section       163    35       4060      -0.8954    -0.9754  0.0800 -0.1223  0.2823
+excl_postopen_arms TEST y_oc within-ticker       163    35        946      -0.8954    -1.1398  0.2445  0.0220  0.4669
+         excl_ETFs  FIT y_cc cross-section       163    45       5605      -0.6499    -0.7603  0.1104 -0.0480  0.2688
+         excl_ETFs  FIT y_cc within-ticker       163    45       1525      -0.6499    -0.6832  0.0333 -0.1286  0.1952
+         excl_ETFs  FIT y_hl cross-section       163    45       5605       0.1537     0.1395  0.0142 -0.0458  0.0743
+         excl_ETFs  FIT y_hl within-ticker       163    45       1525       0.1537     0.1457  0.0080 -0.0616  0.0777
+         excl_ETFs  FIT y_oc cross-section       163    45       5605      -1.0976    -0.9496 -0.1480 -0.3830  0.0870
+         excl_ETFs  FIT y_oc within-ticker       163    45       1525      -1.0976    -0.8816 -0.2160 -0.4485  0.0164
+         excl_ETFs TEST y_cc cross-section       133    35       4055      -0.8412    -0.8413  0.0001 -0.2551  0.2553
+         excl_ETFs TEST y_cc within-ticker       133    35        941      -0.8412    -0.7123 -0.1289 -0.4189  0.1610
+         excl_ETFs TEST y_hl cross-section       133    35       4055       0.1341     0.1288  0.0054 -0.0569  0.0676
+         excl_ETFs TEST y_hl within-ticker       133    35        941       0.1341     0.0988  0.0353 -0.0486  0.1193
+         excl_ETFs TEST y_oc cross-section       133    35       4055      -0.8403    -0.9741  0.1338 -0.0806  0.3482
+         excl_ETFs TEST y_oc within-ticker       133    35        941      -0.8403    -1.0189  0.1785 -0.0580  0.4150
