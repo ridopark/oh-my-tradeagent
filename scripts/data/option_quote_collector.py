@@ -152,10 +152,10 @@ def main():
                     print(f"{now_iso} {u}: {len(rows)} rows", flush=True)
                 except Exception as e:
                     print(f"{now_iso} {u}: ERROR {e}", file=sys.stderr, flush=True)
+            if a.watchlist and time.time() - cycle_t0 > a.interval:
+                print(f"{now_iso} WARN cycle took {time.time() - cycle_t0:.0f}s > interval {a.interval}s", file=sys.stderr, flush=True)
         if a.once:
             return
-        if a.watchlist and time.time() - cycle_t0 > a.interval:
-            print(f"{now_iso} WARN cycle took {time.time() - cycle_t0:.0f}s > interval {a.interval}s", file=sys.stderr, flush=True)
         time.sleep(a.interval)
 
 if __name__ == "__main__":
