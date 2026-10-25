@@ -41,6 +41,20 @@ class WatchlistSpotTest(unittest.TestCase):
             self.assertIsNone(oqc.watchlist_spot(und))
 
 
+class UniverseTest(unittest.TestCase):
+    def test_read_universe_and_union(self):
+        import tempfile, os
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("# fixed names\nnvda\nAMD  # chips\n\nAMD\n"); path = f.name
+        try:
+            self.assertEqual(oqc.read_universe(path), ["AMD", "NVDA"])
+        finally:
+            os.unlink(path)
+        self.assertEqual(oqc.read_universe(None), [])
+        self.assertEqual(oqc.poll_set(["TSM", "AMD"], ["AMD", "NVDA"]), ["AMD", "NVDA", "TSM"])
+        self.assertEqual(oqc.poll_set([], []), [])
+
+
 class WatchlistTickersTest(unittest.TestCase):
     def test_parses_psql_output(self):
         cmd = f'{sys.executable} -c "import sys; sys.stdin.read(); print(\'SPY\'); print(\'\'); print(\'AMD\')"'

@@ -9,11 +9,14 @@ Read-only REST on the DATA key (opra feed; entitlement verified 2026-10-04). ~3 
 
 Usage: option_quote_collector.py --out /data/option-quotes [--underlyings SPY,QQQ,XSP]
        [--interval 60] [--once]
-       option_quote_collector.py --out /data/option-quotes-watchlist --watchlist
+       option_quote_collector.py --out /data/option-quotes-watchlist --watchlist [--universe-file names.txt]
        --watchlist: instead of 0DTE chains, poll today's watchlist tickers (audit TriggerArmed,
        refreshed every 10 min and on a new ET date) — every expiry within 10 calendar days (0-10 DTE:
        covers next Friday's weekly and the author's ~8-DTE median), strikes within +-5% of spot.
-       A ticker with no usable spot (no last trade and no ask) is skipped for that cycle (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
+       A ticker with no usable spot (no last trade and no ask) is skipped for that cycle.
+       --universe-file: also poll these tickers every cycle (one per line; '#' comments), unioned with the
+       day's watchlist, so fills can later be replayed on names before/whether they are listed. ~2.5 REST
+       calls per ticker per cycle; 60 names ≈ 1.5% of the 10k/min budget. Quotes cannot be backfilled. (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
 Deploy (operator): homelab crontab @reboot or k8s Deployment; session crons die with the session
 (see reference_prod_real_monitoring). Files: <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz
 """
@@ -57,6 +60,17 @@ def watchlist_spot(und):
     the caller must then SKIP the ticker (snapshot_params(today, None) is the 0DTE default query)."""
     spot = und.get("lp") or und.get("ap")
     return spot if spot and spot > 0 else None
+
+def read_universe(path):
+    """Fixed ticker universe: one per line, blank lines and '#' comments ignored, upper-cased, deduped."""
+    if not path:
+        return []
+    with open(path) as f:
+        return sorted({l.split("#", 1)[0].strip().upper() for l in f} - {""})
+
+def poll_set(watchlist, universe):
+    """Tickers to poll this cycle: today's watchlist unioned with the fixed universe, sorted."""
+    return sorted(set(watchlist) | set(universe))
 
 def watchlist_tickers(psql_cmd, today):
     q = ("SELECT DISTINCT subject->>'ticker' FROM audit_log WHERE kind='TriggerArmed' AND "
@@ -102,21 +116,23 @@ def main():
     ap.add_argument("--env", default=os.path.join(os.path.dirname(__file__), "../../.env"))
     ap.add_argument("--watchlist", action="store_true")
     ap.add_argument("--psql", default=DEFAULT_PSQL)
+    ap.add_argument("--universe-file", default=None)
     a = ap.parse_args()
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     tickers, refreshed, refreshed_day = [], 0.0, None
+    universe = read_universe(a.universe_file)
     while True:
         now = datetime.now(ET)
         if a.once or in_session(now):
-            now_iso = now.isoformat(timespec="seconds")
+            now_iso = now.isoformat(timespec="seconds"); cycle_t0 = time.time()
             # refresh every 10 min, on a new ET date, and every cycle while the list is still empty
             if a.watchlist and (not tickers or refreshed_day != now.date() or time.time() - refreshed > 600):
                 try:
                     tickers, refreshed, refreshed_day = watchlist_tickers(a.psql, now.date()), time.time(), now.date()
                 except Exception as e:
                     print(f"{now_iso} watchlist lookup ERROR {e}", file=sys.stderr, flush=True)
-            for u in (tickers if a.watchlist else a.underlyings.split(",")):
+            for u in (poll_set(tickers, universe) if a.watchlist else a.underlyings.split(",")):
                 try:
                     if a.watchlist:
                         und = underlying_row(u, headers, now_iso)
@@ -138,6 +154,8 @@ def main():
                     print(f"{now_iso} {u}: ERROR {e}", file=sys.stderr, flush=True)
         if a.once:
             return
+        if a.watchlist and time.time() - cycle_t0 > a.interval:
+            print(f"{now_iso} WARN cycle took {time.time() - cycle_t0:.0f}s > interval {a.interval}s", file=sys.stderr, flush=True)
         time.sleep(a.interval)
 
 if __name__ == "__main__":
