@@ -46,3 +46,10 @@ reversed sign on 10 years of other data. Each is described in the Claude doc's "
 
 Python deps: pandas, numpy, pyarrow; scikit-learn for round 14; `cvxpy` for `alloc/`; Kronos needs its repo
 (MIT, `shiyu-coder/Kronos`) and a CUDA torch.
+
+## Addendum: nautilus_trader spike (2026-10-25)
+`nautilus/nautilus_fill.py` loads the collector's 1-min NBBO as `QuoteTick` data on `OptionContract` instruments and
+runs a limit-buy-at-mid through nautilus 1.231's simulated exchange (one engine per contract-day and entry; agrees with
+an independent pandas replay on 106/107 cases). On the author's 18 SPY/QQQ 0DTE trades a mid limit fills 67% within 15
+minutes and saves 1.2% of premium, but the six trades it MISSES averaged +109% (−10% excluding the +703% day) while the
+twelve it FILLS averaged −30%: resting at mid is adversely selected. At a trigger, pay the ask or don't trade.
