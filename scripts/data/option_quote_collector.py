@@ -17,6 +17,11 @@ Usage: option_quote_collector.py --out /data/option-quotes [--underlyings SPY,QQ
        --universe-file: also poll these tickers every cycle (one per line; '#' comments), unioned with the
        day's watchlist, so fills can later be replayed on names before/whether they are listed. ~2.5 REST
        calls per ticker per cycle; 60 names ≈ 1.5% of the 10k/min budget. Quotes cannot be backfilled. (PREREG-2026-10-23-watchlist-forward-v1: listed contracts + neighbours at real NBBO).
+       --tape-min-size N (watchlist mode): also pull every option TRADE since the previous cycle for the polled
+       contracts (/v1beta1/options/trades, 100 symbols per call) and append prints of N+ contracts to
+       <out>/<U>/<date>.trades.ndjson.gz, each stamped with the cycle-end NBBO of its contract so the side
+       (at ask = bought, at bid = sold) can be inferred later. Volume itself is backfillable from bars; the
+       quote at the print is not. ~1-2 extra calls per ticker per cycle. 0 (default) = off.
 Deploy (operator): homelab crontab @reboot or k8s Deployment; session crons die with the session
 (see reference_prod_real_monitoring). Files: <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz
 """
@@ -96,6 +101,33 @@ def snapshot_rows(u, headers, now_iso, params=None):
         if not token:
             return rows
 
+def tape_rows(trades_by_sym, quotes, min_size):
+    """Prints of min_size+ contracts with the cycle-end NBBO of their contract stamped on (trades carry no side).
+    trades_by_sym: the 'trades' map of /v1beta1/options/trades; quotes: {sym: this cycle's snapshot row}."""
+    rows = []
+    for sym, trades in (trades_by_sym or {}).items():
+        q = quotes.get(sym) or {}
+        for t in trades:
+            if (t.get("s") or 0) >= min_size:
+                rows.append({"ts": t.get("t"), "sym": sym, "p": t.get("p"), "s": t.get("s"), "x": t.get("x"),
+                             "c": t.get("c"), "bp": q.get("bp"), "ap": q.get("ap"), "qts": q.get("ts")})
+    return rows
+
+def trade_rows(syms, headers, start_iso, end_iso, quotes, min_size):
+    rows = []
+    for i in range(0, len(syms), 100):
+        token = None
+        while True:
+            q = {"symbols": ",".join(syms[i:i + 100]), "start": start_iso, "end": end_iso, "limit": 10000}
+            if token:
+                q["page_token"] = token
+            d = get("https://data.alpaca.markets/v1beta1/options/trades?" + urllib.parse.urlencode(q), headers)
+            rows += tape_rows(d.get("trades"), quotes, min_size)
+            token = d.get("next_page_token")
+            if not token:
+                break
+    return rows
+
 def underlying_row(u, headers, now_iso):
     sym = "SPY" if u == "XSP" else u  # XSP itself does not trade; SPY is the spot proxy
     d = get(f"https://data.alpaca.markets/v2/stocks/{sym}/snapshot?feed=sip", headers)
@@ -117,10 +149,13 @@ def main():
     ap.add_argument("--watchlist", action="store_true")
     ap.add_argument("--psql", default=DEFAULT_PSQL)
     ap.add_argument("--universe-file", default=None)
+    ap.add_argument("--tape-min-size", type=int, default=0,
+                    help="watchlist mode: also record option prints of this many contracts or more (0 = off)")
     a = ap.parse_args()
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     tickers, refreshed, refreshed_day = [], 0.0, None
+    tape_since = {}  # ticker -> end of the last trade window pulled
     universe = read_universe(a.universe_file)
     while True:
         now = datetime.now(ET)
@@ -149,7 +184,16 @@ def main():
                     with gzip.open(os.path.join(day_dir, f"{now.date()}.ndjson.gz"), "at") as f:
                         for r in rows:
                             f.write(json.dumps(r) + "\n")
-                    print(f"{now_iso} {u}: {len(rows)} rows", flush=True)
+                    tape = []
+                    if a.watchlist and a.tape_min_size:
+                        quotes = {r["sym"]: r for r in rows if not r["sym"].startswith("_UND_")}
+                        since = tape_since.get(u) or (now - timedelta(seconds=a.interval)).isoformat(timespec="seconds")
+                        tape = trade_rows(sorted(quotes), headers, since, now_iso, quotes, a.tape_min_size)
+                        tape_since[u] = now_iso
+                        with gzip.open(os.path.join(day_dir, f"{now.date()}.trades.ndjson.gz"), "at") as f:
+                            for r in tape:
+                                f.write(json.dumps(r) + "\n")
+                    print(f"{now_iso} {u}: {len(rows)} rows" + (f", {len(tape)} prints" if a.tape_min_size else ""), flush=True)
                 except Exception as e:
                     print(f"{now_iso} {u}: ERROR {e}", file=sys.stderr, flush=True)
             if a.watchlist and time.time() - cycle_t0 > a.interval:
