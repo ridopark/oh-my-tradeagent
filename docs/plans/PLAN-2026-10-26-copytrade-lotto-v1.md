@@ -300,7 +300,7 @@ Tag commit precedes the first `EntryFilled` for `paper_lotto`.
 - **Expiry-day late entries (phase 4).** A lot that fills after 15:30 ET on its expiry day arms no flatten timer and
   is marked worthless/terminated with the broker position still open (`PositionWorkflowImpl.java:1780-1811`,
   `:1918-1924`). The poller does not emit a BTO for a contract expiring on the posted ET date at or after
-  `LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET` (default 15:20); the book is still updated.
+  `LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET` (default 15:25 — five minutes before the flatten covers the paper pending TTL; keeps the 15:22 MU 1010c runner in-sample); the book is still updated. The PREREG excludes such entries from M1–M3.
 - **P0-4 becomes recurring.** `default_stc_fraction`, `flatten_lead_minutes`, `force_close_0dte_et` and
   `eod_force_flatten` are SAFE-class editor fields; the raw config POST also accepts a `partial_fractions` blob. Run
   the P0-4 invariant query daily from the homelab crontab next to `watchlist_forward_alert.sh` and page on drift.
