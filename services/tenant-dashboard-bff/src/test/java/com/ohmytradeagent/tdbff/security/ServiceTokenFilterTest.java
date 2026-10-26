@@ -123,6 +123,32 @@ class ServiceTokenFilterTest {
     assertThat(res.getStatus()).isEqualTo(401);
   }
 
+  // The lotto poller's GET /internal/options-chat/messages shares the prefix, and the prefix rule
+  // is
+  // method-agnostic: the ingest token opens it, the shared token does not — so the poller holds
+  // only the ingest token and can never reach a tenant read.
+  @Test
+  void pollerReadRoute_GET_withTheIngestToken_passesThrough() throws Exception {
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("GET", "/internal/options-chat/messages");
+    req.addHeader("Authorization", "Bearer " + INGEST_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
+  void pollerReadRoute_GET_withTheSharedToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/options-chat/messages", "Bearer " + TOKEN);
+    assertThat(res.getStatus())
+        .as("holding BFF_SHARED_TOKEN must NOT open the poller's options-chat read")
+        .isEqualTo(401);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Path-traversal guard. getRequestURI() is the RAW request line; Spring dispatches on the DECODED
   // and NORMALIZED path. Without this guard the two disagree and every path-based decision this

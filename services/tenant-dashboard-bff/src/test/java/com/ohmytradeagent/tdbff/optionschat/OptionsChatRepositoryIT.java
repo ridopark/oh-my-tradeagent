@@ -289,4 +289,31 @@ class OptionsChatRepositoryIT {
     List<StoredMessage> newest = repo.recent(CHANNEL, base + 4, 2);
     assertThat(newest.stream().map(StoredMessage::messageId)).containsExactly(base + 3, base + 2);
   }
+
+  @Test
+  void since_returnsAscendingAfterCursor_channelScoped() {
+    long base = 9_220_000_000_000_000_000L;
+    long otherChannel = 123_456_789_012_345_678L;
+    repo.ingest(CHANNEL, List.of(message(base, "m0")));
+    // Carries an attachment and an embed, so the poller path is proven NOT to load children.
+    repo.ingest(
+        CHANNEL,
+        List.of(messageAt(base + 1, OffsetDateTime.of(2026, 8, 13, 14, 3, 12, 0, ZoneOffset.UTC))));
+    repo.ingest(CHANNEL, List.of(message(base + 2, "m2")));
+    repo.ingest(CHANNEL, List.of(message(base + 3, "m3")));
+    // Same id window, different channel: must never cross over.
+    repo.ingest(otherChannel, List.of(message(base + 10, "foreign")));
+
+    List<StoredMessage> page = repo.since(CHANNEL, base, 2);
+    assertThat(page.stream().map(StoredMessage::messageId)).containsExactly(base + 1, base + 2);
+    assertThat(page.get(0).content()).isEqualTo("old news");
+    assertThat(page.get(0).authorName()).isEqualTo("TradingTheTrend");
+    assertThat(page.get(0).attachments()).isEmpty();
+    assertThat(page.get(0).embeds()).isEmpty();
+
+    assertThat(repo.since(CHANNEL, base + 2, 200).stream().map(StoredMessage::messageId))
+        .containsExactly(base + 3);
+    assertThat(repo.since(otherChannel, base, 200).stream().map(StoredMessage::messageId))
+        .containsExactly(base + 10);
+  }
 }
