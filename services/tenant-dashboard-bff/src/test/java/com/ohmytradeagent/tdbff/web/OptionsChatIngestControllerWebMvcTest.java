@@ -104,6 +104,18 @@ class OptionsChatIngestControllerWebMvcTest {
         .andExpect(jsonPath("$.items[0].deleted").value(false))
         .andExpect(jsonPath("$.items[0].attachments").doesNotExist())
         .andExpect(jsonPath("$.items[0].embeds").doesNotExist());
+
+    // The LOWER clamp bound too: limit=0 must reach the store as 1, never as 0 (which would be an
+    // empty page forever) and never fall through unclamped.
+    when(repo.since(eq(LOTTO), eq(1273987654321098000L), eq(1))).thenReturn(List.of());
+    mvc.perform(
+            get("/internal/options-chat/messages")
+                .param("channel", "880503518878892143")
+                .param("after", "1273987654321098000")
+                .param("limit", "0"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(0));
+    verify(repo).since(LOTTO, 1273987654321098000L, 1);
   }
 
   @Test

@@ -79,6 +79,17 @@ public class OptionsChatIngestController {
    * that trades on what it reads must fail loudly if it is aimed at a room the operator did not
    * configure, not quietly act on the default one. The JSON is the page's per-message shape minus
    * the children (no attachments, no embeds).
+   *
+   * <p>Rows are FIRST-SCRAPE SNAPSHOTS. Ingest is {@code INSERT ... ON CONFLICT DO NOTHING} and
+   * nothing writes {@code deleted_at}, so {@code content} and {@code edited} never change after a
+   * row is first stored and {@code deleted} is never true today. A caller that wants to react to an
+   * edit or a deletion cannot do so through this read.
+   *
+   * <p>Paging: a response with {@code count == limit} may be a partial page; keep calling with
+   * {@code after} set to the last {@code message_id} until {@code count < limit}.
+   *
+   * <p>Privilege note: before this route the ingest token was write-only. It now also reads every
+   * allow-listed channel, and every mirror pod holds it.
    */
   @GetMapping("/messages")
   public ResponseEntity<Map<String, Object>> messages(
