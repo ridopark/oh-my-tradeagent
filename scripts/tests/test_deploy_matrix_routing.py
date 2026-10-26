@@ -36,7 +36,7 @@ ALL_JAVA = {
     "orchestrator", "exec-alpaca-paper", "market-data",
     "api-gateway", "tenant-dashboard-bff",
 }
-SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror"}
+SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror", "discord-lotto-mirror"}
 SERVICES = " ".join(sorted(ALL_JAVA | SIDECAR | {"stc-intent-service", "dashboard"}))
 
 
