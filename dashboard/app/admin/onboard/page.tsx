@@ -116,6 +116,50 @@ const copytradeConfig = (brokerTarget: string) =>
     2,
   );
 
+// Copytrade-lotto StrategyConfig template (#987). Mirrors tenants/dev/strategies/copytrade-lotto-v1.yaml
+// (the config of record pinned by LottoConfigOfRecordTest), with the same safe omissions as
+// copytradeConfig. The ONE behavioural difference from copytrade-v1: every exit post closes the WHOLE
+// position. That rests on default_stc_fraction 1.0 with NO partial_fractions key — do NOT add one
+// here (any keyword map silently turns full close back into a partial, smallest-fraction-wins #600).
+// account_equity is a tracking capital_source, so the live variant passes the activate-live gate (#790).
+const copytradeLottoConfig = (brokerTarget: string) =>
+  JSON.stringify(
+    {
+      schema_version: 1,
+      broker_target: brokerTarget,
+      author_whitelist: ["TradingTheTrend"],
+      max_signal_age_bto_secs: 30,
+      max_signal_age_stc_secs: 60,
+      max_positions: 3,
+      capital_weight: 0.02,
+      capital_source: "account_equity",
+      min_contracts: 1,
+      max_contracts: 50,
+      notional_cap_pct_of_capital_base: 0.25,
+      skip_avg: true,
+      default_stc_fraction: 1.0,
+      pending_ttl_paper_secs: 90,
+      pending_ttl_live_secs: 30,
+      min_partial_qty_behavior: "full_close",
+      trail_on_partial: false,
+      trail_giveback_pct: 0.15,
+      reset_cooldown_secs: 60,
+      eod_force_flatten: false,
+      force_close_0dte_et: "15:30",
+      exit_floor_abs: 0.05,
+      exit_floor_pct: 0.5,
+      expiry_day_floor: 0.01,
+      flatten_lead_minutes: 0,
+      exit_reprice_steps: 3,
+      exit_reprice_tick: 0.05,
+      max_slippage_abs: 0.05,
+      max_slippage_pct: 0.05,
+      enabled: false,
+    },
+    null,
+    2,
+  );
+
 // Watchlist-trigger StrategyConfig template. Mirrors tenants/dev/strategies/watchlist-trigger-v1.yaml
 // (the shipped-disabled reference) — the 2:1 breakout bracket with the chandelier trail. Same safe
 // omissions as copytradeConfig (broker_account_id / alert_webhook_url / tenant_id / strategy_id are
@@ -161,6 +205,10 @@ const watchlistConfig = (brokerTarget: string) =>
 // catalog beats a BFF endpoint for a closed set); add a row here when a third strategy type lands.
 const STRATEGY_TEMPLATES: Record<string, { paper: string; live: string }> = {
   "copytrade-v1": { paper: copytradeConfig("alpaca-paper"), live: copytradeConfig("alpaca-live") },
+  "copytrade-lotto-v1": {
+    paper: copytradeLottoConfig("alpaca-paper"),
+    live: copytradeLottoConfig("alpaca-live"),
+  },
   "watchlist-trigger-v1": {
     paper: watchlistConfig("alpaca-paper"),
     live: watchlistConfig("alpaca-live"),
