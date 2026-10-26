@@ -114,7 +114,12 @@ class Clock:
 
 
 def make_poller(
-    bff: FakeBff, clock: Clock, *, emit_max_age_secs: float = 120, dry_run: bool = True
+    bff: FakeBff,
+    clock: Clock,
+    *,
+    emit_max_age_secs: float = 120,
+    dry_run: bool = True,
+    emitter: InMemoryEmitter | None = None,
 ) -> tuple[LottoPoller, InMemoryEmitter]:
     client = BffMessagesClient(
         base_url="http://bff:8083",
@@ -122,7 +127,7 @@ def make_poller(
         log=LOG,
         client=httpx.AsyncClient(transport=bff.transport(), base_url="http://bff:8083"),
     )
-    emitter = InMemoryEmitter()
+    emitter = emitter or InMemoryEmitter()
     poller = LottoPoller(
         source=client,
         emitter=emitter,
@@ -150,6 +155,7 @@ def _shape(payloads) -> list[tuple[str, str, str]]:
 
 
 async def test_boot_rebuild_emits_nothing():
+    """Stale rows (older than LOTTO_EMIT_MAX_AGE_SECS) rebuild the book and emit nothing."""
     bff = FakeBff()
     clock = Clock(T0)
     bff.add(row(T0 - timedelta(hours=2), "SPY 9/4 650p @ .70"))
@@ -165,6 +171,23 @@ async def test_boot_rebuild_emits_nothing():
     bff.add(row(T0 - timedelta(seconds=5), "dumped the rest at .20"))
     emitted = await poller.poll_once()
     assert [(p.action.value, p.ticker, float(p.price)) for p in emitted] == [("STC", "SPY", 0.2)]
+
+
+async def test_boot_emits_rows_still_inside_the_age_window():
+    """An EXIT posted during a pod-restart window must still close the position: boot emits
+    the rows younger than LOTTO_EMIT_MAX_AGE_SECS, and only those."""
+    bff = FakeBff()
+    clock = Clock(T0)
+    bff.add(row(T0 - timedelta(hours=2), "SPY 9/4 650p @ .70"))  # stale: state only
+    fresh = bff.add(row(T0 - timedelta(seconds=30), "dumped the rest at .20"))  # inside window
+    poller, emitter = make_poller(bff, clock, emit_max_age_secs=120)
+
+    assert await poller.boot() is True
+    assert [(p.action.value, p.ticker, p.signal_id) for p in emitter.emitted] == [
+        ("STC", "SPY", f"{fresh['message_id']}:0")
+    ]
+    # Polling after boot does not emit it a second time (cursor moved past it).
+    assert await poller.poll_once() == []
 
 
 async def test_new_entry_then_exit_emits_bto_then_stc_same_contract():
@@ -241,23 +264,33 @@ async def test_stale_signal_updates_state_not_emitted(caplog):
 
 
 async def test_restart_does_not_reemit():
+    """A restart re-reads rows the previous process already emitted. Stale ones are filtered by
+    age; the ones still inside the window are re-sent and Temporal's REJECT_DUPLICATE (modelled
+    by the shared InMemoryEmitter) turns them into dedupes, so no second workflow starts."""
     bff = FakeBff()
     clock = Clock(T0)
-    first, emitter_a = make_poller(bff, clock)
+    temporal = InMemoryEmitter()  # survives the "restart", like the Temporal cluster does
+    first, _ = make_poller(bff, clock, emitter=temporal)
     await first.boot()
-    bff.add(row(T0 - timedelta(seconds=6), "MU 9/9 1050c @ 1.90"))
-    bff.add(row(T0 - timedelta(seconds=3), "2.35 taking some"))
-    assert len(await first.poll_once()) == 2
+    bff.add(row(T0 - timedelta(minutes=10), "MU 9/9 1050c @ 1.90"))  # will be stale on restart
+    clock.now = T0 - timedelta(minutes=10) + timedelta(seconds=5)
+    assert [p.action.value for p in await first.poll_once()] == ["BTO"]
+    bff.add(row(T0 - timedelta(seconds=3), "2.35 taking some"))  # still fresh on restart
+    clock.now = T0
+    assert [p.action.value for p in await first.poll_once()] == ["STC"]
+    assert len(temporal.emitted) == 2
 
-    # Same clock, same stored rows: a restarted pod rebuilds state and emits nothing.
-    second, emitter_b = make_poller(bff, clock)
-    await second.boot()
+    # Same clock, same stored rows: the restarted pod rebuilds state; the stale BTO is state-only,
+    # the fresh STC is re-sent and deduped. Nothing new reaches Temporal.
+    second, _ = make_poller(bff, clock, emitter=temporal)
+    assert await second.boot() is True
     assert await second.poll_once() == []
-    assert emitter_b.emitted == []
+    assert len(temporal.emitted) == 2
 
     # And it is live: the next fresh post emits.
     bff.add(row(T0 - timedelta(seconds=1), "stop hit on the rest"))
     assert [p.action.value for p in await second.poll_once()] == ["STC"]
+    assert len(temporal.emitted) == 3
 
 
 async def test_bff_5xx_keeps_cursor(caplog):

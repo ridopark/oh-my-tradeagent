@@ -5,6 +5,11 @@ Runs as its own Deployment (``lotto-signal``) from the SAME image as the trading
 (PR #986) already stored, through the BFF's ingest-token-gated read endpoint (phase 3), and starts
 ``CopytradeSignalWorkflow`` through ``TemporalEmitter`` exactly as ``main.py`` does.
 
+Temporal is reached through ``TEMPORAL_TARGET`` / ``TEMPORAL_NAMESPACE``, which the
+``65-lotto-signal.yaml`` manifest sets (as ``55-signal-source-discord.yaml`` does); the in-code
+defaults below exist for local runs only. ``TEMPORAL_TASK_QUEUE`` is unset there and defaults to
+``orchestrator-core`` exactly as ``main.py`` does.
+
 Dry-run (the default, ``LOTTO_DRY_RUN`` anything but ``false``) swaps in ``InMemoryEmitter`` and
 logs each would-emit payload; flipping that env is the go-live. ``--replay --since <iso>`` runs the
 boot path over stored rows in dry-run and prints the would-emit list.
@@ -311,8 +316,8 @@ async def run_loop(
     reads — and after every iteration whatever the BFF answered: a dark or erroring BFF must log
     its cause, not kill-loop the pod."""
     heartbeat_path.touch()
-    # Boot must see the lookback window before anything is emitted; until the BFF answers,
-    # keep the probe alive and retry rather than start from an empty book.
+    # Boot must see the lookback window before polling starts; until the BFF answers, keep the
+    # probe alive and retry rather than start from an empty book.
     while not await poller.boot():
         heartbeat_path.touch()
         await sleep(poll_interval)

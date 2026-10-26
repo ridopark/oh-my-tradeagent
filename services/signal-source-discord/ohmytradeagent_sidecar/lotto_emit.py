@@ -7,11 +7,13 @@ the orchestrator sees payloads shaped exactly like ``watcher.py``'s.
 
 Three gates decide whether a signal reaches the emitter:
 
-* **Boot emits nothing.** The book is rebuilt from the lookback window so exits can be attributed
-  to entries posted before this process started; none of those signals is emitted.
-* **Age.** After boot, only signals whose ``posted_at`` is at most ``emit_max_age_secs`` old are
-  emitted. Older rows update the book only, so a restart never re-emits stale history; Temporal's
-  ``REJECT_DUPLICATE`` on the deterministic workflow id is the durable backstop behind that.
+* **Age.** Only signals whose ``posted_at`` is at most ``emit_max_age_secs`` old are emitted.
+  Older rows update the book only. That holds on boot too: the book is rebuilt from the lookback
+  window so exits can be attributed to entries posted before this process started, and the few
+  rows still inside the age window ARE emitted — an EXIT posted during a pod-restart window must
+  still close the position, and a missed close is the costlier direction. Temporal's
+  ``REJECT_DUPLICATE`` on the deterministic workflow id dedupes anything the previous process
+  already started.
 * **Expiry-day entry cutoff.** A BTO on a contract expiring on the posted ET date is not emitted
   at or after ``expiry_day_entry_cutoff_et`` (default 15:20 ET): a lot that fills after the
   15:30 expiry flatten gets no flatten timer in PositionWorkflowImpl and is marked worthless while
@@ -176,15 +178,19 @@ class LottoPoller:
         return payload.expiry == posted_et.date() and posted_et.time() >= self._entry_cutoff_et
 
     async def boot(self) -> bool:
-        """Rebuild the book from the lookback window without emitting. False when the BFF did
-        not answer, so the caller can retry; the cursor is left at the lookback snowflake."""
+        """Rebuild the book from the lookback window; only rows still inside the age window emit.
+        False when the BFF did not answer, so the caller can retry; the cursor is left at the
+        lookback snowflake."""
         self.cursor = snowflake_at(self._clock() - self._lookback)
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
             return False
-        await self._process(rows, emit=False)
+        emitted = await self._process(rows)
         self._log.info(
-            "lotto boot: rebuilt book from %d rows, none emitted, cursor=%s", len(rows), self.cursor
+            "lotto boot: rebuilt book from %d rows, %d fresh signal(s) emitted, cursor=%s",
+            len(rows),
+            len(emitted),
+            self.cursor,
         )
         return True
 
@@ -192,7 +198,7 @@ class LottoPoller:
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
             return []
-        return await self._process(rows, emit=True)
+        return await self._process(rows)
 
     async def replay(self, since: datetime) -> list[CopytradeSignalPayload] | None:
         """Fresh book from ``since``; every signal counts as fresh. For the ``--replay`` CLI.
@@ -202,10 +208,10 @@ class LottoPoller:
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
             return None
-        return await self._process(rows, emit=True, age_gated=False)
+        return await self._process(rows, age_gated=False)
 
     async def _process(
-        self, rows: list[ChatRow], *, emit: bool, age_gated: bool = True
+        self, rows: list[ChatRow], *, age_gated: bool = True
     ) -> list[CopytradeSignalPayload]:
         emitted: list[CopytradeSignalPayload] = []
         for row in rows:
@@ -225,8 +231,6 @@ class LottoPoller:
                     strategy_id=self._strategy_id,
                     author=self._author,
                 )
-                if not emit:
-                    continue
                 if not fresh:
                     self._log.info(
                         "stale signal %s (%s %s posted %s) updated state only, not emitted",
