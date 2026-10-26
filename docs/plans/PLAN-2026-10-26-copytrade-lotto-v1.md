@@ -208,9 +208,12 @@ with no Discord session and no Playwright.
     `LOTTO_AUTHOR=TradingTheTrend`, `TENANT_ID`, `STRATEGY_ID=copytrade-lotto-v1`,
     `TEMPORAL_TARGET/NAMESPACE/TASK_QUEUE` (as `main.py:103-105`), `POLL_INTERVAL_SECS=5`,
     `LOTTO_LOOKBACK_DAYS=14`, `LOTTO_EMIT_MAX_AGE_SECS`, `LOTTO_DRY_RUN` (default `true`).
-  - On boot it rebuilds `LottoBook` from `since(snowflake(now − lookback))`, without emitting. Then
-    it polls `since(cursor)`.
-  - It drops rows where `author_name != LOTTO_AUTHOR` or `deleted`. It ignores edits after first read.
+  - On boot it rebuilds `LottoBook` from `since(snowflake(now − lookback))`; rows still inside
+    `LOTTO_EMIT_MAX_AGE_SECS` ARE emitted (an exit posted during a restart must still close; Temporal
+    `REJECT_DUPLICATE` backstops double emits — so the go-live `set env` restart emits the prior window for
+    real). Then it polls `since(cursor)`, paging while `count == limit`. No cursor is persisted.
+  - It drops rows where `author_name != LOTTO_AUTHOR`. (`deleted`/edits never change after first scrape —
+    ingest is `ON CONFLICT DO NOTHING` — so there is nothing to filter.)
   - It emits only signals whose `posted_at` age is ≤ `LOTTO_EMIT_MAX_AGE_SECS`. Older ones update
     state only, so a restart re-emits nothing stale, and Temporal `REJECT_DUPLICATE` backstops it.
   - It emits **every** EXIT. The orchestrator turns repeats into audited no-ops, and a second post
