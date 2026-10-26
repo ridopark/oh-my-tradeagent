@@ -15,7 +15,7 @@ author_whitelist:
 # Age gates: PLACEHOLDERS copied from copytrade-v1. #987 P0-1 sets them from the measured
 # options_chat_message mirror lag (>= p99 lag + poll interval + 10s). Do not treat these as tuned.
 max_signal_age_bto_secs: 30
-max_signal_age_stc_secs: 60
+max_signal_age_stc_secs: 60   # inert on the STC path (no risk call there, RiskActivitiesImpl.resolveMaxSignalAgeSecs is BTO-only); the real exit-age bound is the poller's LOTTO_EMIT_MAX_AGE_SECS
 # Lotto positions are small and few: at most 3 concurrent PositionWorkflows (legs included).
 max_positions: 3
 
