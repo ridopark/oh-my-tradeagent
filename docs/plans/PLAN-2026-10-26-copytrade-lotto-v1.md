@@ -305,6 +305,10 @@ Tag commit precedes the first `EntryFilled` for `paper_lotto`.
   `eod_force_flatten` are SAFE-class editor fields; the raw config POST also accepts a `partial_fractions` blob. Run
   the P0-4 invariant query daily from the homelab crontab next to `watchlist_forward_alert.sh` and page on drift.
 - `max_signal_age_stc_secs` is inert on the STC path; the exit-age bound is `LOTTO_EMIT_MAX_AGE_SECS` (P0-1 sizes it).
+- **P0-5b (from the phase-5 review): the first create of Deployment `lotto-signal` is a one-time manual
+  `kubectl -n copytrade apply -f infra/k8s/65-lotto-signal.yaml`**, AFTER the phase-4 sidecar image is built and
+  the phase-5 PR is merged. deploy.yml's verify step runs `kubectl get deployment` before apply and fails on a
+  Deployment that does not exist, so CI never bootstraps it (64-discord-lotto-mirror was hand-applied the same way).
 
 ## Forks for the lead / operator
 - **F1 — full-close mechanism.** *Recommended: config-only* (phase 2). The alternative is a schema
