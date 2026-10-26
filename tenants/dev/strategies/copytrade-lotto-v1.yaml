@@ -1,0 +1,81 @@
+schema_version: 1
+tenant_id: dev
+strategy_id: copytrade-lotto-v1
+broker_target: alpaca-paper  # DEFAULT; the dedicated paper_lotto tenant is created out-of-band (#987 P0-3) with its own account.
+
+# Issue #987 (PLAN-2026-10-26-copytrade-lotto-v1): mirrors TradingTheTrend's #lotto-alerts posts.
+# Cloned from copytrade-v1.yaml. The ONE behavioural difference from copytrade-v1 is that ANY exit
+# post closes the WHOLE remaining position (see default_stc_fraction below); later exit posts on the
+# same contract are audited no-ops (StcNoOpenPosition / ExitQueued-then-dropped). This file is the
+# config of record pinned by LottoConfigOfRecordTest — change it there first.
+
+# Phase 2a risk gates
+author_whitelist:
+  - TradingTheTrend
+# Age gates: PLACEHOLDERS copied from copytrade-v1. #987 P0-1 sets them from the measured
+# options_chat_message mirror lag (>= p99 lag + poll interval + 10s). Do not treat these as tuned.
+max_signal_age_bto_secs: 30
+max_signal_age_stc_secs: 60
+# Lotto positions are small and few: at most 3 concurrent PositionWorkflows (legs included).
+max_positions: 3
+
+# Phase 2a sizing: a plain fraction of the dedicated account's live NET-LIQ (#790), fail-closed
+# capital_unavailable when the snapshot is missing. 2% per entry; LottoConfigOfRecordTest pins
+# 0.01 <= capital_weight <= 0.03.
+capital_weight: 0.02
+capital_source: account_equity
+min_contracts: 1
+max_contracts: 50
+
+# Issue #336 portfolio dollar-exposure gate (canonical field), copied from copytrade-v1.
+notional_cap_pct_of_capital_base: 0.25
+
+# Phase 2a default per Open Question #10
+skip_avg: true
+
+# Phase 3 exit logic — FULL CLOSE ON EVERY EXIT POST (#987 fork F1, config-only).
+# default_stc_fraction 1.0 with NO partial_fractions key means KeywordPartialMatcher has no map to
+# match against and every STC resolves to the default (CopytradeSignalWorkflowImpl /
+# KeywordPartialMatcher.matchReporting on a null/empty map). Adding ANY partial_fractions keyword
+# here silently turns full close back into a partial (smallest-fraction-wins, #600) — P0-4 verifies
+# the stored DB row carries partial_fractions null/{} and default_stc_fraction = 1.
+default_stc_fraction: 1.0
+pending_ttl_paper_secs: 90
+pending_ttl_live_secs: 30
+# Issue #16/#205: a 1-lot runner is flushed on the (always full) exit signal rather than skipped.
+min_partial_qty_behavior: full_close
+
+# Phase 4 trailing exit: never arm the chandelier on an exit — every exit is the whole position.
+trail_on_partial: false
+trail_giveback_pct: 0.15
+
+# Phase 5 kill switch: daily_loss_threshold intentionally OMITTED (dead per-strategy rule; the
+# account loss cap is the live breaker, armed per tenant at create).
+reset_cooldown_secs: 60
+
+# Issue #202: copytrade mirrors a Discord author; never EOD-flatten (mirror fidelity). The
+# expiry-day flatten below, chandelier trail, risk-breach and operator force_close remain as
+# emergency exits.
+eod_force_flatten: false
+# #987: unposted exits are marked at the 15:30 ET expiry-day flatten. force_close_0dte_et is the
+# 0DTE expiry-close timer AND the anchor of the every-lot expiry-lead timer below
+# (MarketCalendarActivitiesImpl.durationUntilExpiryFlattenEt). Set explicitly: the schema text
+# says "default 15:00" but the code default is 15:30.
+force_close_0dte_et: "15:30"
+
+# Plan-2A R-AA-5: bounded scheduled-flatten floors, copied from copytrade-v1.
+exit_floor_abs: 0.05
+exit_floor_pct: 0.5
+expiry_day_floor: 0.01
+
+# Plan-2B R-AB-1: the guaranteed every-lot flatten timer fires at (force_close_0dte_et -
+# flatten_lead_minutes) ET on the expiry date. Lead 0 => exactly 15:30 ET, reason=expiry_lead for a
+# multi-day lot (a 0DTE lot's expiry-close timer fires at the same instant with reason=expiry).
+flatten_lead_minutes: 0
+# Plan-2B R-AB-2: bounded stepped repricing on the normal exit, copied from copytrade-v1.
+exit_reprice_steps: 3
+exit_reprice_tick: 0.05
+
+# Plan-2B R-AB-3: entry fill-rate within the willing-to-pay cap, copied from copytrade-v1.
+max_slippage_abs: 0.05
+max_slippage_pct: 0.05

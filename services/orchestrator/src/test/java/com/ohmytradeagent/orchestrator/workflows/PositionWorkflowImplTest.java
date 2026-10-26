@@ -2,6 +2,7 @@ package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -33,12 +34,15 @@ import com.ohmytradeagent.contract.PartialExitRequest;
 import com.ohmytradeagent.contract.PositionWorkflowInput;
 import com.ohmytradeagent.contract.PremiumTick;
 import com.ohmytradeagent.contract.RiskBreachPayload;
+import com.ohmytradeagent.contract.StrategyConfig;
 import com.ohmytradeagent.contract.SubscribePremiumResult;
 import com.ohmytradeagent.orchestrator.activities.AuditActivities;
 import com.ohmytradeagent.orchestrator.activities.ExecActivities;
 import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
+import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivitiesImpl;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
+import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.enums.v1.WorkflowIdConflictPolicy;
 import io.temporal.client.UpdateOptions;
@@ -52,12 +56,17 @@ import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -5488,6 +5497,266 @@ class PositionWorkflowImplTest {
                 .setTaskQueue(CORE_QUEUE)
                 .setWorkflowId(workflowId)
                 .build());
+  }
+
+  // ---------- #987 phase 2: copytrade-lotto-v1 — expiry-day 15:30 flatten ----------
+
+  private static final ZoneId ET = ZoneId.of("America/New_York");
+  private static final LocalTime LOTTO_CLOSE_ET = LocalTime.of(15, 30);
+
+  /**
+   * #987: a MULTI-DAY lotto lot with no exit post is sold by the every-lot expiry-lead timer at
+   * exactly 15:30 ET on its expiry date — {@code force_close_0dte_et: "15:30"} with {@code
+   * flatten_lead_minutes: 0} — and NOT at 15:00 (copytrade-v1's 30-minute lead). The calendar
+   * Activity is the real {@link MarketCalendarActivitiesImpl} on a clock fixed three days before
+   * expiry, so the armed duration is the production arithmetic; the test then walks virtual time to
+   * 15:00 ET on expiry day (nothing fires) and past 15:30 (the bounded flatten fires with
+   * reason=expiry_lead). Modelled on {@link
+   * #multiDayLot_armsExpiryLeadTimer_flattensViaBoundedLimit_routesToDedicatedKinds}.
+   */
+  @Test
+  void lottoConfig_multiDayLot_flattensAt1530OnExpiryDay() throws Exception {
+    StrategyConfig lotto = repoLottoConfig();
+    assumeTrue(lotto != null, "repo tenants/ dir not found from test working directory");
+    LocalDate expiry = weekdayOnOrAfter(LocalDate.now(ET).plusDays(7));
+    ZonedDateTime entryAt = ZonedDateTime.of(expiry.minusDays(3), LocalTime.of(9, 30), ET);
+    useRealCalendarAt(entryAt);
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-lotto-multiday");
+    WorkflowStub.fromTyped(stub).start(lottoInput(lotto, 4, occFor(expiry)));
+    confirmEntry(stub, 4L);
+    waitForAuditKind("PositionEntered");
+
+    // The lead timer was armed from the config of record: expiry date, lead 0, close 15:30.
+    verify(calendar).durationUntilExpiryFlattenEt(eq(expiry), eq(0L), eq(LOTTO_CLOSE_ET));
+    // Multi-day: the 0DTE expiry-close timer is NOT armed (real calendar returns ZERO off-day).
+    assertThat(captureAll("EodForceFlattenRequested")).isEmpty();
+
+    // 15:00 ET on expiry day — where copytrade-v1's 30-minute lead fires — nothing has happened.
+    // Wall-clock (zoned) arithmetic, not a day count: a DST change inside the window shifts the
+    // elapsed duration by an hour and the calendar correctly targets the WALL-CLOCK 15:30.
+    env.sleep(untilEt(entryAt, expiry, LocalTime.of(15, 0)));
+    Thread.sleep(250); // real-time grace so an early (wrong) timer fire would surface
+    verify(exec, never()).placeOrder(any());
+
+    // 15:31 ET: the lead timer fired at 15:30 and the bounded flatten is placed.
+    env.sleep(Duration.ofMinutes(31));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-lotto-lead", 4L, new BigDecimal("2.45")));
+
+    assertThat(WorkflowStub.fromTyped(stub).getResult(String.class))
+        .isEqualTo("pos-lotto-multiday");
+
+    assertThat(captureKind("ExpiryLeadFlattenRequested").getSubject())
+        .containsEntry("reason", "expiry_lead");
+    assertThat(captureKind("ExpiryLeadForceFlattened").getSubject())
+        .containsEntry("reason", "expiry_lead");
+    assertThat(captureAll("EodForceFlattenRequested")).isEmpty();
+    assertThat(captureAll("ExpiryForceFlattenRequested")).isEmpty();
+
+    OrderIntent flatten = singleSellIntent();
+    assertThat(flatten.getQty()).isEqualTo(4L);
+    assertThat(flatten.getLimitPrice()).as("bounded LIMIT, not market").isNotNull();
+    assertThat(asLong(captureKind("PositionClosed").getSubject().get("remaining_qty")))
+        .isEqualTo(0L);
+  }
+
+  /**
+   * #987: a 0DTE lotto lot is also sold at 15:30 ET, not 15:00. Under the config of record the 0DTE
+   * expiry-close timer ({@code force_close_0dte_et}) and the every-lot lead timer (close − 0 min)
+   * arm for the SAME instant; the epilogue labels the flatten with the expiry-close reason ({@code
+   * expiry} takes precedence over {@code expiry_lead} when both latched in one task,
+   * PositionWorkflowImpl's guarded epilogue), so the dedicated Expiry* kinds carry it.
+   */
+  @Test
+  void lottoConfig_zeroDteLot_flattensAt1530() throws Exception {
+    StrategyConfig lotto = repoLottoConfig();
+    assumeTrue(lotto != null, "repo tenants/ dir not found from test working directory");
+    LocalDate today = LocalDate.now(ET);
+    ZonedDateTime entryAt = ZonedDateTime.of(today, LocalTime.of(9, 30), ET);
+    useRealCalendarAt(entryAt);
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-lotto-0dte");
+    WorkflowStub.fromTyped(stub).start(lottoInput(lotto, 2, occFor(today)));
+    confirmEntry(stub, 2L);
+    waitForAuditKind("PositionEntered");
+
+    verify(calendar).durationUntilExpiryCloseEt(eq(today), eq(LOTTO_CLOSE_ET));
+    verify(calendar).durationUntilExpiryFlattenEt(eq(today), eq(0L), eq(LOTTO_CLOSE_ET));
+
+    // 15:00 ET: nothing fires.
+    env.sleep(untilEt(entryAt, today, LocalTime.of(15, 0)));
+    Thread.sleep(250);
+    verify(exec, never()).placeOrder(any());
+
+    // 15:31 ET: flattened.
+    env.sleep(Duration.ofMinutes(31));
+    waitForPlaceOrderCount(1);
+    stub.onFill(fill("brk-lotto-0dte", 2L, new BigDecimal("2.45")));
+
+    assertThat(WorkflowStub.fromTyped(stub).getResult(String.class)).isEqualTo("pos-lotto-0dte");
+
+    assertThat(captureKind("ExpiryForceFlattenRequested").getSubject())
+        .containsEntry("reason", "expiry");
+    assertThat(captureAll("EodForceFlattenRequested")).isEmpty();
+    OrderIntent flatten = singleSellIntent();
+    assertThat(flatten.getQty()).isEqualTo(2L);
+    assertThat(flatten.getLimitPrice()).as("bounded LIMIT, not market").isNotNull();
+    assertThat(asLong(captureKind("PositionClosed").getSubject().get("remaining_qty")))
+        .isEqualTo(0L);
+  }
+
+  /**
+   * #987: the author posts a second exit while the first (full-close) SELL is still resting. The
+   * second STC is QUEUED ({@code ExitQueued}) behind the in-flight exit; when the first fill drains
+   * the lot the main loop breaks on {@code remainingQty == 0} and the queued request is dropped
+   * without ever reaching the broker. Exactly ONE SELL, and the workflow closes. Modelled on {@link
+   * #queuedSecondExit_emitsExitQueuedAndDrains}.
+   */
+  @Test
+  void lottoConfig_secondStcWhileClosing_queuedThenDropped_singleSell() throws Exception {
+    StrategyConfig lotto = repoLottoConfig();
+    assumeTrue(lotto != null, "repo tenants/ dir not found from test working directory");
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+
+    PositionWorkflow stub = newStub("pos-lotto-double-stc");
+    WorkflowStub.fromTyped(stub).start(lottoInput(lotto, 3, FUTURE_OCC_SYMBOL));
+    confirmEntry(stub, 3L);
+
+    stub.partialExit(lottoExit("lotto-stc-1:0", "pos-lotto-double-stc"));
+    // processOne sets exitInFlight BEFORE placeOrder, so once the mock has been hit the second
+    // signal is guaranteed to observe a busy exit (same sync argument as the modelled test).
+    waitForPlaceOrderCount(1);
+    stub.partialExit(lottoExit("lotto-stc-2:0", "pos-lotto-double-stc"));
+    waitForAuditKind("ExitQueued");
+
+    // The first (full) SELL fills: remaining 3 → 0, the loop breaks, the queued STC is dropped.
+    stub.onFill(fill("brk-lotto-full", 3L, new BigDecimal("2.85")));
+    assertThat(WorkflowStub.fromTyped(stub).getResult(String.class))
+        .isEqualTo("pos-lotto-double-stc");
+
+    OrderIntent sell = singleSellIntent();
+    assertThat(sell.getQty()).isEqualTo(3L);
+    assertThat(sell.getSignalId()).isEqualTo("lotto-stc-1:0");
+    assertThat(sell.getLimitPrice()).isEqualByComparingTo("2.85");
+
+    AuditEvent queued = captureKind("ExitQueued");
+    assertThat(queued.getSubject()).containsEntry("signal_id", "lotto-stc-2:0");
+    assertThat(asLong(queued.getSubject().get("queue_depth"))).isPositive();
+    assertThat(
+            captureAll("PartialExitRequested").stream()
+                .map(e -> e.getSubject().get("signal_id"))
+                .toList())
+        .containsExactly("lotto-stc-1:0");
+    assertThat(captureAll("ExitDuplicateSuppressed")).isEmpty();
+    assertThat(asLong(captureKind("PositionClosed").getSubject().get("remaining_qty")))
+        .isEqualTo(0L);
+  }
+
+  /** The single SELL intent placed in this test, failing if there is not exactly one order. */
+  private OrderIntent singleSellIntent() {
+    ArgumentCaptor<OrderIntent> intents = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, times(1)).placeOrder(intents.capture());
+    OrderIntent only = intents.getValue();
+    assertThat(only.getSide()).isEqualTo(OrderIntent.Side.SELL);
+    return only;
+  }
+
+  /**
+   * A full-close STC under the lotto config (fraction 1.0 is what every lotto exit resolves to).
+   */
+  private PartialExitRequest lottoExit(String signalId, String posWfId) {
+    PartialExitRequest req = partialExitRequest(signalId, posWfId, 1.0);
+    req.setStrategyId("copytrade-lotto-v1");
+    req.setAuthor("TradingTheTrend");
+    req.setRawLine("stop hit on the rest");
+    return req;
+  }
+
+  /**
+   * Child input the parent would mint from the lotto config — the same field-by-field carry-over as
+   * {@code CopytradeSignalWorkflowImpl.startPositionWorkflow} (eod/0dte/min-qty/TTLs/floors/
+   * lead/reprice), so the PositionWorkflow sees exactly what the config of record gives it.
+   */
+  private PositionWorkflowInput lottoInput(StrategyConfig cfg, long qty, String occ) {
+    PositionWorkflowInput in = input(qty);
+    in.setStrategyId(cfg.getStrategyId());
+    in.setContractSymbol(occ);
+    in.setBrokerTarget(PositionWorkflowInput.BrokerTarget.fromValue(cfg.getBrokerTarget().value()));
+    in.setEodForceFlatten(cfg.getEodForceFlatten());
+    in.setForceClose0dteEt(cfg.getForceClose0dteEt());
+    in.setMinPartialQtyBehavior(
+        PositionWorkflowInput.MinPartialQtyBehavior.fromValue(
+            cfg.getMinPartialQtyBehavior().value()));
+    in.setFirstFillTtlSecs(cfg.getPendingTtlPaperSecs());
+    in.setExitFillTtlSecs(cfg.getPendingTtlPaperSecs());
+    in.setExitFloorAbs(cfg.getExitFloorAbs());
+    in.setExitFloorPct(cfg.getExitFloorPct());
+    in.setExpiryDayFloor(cfg.getExpiryDayFloor());
+    in.setFlattenLeadMinutes(cfg.getFlattenLeadMinutes());
+    in.setExitRepriceSteps(cfg.getExitRepriceSteps());
+    in.setExitRepriceTick(cfg.getExitRepriceTick());
+    return in;
+  }
+
+  /**
+   * Routes the two expiry-timer calendar calls through the REAL {@link
+   * MarketCalendarActivitiesImpl} on a clock fixed at {@code nowEt}, so the armed durations are
+   * production arithmetic rather than a stubbed constant.
+   */
+  private void useRealCalendarAt(ZonedDateTime nowEt) {
+    MarketCalendarActivitiesImpl real =
+        new MarketCalendarActivitiesImpl(Clock.fixed(nowEt.toInstant(), ET));
+    when(calendar.durationUntilExpiryFlattenEt(
+            any(), org.mockito.ArgumentMatchers.anyLong(), any()))
+        .thenAnswer(
+            inv -> {
+              LocalDate expiry = inv.getArgument(0);
+              long lead = inv.getArgument(1);
+              LocalTime close = inv.getArgument(2);
+              return real.durationUntilExpiryFlattenEt(expiry, lead, close);
+            });
+    when(calendar.durationUntilExpiryCloseEt(any(), any()))
+        .thenAnswer(
+            inv -> {
+              LocalDate expiry = inv.getArgument(0);
+              LocalTime close = inv.getArgument(1);
+              return real.durationUntilExpiryCloseEt(expiry, close);
+            });
+  }
+
+  private static String occFor(LocalDate expiry) {
+    return "NVDA  " + expiry.format(DateTimeFormatter.ofPattern("yyMMdd")) + "C00140000";
+  }
+
+  /**
+   * Elapsed time from {@code from} to the WALL-CLOCK {@code time} ET on {@code date} (DST-safe).
+   */
+  private static Duration untilEt(ZonedDateTime from, LocalDate date, LocalTime time) {
+    return Duration.between(from, ZonedDateTime.of(date, time, ET));
+  }
+
+  /** The calendar rolls a weekend trigger back to Friday; keep the expiry on a weekday. */
+  private static LocalDate weekdayOnOrAfter(LocalDate d) {
+    while (d.getDayOfWeek() == DayOfWeek.SATURDAY || d.getDayOfWeek() == DayOfWeek.SUNDAY) {
+      d = d.plusDays(1);
+    }
+    return d;
+  }
+
+  /** Loads the dev copytrade-lotto-v1 YAML via the production reader, or null if not locatable. */
+  private static StrategyConfig repoLottoConfig() {
+    Path dir = Path.of("").toAbsolutePath();
+    for (int i = 0; i < 6 && dir != null; i++) {
+      Path candidate = dir.resolve("tenants");
+      if (Files.isDirectory(candidate)) {
+        return new YamlStrategyRegistry(candidate.toString()).get("dev", "copytrade-lotto-v1");
+      }
+      dir = dir.getParent();
+    }
+    return null;
   }
 
   private PositionWorkflowInput input(long qty) {
