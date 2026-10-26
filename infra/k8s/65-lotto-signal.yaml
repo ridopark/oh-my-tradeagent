@@ -1,7 +1,8 @@
 # Lotto signal poller (PLAN-2026-10-26-copytrade-lotto-v1, phase 5; issue #987). Turns new
 # TradingTheTrend posts in #lotto-alerts — already mirrored into the BFF's options_chat_message
 # table by 64-discord-lotto-mirror.yaml — into CopytradeSignalWorkflow starts for the
-# `paper_lotto` / `copytrade-lotto-v1` tenant, exactly as the Discord sidecar does for its channel.
+# `copytrade-lotto-v1` strategy on EVERY tenant that enables it (registry fan-out), exactly as the
+# Discord sidecar does for copytrade-v1.
 #
 # NO Discord session, NO Chromium, NO Playwright: it only polls the BFF's internal
 # /internal/options-chat/messages read with the route-scoped ingest token, so it carries no session
@@ -64,8 +65,21 @@ spec:
             # author_whitelist is the second gate.
             - name: LOTTO_AUTHOR
               value: TradingTheTrend
-            - name: TENANT_ID
-              value: paper_lotto
+            # Fan-out: the strategy is a row ANY tenant can enable (e.g. staging_paper), exactly like
+            # copytrade-v1. The poller reads the enabled (tenant, copytrade-lotto-v1) set from the
+            # api-gateway registry (GET /internal/copytrade-fanout-targets?strategy_id=...) and starts
+            # one workflow per target. Same creds bundle as 55-signal-source-discord.yaml.
+            - name: LOTTO_FANOUT_SOURCE
+              value: registry
+            - name: API_GATEWAY_BASE_URL
+              value: http://api-gateway:8082
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
+            - name: SIGNAL_FANOUT_REFRESH_SECS
+              value: "60"
             - name: STRATEGY_ID
               value: copytrade-lotto-v1
             - name: BFF_INTERNAL_URL
