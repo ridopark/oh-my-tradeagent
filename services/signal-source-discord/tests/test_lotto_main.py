@@ -900,13 +900,10 @@ async def test_targets_refreshed_from_registry_fail_safe(caplog):
     assert gw.requests[0].url.params["strategy_id"] == STRATEGY
     assert gw.requests[0].headers["Authorization"] == f"Bearer {GW_TOKEN}"
 
-    # 5xx and an empty set both retain the last good set.
+    # A 5xx retains the last good set.
     gw.fail_next = [503]
     with caplog.at_level("WARNING", logger="test.lotto"):
         assert await refresher.refresh_once() is False
-    assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
-    gw.targets = []
-    assert await refresher.refresh_once() is False
     assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
     assert any("retaining last good" in r.message for r in caplog.records)
 
@@ -925,6 +922,48 @@ async def test_targets_refreshed_from_registry_fail_safe(caplog):
         is False
     )
     assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+
+
+def _lotto_refresher(gw: FakeGateway, poller: LottoPoller) -> FanoutRefresher:
+    """The exact construction lotto_main uses: allow_empty=True, because lotto has no primary."""
+    return FanoutRefresher(
+        client=gw.client(),
+        apply_targets=poller.update_targets,
+        log=LOG,
+        refresh_secs=60,
+        allow_empty=True,
+    )
+
+
+async def test_empty_registry_set_is_applied_not_retained(caplog):
+    """Nobody-enabled-it / the-last-tenant-disabled-it is a legitimate state: the targets must
+    empty out (no doomed workflows for a tenant that turned the strategy off) and it must not log
+    as an error."""
+    gw = FakeGateway([("paper_lotto", STRATEGY)])
+    poller, _ = make_poller(FakeBff(), Clock(T0), targets=[])
+    refresher = _lotto_refresher(gw, poller)
+    assert await refresher.refresh_once() is True
+    assert poller.targets == [("paper_lotto", STRATEGY)]
+
+    gw.targets = []
+    with caplog.at_level("INFO", logger="test.lotto"):
+        assert await refresher.refresh_once() is True
+    assert poller.targets == []
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("none opted in" in r.message for r in caplog.records)
+
+    # Failed polls still retain (here: the empty set) rather than inventing targets.
+    gw.targets = [("paper_lotto", STRATEGY)]
+    gw.fail_next = [503]
+    assert await refresher.refresh_once() is False
+    assert poller.targets == []
+    # And the fresh deployment with nobody enabled: no ERROR spam, just the INFO line.
+    gw.targets = []
+    caplog.clear()
+    with caplog.at_level("INFO", logger="test.lotto"):
+        for _ in range(5):
+            assert await refresher.refresh_once() is True
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_foreign_strategy_targets_are_refused(caplog):
@@ -1003,12 +1042,17 @@ async def test_one_tenant_emit_failure_does_not_block_the_other(caplog):
 async def test_zero_targets_emits_nothing_and_warns(caplog):
     bff = FakeBff()
     clock = Clock(T0)
+    bff.add(row(T0 - timedelta(seconds=30), "SPY 9/9 650p @ .70"))  # fresh at boot
     poller, emitter = make_poller(bff, clock, targets=[])
-    await poller.boot()
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        await poller.boot()
+    # A gateway outage at startup consuming the boot window must be visible.
+    assert any("no fan-out targets" in r.message and "at boot" in r.message for r in caplog.records)
+    assert emitter.emitted == []
     bff.add(row(T0 - timedelta(seconds=3), "MU 9/9 1050c @ 1.90"))
     with caplog.at_level("WARNING", logger="test.lotto"):
         assert await poller.poll_once() == []
-    assert any("no fan-out targets" in r.message for r in caplog.records)
+    assert any("no fan-out targets" in r.message and "at poll" in r.message for r in caplog.records)
     assert emitter.emitted == []
     # Once targets arrive, the book (rebuilt all along) attributes the next exit correctly.
     poller.update_targets([("paper_lotto", STRATEGY)])

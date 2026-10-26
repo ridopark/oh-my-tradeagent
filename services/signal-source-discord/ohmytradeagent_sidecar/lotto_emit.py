@@ -11,7 +11,8 @@ payload per known ``(tenant_id, strategy_id)`` target — workflow id
 atomically from the fan-out registry (or env). A target whose strategy is not this poller's is
 refused: the registry's ``?strategy_id=`` filter is new, and a copytrade-v1 row must never receive
 lotto signals. The book, the age gate and the expiry-day cutoff are per signal; emits, their
-failures and their retries are per target. With no known targets the poller warns and emits nothing.
+failures and their retries are per target. With no known targets the poller warns (at boot and on
+every poll) and emits nothing.
 
 Three gates decide whether a signal reaches the emitter:
 
@@ -223,18 +224,25 @@ class LottoPoller:
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
             return False
+        # A gateway outage at startup would otherwise consume the boot window's fresh signals
+        # silently; make it visible next to the boot summary.
+        self._warn_if_no_targets("boot")
         try:
             await self._process(rows, boot=True)
         except Exception:  # noqa: BLE001 - per-row guards make this unreachable; belt and braces
             self._log.exception("lotto boot: processing aborted at cursor=%s", self.cursor)
         return True
 
-    async def poll_once(self) -> list[CopytradeSignalPayload]:
+    def _warn_if_no_targets(self, phase: str) -> None:
         if not self._targets:
             self._log.warning(
-                "no fan-out targets known for %s: polling, updating the book, emitting nothing",
+                "no fan-out targets known for %s at %s: updating the book, emitting nothing",
                 self._strategy_id,
+                phase,
             )
+
+    async def poll_once(self) -> list[CopytradeSignalPayload]:
+        self._warn_if_no_targets("poll")
         emitted = await self._retry_pending()
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:

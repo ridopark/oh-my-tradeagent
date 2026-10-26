@@ -9,7 +9,8 @@ Fan-out: ``copytrade-lotto-v1`` is a strategy row any tenant can enable, so the 
 workflow per enabled ``(tenant_id, copytrade-lotto-v1)`` pair. ``LOTTO_FANOUT_SOURCE=registry``
 (default) reads them from api-gateway's ``/internal/copytrade-fanout-targets?strategy_id=…`` with
 ``API_GATEWAY_BASE_URL`` / ``API_GATEWAY_SHARED_TOKEN`` and refreshes every
-``SIGNAL_FANOUT_REFRESH_SECS`` (fail-safe: a failed or empty poll retains the last good set).
+``SIGNAL_FANOUT_REFRESH_SECS`` (fail-safe: a failed poll retains the last good set; an EMPTY set
+is applied, because nobody-enabled-it is a legitimate state for a strategy with no primary row).
 ``LOTTO_FANOUT_SOURCE=env`` takes the comma-separated ``LOTTO_TENANT_IDS`` (``TENANT_ID`` is the
 single-value fallback, also used by ``--replay``).
 
@@ -398,6 +399,10 @@ async def _run() -> int:
             apply_targets=poller.update_targets,
             log=log,
             refresh_secs=refresh_secs,
+            # Lotto has no primary row, so an empty registry set is a legitimate state (nobody
+            # enabled it, or the last tenant turned it off) and must be APPLIED — otherwise the
+            # last tenant could never be removed. Failed polls (5xx, bad token) still retain.
+            allow_empty=True,
         )
         log.info(
             "fan-out source=registry (endpoint=%s strategy=%s refresh=%ss)",
