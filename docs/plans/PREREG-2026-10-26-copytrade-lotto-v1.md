@@ -1,7 +1,7 @@
 # PREREG — 2026-10-26 copytrade-lotto-v1
 
 Forward, pre-registered paper test of copying TradingTheTrend's #lotto-alerts posts (channel
-`880503518878892143`) with strategy `copytrade-lotto-v1` on tenant `paper_lotto` (issue #987, plan
+`880503518878892143`) with strategy `copytrade-lotto-v1` on every tenant that enables it — primary tenant **staging_paper** (issue #987, plan
 `PLAN-2026-10-26-copytrade-lotto-v1.md`). Frozen by the git tag `copytrade-lotto-forward-v1`, which the
 operator creates at go-live; the tag's commit must precede the first fill. **No threshold in this file may
 change after the first fill.** Amendments go in `PREREG-2026-10-26-copytrade-lotto-v1-AMENDMENTS.md`, each
@@ -13,10 +13,12 @@ mean +0.35/$, 95% CI [0.00, +0.80], 89% of the profit in three 0DTE trades. Publ
 transcription cannot be excluded on that history. Only posts mirrored after the freeze can test it.
 
 ## Dates
-- **Go-live date T0** = `occurred_at` of the first `audit_log` row with `tenant_id='paper_lotto'`,
-  `strategy_id='copytrade-lotto-v1'`, `kind='EntryFilled'` (orchestrator DB). It follows the P0-6 flip of
+- **Go-live date T0** = `occurred_at` of the first `audit_log` row with `strategy_id='copytrade-lotto-v1'`,
+  `kind='EntryFilled'`, any tenant (orchestrator DB). M2/M3 are computed per tenant; the primary tenant for the
+  verdict is `staging_paper`. The account is SHARED with that tenant's copytrade mirror and condor, so every
+  strategy metric below reads the strategy's own audit rows (`strategy_id='copytrade-lotto-v1'`), never account equity. It follows the P0-6 flip of
   `LOTTO_DRY_RUN=false`. The operator writes T0 and the account's starting equity E0 (Alpaca
-  `GET /v2/account` → `equity` at T0) into the AMENDMENTS file on the go-live day.
+  `GET /v2/account` → `equity` of the primary tenant's account at T0) into the AMENDMENTS file on the go-live day.
 - **Single look L** = the first trading day on or after T0 + 6 calendar months. No look at returns before
   L. Interim reads are limited to counts and completeness (sections "Kill" and "Compromised data").
 
@@ -51,7 +53,7 @@ on the posted exit prices; unposted remainder per "Sample". Inputs: the forward 
 **M2 — strategy P&L (the issue's bar).** For each strategy record: `r_i = (Σ exit proceeds − entry cost) /
 entry cost`, entry cost = `filled_qty × avg_fill_price × 100` from `EntryFilled`, proceeds =
 `Σ qty_filled × avg_fill_price × 100` over its `PartialExitFilled` rows. Cross-check every fill against
-`order_intent_journal` (`exec_alpaca_paper` DB, `tenant_id='paper_lotto'`, `state='FILLED'`,
+`order_intent_journal` (`exec_alpaca_paper` DB, `strategy_id='copytrade-lotto-v1'`, `state='FILLED'`,
 `filled_qty`, `avg_fill_price`); a mismatch is reported, the audit value is used.
 - **PASS** iff `n_M2 ≥ 12` AND `mean(r_i) > 0`. The bootstrap 95% CI is always reported: `ci_lo > 0` is
   labelled "shown", `ci_hi < 0` "refuted", otherwise "not shown". Also report dollar-weighted
@@ -75,8 +77,11 @@ subset, and **M2 − M3 on the M2 subset = execution slippage per $** (mirror la
   never a FAIL.
 
 ## Kill conditions (stop the paper test early; checked on every trading day by count only)
-- **K1 drawdown.** Alpaca `GET /v2/account` → `equity < 0.75 × E0` on any day.
-- **K2 oversized fill.** Any `audit_log` row, `tenant_id='paper_lotto'`, `kind='EntryFilled'`, with
+- **K1 drawdown.** Cumulative realized strategy P&L (Σ over `copytrade-lotto-v1` lots of proceeds − cost, from the
+  audit rows in M2) `< −0.25 × E0` on any day, OR the tenant's account kill switch trips with the strategy holding a
+  position (`KILL_SWITCH_TRIPPED` audit for the tenant) — the latter is logged as a C-condition, not a kill, if the
+  trip came from another strategy on the shared account.
+- **K2 oversized fill.** Any `audit_log` row, `strategy_id='copytrade-lotto-v1'`, `kind='EntryFilled'`, with
   `(subject->>'filled_qty')::numeric * (subject->>'avg_fill_price')::numeric * 100 > 0.05 * E0`.
 - **K3 stale mirror.** Three consecutive `SignalRejected` rows (ordered by `occurred_at`, no
   `SignalAccepted` between) with `subject->>'reason_code' = 'SIGNAL_TOO_OLD'`.
@@ -92,7 +97,7 @@ A kill ends the test; what was collected is reported at L under the same rules, 
   on a day whose row count is 0. Each gap day is listed with its reason.
 - **C2 missing entries.** `(entry posts − EntryFilled rows) / entry posts > 0.05`, counting every
   `SignalRejected` reason and every entry with no audit row at all. M2 is then "compromised"; M1 is not.
-- **C3 manual order.** Any `audit_log` row for `paper_lotto` with `kind IN ('ForceCloseRequested',
+- **C3 manual order.** Any `audit_log` row for the strategy's tenants with `kind IN ('ForceCloseRequested',
   'OperatorTrimRequested')`, or any Alpaca order (`GET /v2/orders?status=all&after=T0`) whose
   `client_order_id` is not in `order_intent_journal`.
 
