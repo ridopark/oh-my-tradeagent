@@ -32,6 +32,10 @@ transcription cannot be excluded on that history. Only posts mirrored after the 
   `force_close_0dte_et: "15:30"` flatten. r18 used the last bar of expiry day; this is the one deliberate
   difference from `score.py`, stated here.
 - Entries whose contract expires on or after L are excluded from M1–M3 and counted in the report.
+- **Expiry-day late entries are excluded from M1–M3** and counted in the report: an entry post whose contract
+  expires on the posted ET date and whose `posted_at` is at or after the poller's `LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET`
+  (15:25 ET, manifest value at the tag) is never emitted by the strategy (the 15:30 flatten could not cover a late
+  fill), so it is not part of the source sample either. The poller logs these as `skipped_late_expiry_day_entry`.
 
 ## Metrics (every metric is a mean per $1 of entry premium; equal weight per entry)
 **M1 — source stability (the operator's bar).** His-exit return per entry under r18 `score.py` rules:
