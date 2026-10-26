@@ -5,6 +5,14 @@ Runs as its own Deployment (``lotto-signal``) from the SAME image as the trading
 (PR #986) already stored, through the BFF's ingest-token-gated read endpoint (phase 3), and starts
 ``CopytradeSignalWorkflow`` through ``TemporalEmitter`` exactly as ``main.py`` does.
 
+Fan-out: ``copytrade-lotto-v1`` is a strategy row any tenant can enable, so the poller emits one
+workflow per enabled ``(tenant_id, copytrade-lotto-v1)`` pair. ``LOTTO_FANOUT_SOURCE=registry``
+(default) reads them from api-gateway's ``/internal/copytrade-fanout-targets?strategy_id=…`` with
+``API_GATEWAY_BASE_URL`` / ``API_GATEWAY_SHARED_TOKEN`` and refreshes every
+``SIGNAL_FANOUT_REFRESH_SECS`` (fail-safe: a failed or empty poll retains the last good set).
+``LOTTO_FANOUT_SOURCE=env`` takes the comma-separated ``LOTTO_TENANT_IDS`` (``TENANT_ID`` is the
+single-value fallback, also used by ``--replay``).
+
 Temporal is reached through ``TEMPORAL_TARGET`` / ``TEMPORAL_NAMESPACE``, which the
 ``65-lotto-signal.yaml`` manifest sets (as ``55-signal-source-discord.yaml`` does); the in-code
 defaults below exist for local runs only. ``TEMPORAL_TASK_QUEUE`` is unset there and defaults to
@@ -22,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import pathlib
@@ -36,6 +45,7 @@ from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSig
 
 from . import healthz
 from .emitter import Emitter, EmitResult, TemporalEmitter, workflow_id_for
+from .fanout_registry import FanoutRefresher, FanoutRegistryClient
 from .lotto_emit import ChatRow, LottoPoller, parse_cutoff_et
 from .lotto_parser import AUTHOR, LottoBook
 from .runtime import required, setup_logging
@@ -261,16 +271,31 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def strategy_id_from_env() -> str:
+    return os.getenv("STRATEGY_ID", DEFAULT_STRATEGY_ID).strip() or DEFAULT_STRATEGY_ID
+
+
+def targets_from_env() -> list[tuple[str, str]]:
+    """``LOTTO_TENANT_IDS`` (comma-separated), else the single ``TENANT_ID``; each paired with
+    ``STRATEGY_ID``. Fails fast when neither is set."""
+    strategy_id = strategy_id_from_env()
+    raw = os.getenv("LOTTO_TENANT_IDS", "").strip() or os.getenv("TENANT_ID", "").strip()
+    tenants = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tenants:
+        raise SystemExit("LOTTO_TENANT_IDS (or TENANT_ID) is required when the fan-out source is env")
+    return list(dict.fromkeys((t, strategy_id) for t in tenants))
+
+
 def _build_poller(
     *,
     emitter: Emitter,
     dry_run: bool,
     log: logging.Logger,
+    targets: list[tuple[str, str]],
     transport: httpx.BaseTransport | None = None,
 ) -> tuple[LottoPoller, BffMessagesClient]:
     bff_url = required("BFF_INTERNAL_URL")
     token = required("OPTIONS_CHAT_INGEST_TOKEN")
-    tenant_id = required("TENANT_ID")
     author = os.getenv("LOTTO_AUTHOR", AUTHOR).strip() or AUTHOR
     client = BffMessagesClient(
         base_url=bff_url,
@@ -286,8 +311,8 @@ def _build_poller(
         book=LottoBook(author=author),
         channel_id=os.getenv("LOTTO_CHANNEL_ID", DEFAULT_CHANNEL_ID).strip() or DEFAULT_CHANNEL_ID,
         author=author,
-        tenant_id=tenant_id,
-        strategy_id=os.getenv("STRATEGY_ID", DEFAULT_STRATEGY_ID).strip() or DEFAULT_STRATEGY_ID,
+        strategy_id=strategy_id_from_env(),
+        targets=targets,
         lookback_days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14")),
         emit_max_age_secs=float(os.getenv("LOTTO_EMIT_MAX_AGE_SECS", "120")),
         expiry_day_entry_cutoff_et=parse_cutoff_et(
@@ -303,7 +328,9 @@ async def replay_main(since: datetime | None, transport: httpx.BaseTransport | N
     load_dotenv()
     log = setup_logging(os.getenv("LOG_LEVEL", "WARNING"), "lotto_replay")
     emitter = DryRunEmitter()
-    poller, client = _build_poller(emitter=emitter, dry_run=True, log=log, transport=transport)
+    poller, client = _build_poller(
+        emitter=emitter, dry_run=True, log=log, targets=targets_from_env(), transport=transport
+    )
     if since is None:
         since = datetime.now(timezone.utc) - timedelta(
             days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14"))
@@ -318,7 +345,8 @@ async def replay_main(since: datetime | None, transport: httpx.BaseTransport | N
     for p in payloads:
         print(
             f"{p.action.value} {p.ticker} {p.expiry} {p.strike}{p.right.value} @ {p.price} "
-            f"posted_at={p.posted_at.isoformat()} signal_id={p.signal_id} text={p.raw_line!r}"
+            f"posted_at={p.posted_at.isoformat()} tenant={p.tenant_id} signal_id={p.signal_id} "
+            f"text={p.raw_line!r}"
         )
     print(f"replay since {since.isoformat()}: would-emit {len(payloads)} signal(s)")
     return 0
@@ -336,6 +364,19 @@ async def _run() -> int:
     heartbeat_path = state_dir / "heartbeat"
     healthz.start_from_env(heartbeat_path, log)
 
+    # Fan-out config is validated BEFORE dialing Temporal so a missing var fails fast without
+    # leaving a connected emitter unclosed (main.py's discipline).
+    fanout_source = os.getenv("LOTTO_FANOUT_SOURCE", "registry").strip().lower()
+    if fanout_source not in ("env", "registry"):
+        raise SystemExit("LOTTO_FANOUT_SOURCE must be 'env' or 'registry'")
+    targets: list[tuple[str, str]] = []
+    refresher: FanoutRefresher | None = None
+    if fanout_source == "env":
+        targets = targets_from_env()
+    else:
+        gw_base_url = required("API_GATEWAY_BASE_URL")
+        gw_token = required("API_GATEWAY_SHARED_TOKEN")
+
     emitter = await build_emitter(
         dry_run=dry_run,
         target=os.getenv("TEMPORAL_TARGET", "localhost:7233"),
@@ -344,10 +385,28 @@ async def _run() -> int:
         log=log,
     )
     try:
-        poller, client = _build_poller(emitter=emitter, dry_run=dry_run, log=log)
+        poller, client = _build_poller(emitter=emitter, dry_run=dry_run, log=log, targets=targets)
     except SystemExit:
         await emitter.close()
         raise
+    if fanout_source == "registry":
+        refresh_secs = float(os.getenv("SIGNAL_FANOUT_REFRESH_SECS", "60"))
+        refresher = FanoutRefresher(
+            client=FanoutRegistryClient(
+                base_url=gw_base_url, token=gw_token, strategy_id=strategy_id_from_env()
+            ),
+            apply_targets=poller.update_targets,
+            log=log,
+            refresh_secs=refresh_secs,
+        )
+        log.info(
+            "fan-out source=registry (endpoint=%s strategy=%s refresh=%ss)",
+            gw_base_url,
+            strategy_id_from_env(),
+            refresh_secs,
+        )
+    else:
+        log.info("fan-out source=env targets=%s", targets)
     log.info(
         "lotto poller starting (dry_run=%s poll=%ss cursor_lookback=%s)",
         dry_run,
@@ -355,7 +414,7 @@ async def _run() -> int:
         os.getenv("LOTTO_LOOKBACK_DAYS", "14"),
     )
     try:
-        await run_loop(poller, heartbeat_path, poll_interval, log=log)
+        await run_loop(poller, heartbeat_path, poll_interval, log=log, refresher=refresher)
     finally:
         await client.aclose()
         await emitter.close()
@@ -369,25 +428,47 @@ async def run_loop(
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     log: logging.Logger = logging.getLogger("lotto_signal"),
+    refresher: FanoutRefresher | None = None,
 ) -> None:
     """Boot, then poll forever. The liveness probe reads ``heartbeat_path``'s mtime (stale after
     120s, ~150s from container start), so it is touched BEFORE the lookback rebuild — several BFF
     reads — and after every iteration whatever the BFF answered: a dark or erroring BFF must log
-    its cause, not kill-loop the pod."""
+    its cause, not kill-loop the pod.
+
+    With a ``refresher``, the fan-out targets are fetched once BEFORE boot (so boot's in-window
+    emits already know their tenants) and then refreshed on an isolated sibling task whose
+    failure is logged, never propagated — the same shape ``main.py`` gives its refresher."""
     heartbeat_path.touch()
+    if refresher is not None:
+        await refresher.refresh_once()
+        heartbeat_path.touch()
     # Boot must see the lookback window before polling starts; until the BFF answers, keep the
     # probe alive and retry rather than start from an empty book.
     while not await poller.boot():
         heartbeat_path.touch()
         await sleep(poll_interval)
     heartbeat_path.touch()
-    while True:
-        try:
-            await poller.poll_once()
-        except Exception:  # noqa: BLE001 - same discipline as watcher.py's tick loop
-            log.exception("lotto poll error")
-        heartbeat_path.touch()
-        await sleep(poll_interval)
+    refresh_task: asyncio.Task[None] | None = None
+    if refresher is not None:
+        refresh_task = asyncio.create_task(refresher.run(), name="lotto-fanout-refresher")
+        refresh_task.add_done_callback(
+            lambda t: log.error("fan-out refresher exited: %r", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    try:
+        while True:
+            try:
+                await poller.poll_once()
+            except Exception:  # noqa: BLE001 - same discipline as watcher.py's tick loop
+                log.exception("lotto poll error")
+            heartbeat_path.touch()
+            await sleep(poll_interval)
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
 
 
 def main(argv: list[str] | None = None) -> None:

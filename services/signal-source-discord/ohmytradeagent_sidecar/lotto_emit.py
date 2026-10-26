@@ -5,6 +5,14 @@
 the resulting ``LottoSignal``s through the same ``Emitter`` Protocol the Discord watcher uses, so
 the orchestrator sees payloads shaped exactly like ``watcher.py``'s.
 
+Fan-out: ``copytrade-lotto-v1`` is a strategy row any tenant can enable, so each signal becomes one
+payload per known ``(tenant_id, strategy_id)`` target — workflow id
+``t-<tenant>/s-copytrade-lotto-v1/sig/<msg>:<k>`` — and ``update_targets`` rebinds the set
+atomically from the fan-out registry (or env). A target whose strategy is not this poller's is
+refused: the registry's ``?strategy_id=`` filter is new, and a copytrade-v1 row must never receive
+lotto signals. The book, the age gate and the expiry-day cutoff are per signal; emits, their
+failures and their retries are per target. With no known targets the poller warns and emits nothing.
+
 Three gates decide whether a signal reaches the emitter:
 
 * **Age.** Only signals whose ``posted_at`` is at most ``emit_max_age_secs`` old are emitted.
@@ -39,7 +47,7 @@ contract and drop it. There is no cursor persistence: a restart re-reads the loo
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from typing import Protocol
@@ -158,8 +166,8 @@ class LottoPoller:
         book: LottoBook,
         channel_id: str,
         author: str,
-        tenant_id: str,
         strategy_id: str,
+        targets: Sequence[tuple[str, str]] = (),
         lookback_days: float,
         emit_max_age_secs: float,
         dry_run: bool,
@@ -172,8 +180,9 @@ class LottoPoller:
         self._book = book
         self._channel_id = channel_id
         self._author = author
-        self._tenant_id = tenant_id
         self._strategy_id = strategy_id
+        self._targets: list[tuple[str, str]] = []
+        self.update_targets(list(targets))
         self._lookback = timedelta(days=lookback_days)
         self._emit_max_age = timedelta(seconds=emit_max_age_secs)
         self._dry_run = dry_run
@@ -183,11 +192,28 @@ class LottoPoller:
         self.cursor: int = 0
         self._pending: list[CopytradeSignalPayload] = []  # starts that failed, retried next poll
 
-    def _late_expiry_day_entry(self, payload: CopytradeSignalPayload) -> bool:
-        if payload.action is not Action.bto:
+    @property
+    def targets(self) -> list[tuple[str, str]]:
+        return self._targets
+
+    def update_targets(self, targets: list[tuple[str, str]]) -> None:
+        """Atomically rebind the fan-out set (order-stable dedupe). Targets for another strategy
+        are refused, never silently routed: lotto signals into a copytrade-v1 workflow would be
+        a real-money mis-route."""
+        foreign = [t for t in targets if t[1] != self._strategy_id]
+        if foreign:
+            self._log.warning(
+                "fan-out targets for another strategy refused (want %s): %s",
+                self._strategy_id,
+                foreign,
+            )
+        self._targets = list(dict.fromkeys(t for t in targets if t[1] == self._strategy_id))
+
+    def _late_expiry_day_entry(self, sig: LottoSignal, posted_at: datetime) -> bool:
+        if sig.action != "BTO":
             return False
-        posted_et = payload.posted_at.astimezone(_ET)
-        return payload.expiry == posted_et.date() and posted_et.time() >= self._entry_cutoff_et
+        posted_et = posted_at.astimezone(_ET)
+        return sig.expiry == posted_et.date() and posted_et.time() >= self._entry_cutoff_et
 
     async def boot(self) -> bool:
         """Rebuild the book from the lookback window; only rows still inside the age window emit.
@@ -204,6 +230,11 @@ class LottoPoller:
         return True
 
     async def poll_once(self) -> list[CopytradeSignalPayload]:
+        if not self._targets:
+            self._log.warning(
+                "no fan-out targets known for %s: polling, updating the book, emitting nothing",
+                self._strategy_id,
+            )
         emitted = await self._retry_pending()
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
@@ -246,18 +277,26 @@ class LottoPoller:
             self.cursor = max(self.cursor, int(row.message_id))
             if row.malformed or row.author_name != self._author:
                 continue
+            # Snapshot so a concurrent registry refresh (an atomic rebind) cannot tear this row.
+            targets = self._targets
             try:
                 signals = self._book.apply(
                     row.message_id, row.author_name, row.posted_at, row.content, row.reply_to_id
                 )
-                payloads = [
-                    to_payload(
+                fanned = [
+                    (
                         sig,
-                        message_id=row.message_id,
-                        posted_at=row.posted_at,
-                        tenant_id=self._tenant_id,
-                        strategy_id=self._strategy_id,
-                        author=self._author,
+                        [
+                            to_payload(
+                                sig,
+                                message_id=row.message_id,
+                                posted_at=row.posted_at,
+                                tenant_id=tenant_id,
+                                strategy_id=strategy_id,
+                                author=self._author,
+                            )
+                            for tenant_id, strategy_id in targets
+                        ],
                     )
                     for sig in signals
                 ]
@@ -269,7 +308,7 @@ class LottoPoller:
                 )
                 continue
             fresh = not age_gated or self._clock() - row.posted_at <= self._emit_max_age
-            for payload in payloads:
+            for sig, payloads in fanned:
                 if not fresh:
                     stale += 1
                     # At boot, stale rows are the expected lookback history (one INFO summary
@@ -278,26 +317,27 @@ class LottoPoller:
                     self._log.log(
                         logging.DEBUG if boot else logging.WARNING,
                         "stale signal %s (%s %s posted %s) updated state only, not emitted",
-                        payload.signal_id,
-                        payload.action.value,
-                        payload.ticker,
-                        payload.posted_at.isoformat(),
+                        sig.signal_id,
+                        sig.action,
+                        sig.ticker,
+                        row.posted_at.isoformat(),
                     )
                     continue
-                if self._late_expiry_day_entry(payload):
+                if self._late_expiry_day_entry(sig, row.posted_at):
                     self._log.warning(
                         "skipped_late_expiry_day_entry %s (%s %s %s expires today, posted %s ET "
                         ">= cutoff %s) book updated, not emitted",
-                        payload.signal_id,
-                        payload.ticker,
-                        payload.strike,
-                        payload.right.value,
-                        payload.posted_at.astimezone(_ET).strftime("%H:%M"),
+                        sig.signal_id,
+                        sig.ticker,
+                        sig.strike,
+                        sig.right,
+                        row.posted_at.astimezone(_ET).strftime("%H:%M"),
                         self._entry_cutoff_et.strftime("%H:%M"),
                     )
                     continue
-                if await self._emit_one(payload):
-                    emitted.append(payload)
+                for payload in payloads:
+                    if await self._emit_one(payload):
+                        emitted.append(payload)
         if boot:
             self._log.info(
                 "lotto boot: %d rows, %d stale skipped, %d emitted, cursor=%s",
@@ -315,10 +355,11 @@ class LottoPoller:
             result = await self._emitter.emit(payload)
         except Exception:  # noqa: BLE001 - Temporal RPC errors are transient; retry next poll
             self._log.exception(
-                "lotto emit failed for %s (%s %s), will retry next poll",
+                "lotto emit failed for %s (%s %s tenant=%s), will retry next poll",
                 payload.signal_id,
                 payload.action.value,
                 payload.ticker,
+                payload.tenant_id,
             )
             self._pending.append(payload)
             return False

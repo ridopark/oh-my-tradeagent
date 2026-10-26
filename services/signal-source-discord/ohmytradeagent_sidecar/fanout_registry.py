@@ -74,9 +74,13 @@ class FanoutRegistryClient:
         client: httpx.AsyncClient | None = None,
         timeout: float = 10.0,
         path: str = FANOUT_TARGETS_PATH,
+        strategy_id: str | None = None,
     ) -> None:
         self._token = token
         self._path = path
+        # Optional ``?strategy_id=`` filter (phase 3b of PLAN-2026-10-26-copytrade-lotto-v1). None
+        # sends no param, so the gateway's default (copytrade-v1) applies — byte-identical to today.
+        self._strategy_id = strategy_id
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=timeout
@@ -85,6 +89,7 @@ class FanoutRegistryClient:
     async def fetch_targets(self) -> list[_Target]:
         resp = await self._client.get(
             self._path,
+            params={"strategy_id": self._strategy_id} if self._strategy_id else None,
             headers={"Authorization": f"Bearer {self._token}"},
         )
         resp.raise_for_status()

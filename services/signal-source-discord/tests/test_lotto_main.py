@@ -20,6 +20,7 @@ from test_lotto_parser import AUTHOR, load_messages
 
 from ohmytradeagent_sidecar import lotto_main
 from ohmytradeagent_sidecar.emitter import InMemoryEmitter, workflow_id_for
+from ohmytradeagent_sidecar.fanout_registry import FanoutRefresher, FanoutRegistryClient
 from ohmytradeagent_sidecar.lotto_emit import (
     ChatRow,
     LottoPoller,
@@ -121,6 +122,7 @@ def make_poller(
     emit_max_age_secs: float = 120,
     dry_run: bool = True,
     emitter: InMemoryEmitter | None = None,
+    targets: list[tuple[str, str]] | None = None,
 ) -> tuple[LottoPoller, InMemoryEmitter]:
     client = BffMessagesClient(
         base_url="http://bff:8083",
@@ -135,8 +137,8 @@ def make_poller(
         book=LottoBook(author=AUTHOR),
         channel_id=CHANNEL,
         author=AUTHOR,
-        tenant_id=TENANT,
         strategy_id=STRATEGY,
+        targets=[(TENANT, STRATEGY)] if targets is None else targets,
         lookback_days=14,
         emit_max_age_secs=emit_max_age_secs,
         dry_run=dry_run,
@@ -658,8 +660,8 @@ async def test_heartbeat_touched_at_startup_and_every_cycle(tmp_path):
         book=LottoBook(author=AUTHOR),
         channel_id=CHANNEL,
         author=AUTHOR,
-        tenant_id=TENANT,
         strategy_id=STRATEGY,
+        targets=[(TENANT, STRATEGY)],
         lookback_days=14,
         emit_max_age_secs=120,
         dry_run=True,
@@ -837,6 +839,220 @@ def test_snowflake_roundtrip():
     sf = snowflake_at(T0)
     assert ChatRow.snowflake_time(str(sf)) == T0
     assert snowflake_at(T0 + timedelta(seconds=1)) > sf
+
+
+# ---------------------------------------------------------------------------
+# Fan-out targets
+# ---------------------------------------------------------------------------
+
+GW_TOKEN = "gw-token"
+
+
+class FakeGateway:
+    def __init__(self, targets: list[tuple[str, str]]) -> None:
+        self.targets = targets
+        self.requests: list[httpx.Request] = []
+        self.fail_next: list[int] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.fail_next:
+            return httpx.Response(self.fail_next.pop(0), json={"error": "injected"})
+        if request.headers.get("Authorization") != f"Bearer {GW_TOKEN}":
+            return httpx.Response(401, json={"error": "unauthorized"})
+        assert request.url.path == "/internal/copytrade-fanout-targets"
+        return httpx.Response(
+            200,
+            json={
+                "targets": [{"tenant_id": t, "strategy_id": s} for t, s in self.targets],
+                "count": len(self.targets),
+            },
+        )
+
+    def client(self, strategy_id: str | None = STRATEGY) -> FanoutRegistryClient:
+        return FanoutRegistryClient(
+            base_url="http://gw:8082",
+            token=GW_TOKEN,
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(self.handler), base_url="http://gw:8082"
+            ),
+            strategy_id=strategy_id,
+        )
+
+
+async def test_fanout_client_sends_strategy_id_param_only_when_set():
+    gw = FakeGateway([("paper_lotto", STRATEGY)])
+    assert await gw.client().fetch_targets() == [("paper_lotto", STRATEGY)]
+    assert gw.requests[-1].url.params["strategy_id"] == STRATEGY
+    # Backward compatible: None sends no param (the gateway default, copytrade-v1, applies).
+    await gw.client(strategy_id=None).fetch_targets()
+    assert "strategy_id" not in gw.requests[-1].url.params
+
+
+async def test_targets_refreshed_from_registry_fail_safe(caplog):
+    gw = FakeGateway([("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)])
+    poller, _ = make_poller(FakeBff(), Clock(T0), targets=[])
+    refresher = FanoutRefresher(
+        client=gw.client(), apply_targets=poller.update_targets, log=LOG, refresh_secs=60
+    )
+    assert await refresher.refresh_once() is True
+    assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+    assert gw.requests[0].url.params["strategy_id"] == STRATEGY
+    assert gw.requests[0].headers["Authorization"] == f"Bearer {GW_TOKEN}"
+
+    # 5xx and an empty set both retain the last good set.
+    gw.fail_next = [503]
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        assert await refresher.refresh_once() is False
+    assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+    gw.targets = []
+    assert await refresher.refresh_once() is False
+    assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+    assert any("retaining last good" in r.message for r in caplog.records)
+
+    # A wrong token is a failed poll too.
+    bad = FanoutRegistryClient(
+        base_url="http://gw:8082",
+        token="wrong",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(gw.handler), base_url="http://gw:8082"),
+        strategy_id=STRATEGY,
+    )
+    gw.targets = [("other", STRATEGY)]
+    assert (
+        await FanoutRefresher(
+            client=bad, apply_targets=poller.update_targets, log=LOG, refresh_secs=60
+        ).refresh_once()
+        is False
+    )
+    assert poller.targets == [("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+
+
+def test_foreign_strategy_targets_are_refused(caplog):
+    poller, _ = make_poller(FakeBff(), Clock(T0), targets=[])
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        poller.update_targets(
+            [("prod_real", "copytrade-v1"), ("staging_paper", STRATEGY), ("staging_paper", STRATEGY)]
+        )
+    assert poller.targets == [("staging_paper", STRATEGY)]
+    assert any("copytrade-v1" in r.message and "refused" in r.message for r in caplog.records)
+
+
+async def test_two_tenants_two_workflow_ids_per_signal():
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, emitter = make_poller(
+        bff, clock, targets=[("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)]
+    )
+    await poller.boot()
+    entry = bff.add(row(T0 - timedelta(seconds=6), "MU 9/9 1050c @ 1.90"))
+    bff.add(row(T0 - timedelta(seconds=3), "2.35 taking some"))
+    emitted = await poller.poll_once()
+    assert [(p.action.value, p.tenant_id) for p in emitted] == [
+        ("BTO", "paper_lotto"),
+        ("BTO", "staging_paper"),
+        ("STC", "paper_lotto"),
+        ("STC", "staging_paper"),
+    ]
+    assert {workflow_id_for(p) for p in emitted[:2]} == {
+        f"t-paper_lotto/s-copytrade-lotto-v1/sig/{entry['message_id']}:0",
+        f"t-staging_paper/s-copytrade-lotto-v1/sig/{entry['message_id']}:0",
+    }
+    assert all(p.strategy_id == STRATEGY for p in emitted)
+    assert len(emitter.emitted) == 4
+
+
+class TenantFlakyEmitter:
+    """Fails the first emit for one tenant only."""
+
+    def __init__(self, inner: InMemoryEmitter, tenant_id: str) -> None:
+        self.inner = inner
+        self.tenant_id = tenant_id
+        self.failed = False
+
+    async def emit(self, payload):
+        if payload.tenant_id == self.tenant_id and not self.failed:
+            self.failed = True
+            raise RuntimeError("rpc unavailable")
+        return await self.inner.emit(payload)
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_one_tenant_emit_failure_does_not_block_the_other(caplog):
+    bff = FakeBff()
+    clock = Clock(T0)
+    inner = InMemoryEmitter()
+    poller, _ = make_poller(
+        bff,
+        clock,
+        emitter=TenantFlakyEmitter(inner, "staging_paper"),  # type: ignore[arg-type]
+        targets=[("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)],
+    )
+    await poller.boot()
+    bff.add(row(T0 - timedelta(seconds=3), "MU 9/9 1050c @ 1.90"))
+    with caplog.at_level("ERROR", logger="test.lotto"):
+        emitted = await poller.poll_once()
+    assert [p.tenant_id for p in emitted] == ["paper_lotto"]
+    assert any("tenant=staging_paper" in r.message for r in caplog.records)
+    # Next poll retries only the parked tenant.
+    assert [p.tenant_id for p in await poller.poll_once()] == ["staging_paper"]
+    assert [p.tenant_id for p in inner.emitted] == ["paper_lotto", "staging_paper"]
+
+
+async def test_zero_targets_emits_nothing_and_warns(caplog):
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, emitter = make_poller(bff, clock, targets=[])
+    await poller.boot()
+    bff.add(row(T0 - timedelta(seconds=3), "MU 9/9 1050c @ 1.90"))
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        assert await poller.poll_once() == []
+    assert any("no fan-out targets" in r.message for r in caplog.records)
+    assert emitter.emitted == []
+    # Once targets arrive, the book (rebuilt all along) attributes the next exit correctly.
+    poller.update_targets([("paper_lotto", STRATEGY)])
+    bff.add(row(T0 - timedelta(seconds=1), "2.35 taking some"))
+    assert [(p.action.value, p.ticker) for p in await poller.poll_once()] == [("STC", "MU")]
+
+
+def test_env_mode_targets(monkeypatch):
+    monkeypatch.delenv("LOTTO_TENANT_IDS", raising=False)
+    monkeypatch.delenv("TENANT_ID", raising=False)
+    monkeypatch.setenv("STRATEGY_ID", STRATEGY)
+    with pytest.raises(SystemExit):
+        lotto_main.targets_from_env()
+    monkeypatch.setenv("TENANT_ID", "paper_lotto")
+    assert lotto_main.targets_from_env() == [("paper_lotto", STRATEGY)]
+    monkeypatch.setenv("LOTTO_TENANT_IDS", " paper_lotto, staging_paper ,paper_lotto")
+    assert lotto_main.targets_from_env() == [
+        ("paper_lotto", STRATEGY),
+        ("staging_paper", STRATEGY),
+    ]
+
+
+async def test_run_loop_refreshes_targets_before_boot(tmp_path):
+    """Boot's in-window emits must already know their tenants: one refresh precedes boot."""
+    gw = FakeGateway([("paper_lotto", STRATEGY), ("staging_paper", STRATEGY)])
+    bff = FakeBff()
+    bff.add(row(T0 - timedelta(seconds=30), "MU 9/9 1050c @ 1.90"))
+    poller, emitter = make_poller(bff, Clock(T0), targets=[])
+    refresher = FanoutRefresher(
+        client=gw.client(), apply_targets=poller.update_targets, log=LOG, refresh_secs=60
+    )
+
+    class Stop(Exception):
+        pass
+
+    async def stop_sleep(_secs: float) -> None:
+        raise Stop
+
+    with pytest.raises(Stop):
+        await lotto_main.run_loop(
+            poller, tmp_path / "heartbeat", 5.0, sleep=stop_sleep, refresher=refresher
+        )
+    assert [p.tenant_id for p in emitter.emitted] == ["paper_lotto", "staging_paper"]
+    assert len(gw.requests) >= 1
 
 
 # ---------------------------------------------------------------------------
