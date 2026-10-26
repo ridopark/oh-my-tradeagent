@@ -231,7 +231,7 @@ def _build_poller(
         lookback_days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14")),
         emit_max_age_secs=float(os.getenv("LOTTO_EMIT_MAX_AGE_SECS", "120")),
         expiry_day_entry_cutoff_et=parse_cutoff_et(
-            os.getenv("LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET", "15:20")
+            os.getenv("LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET", "15:25")
         ),
         dry_run=dry_run,
         log=log,
@@ -239,9 +239,7 @@ def _build_poller(
     return poller, client
 
 
-async def replay_main(
-    since: datetime | None, transport: httpx.BaseTransport | None = None
-) -> int:
+async def replay_main(since: datetime | None, transport: httpx.BaseTransport | None = None) -> int:
     load_dotenv()
     log = setup_logging(os.getenv("LOG_LEVEL", "WARNING"), "lotto_replay")
     emitter = InMemoryEmitter()

@@ -15,9 +15,10 @@ Three gates decide whether a signal reaches the emitter:
   ``REJECT_DUPLICATE`` on the deterministic workflow id dedupes anything the previous process
   already started.
 * **Expiry-day entry cutoff.** A BTO on a contract expiring on the posted ET date is not emitted
-  at or after ``expiry_day_entry_cutoff_et`` (default 15:20 ET): a lot that fills after the
-  15:30 expiry flatten gets no flatten timer in PositionWorkflowImpl and is marked worthless while
-  the broker position stays open. The book still records the entry so later exit posts attribute
+  at or after ``expiry_day_entry_cutoff_et`` (default 15:25 ET, five minutes before the 15:30
+  flatten covers the paper pending TTL): a lot that fills after the expiry flatten gets no
+  flatten timer in PositionWorkflowImpl and is marked worthless while the broker position stays
+  open. The book still records the entry so later exit posts attribute
   to it (and become orchestrator no-ops) instead of landing on an older contract. Exits are never
   cut off.
 
@@ -48,7 +49,7 @@ from .lotto_parser import LottoBook, LottoSignal
 
 DISCORD_EPOCH_MS = 1420070400000
 _ET = ZoneInfo("America/New_York")
-DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET = time(15, 20)
+DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET = time(15, 25)
 
 
 def parse_cutoff_et(raw: str) -> time:

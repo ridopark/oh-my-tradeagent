@@ -380,14 +380,16 @@ async def test_dry_run_never_touches_temporal(monkeypatch, caplog):
     assert len(emitter.emitted) == 1
 
 
-@pytest.mark.parametrize("raw,expected", [("true", True), ("TRUE", True), ("", True), ("false", False)])
+@pytest.mark.parametrize(
+    "raw,expected", [("true", True), ("TRUE", True), ("", True), ("false", False)]
+)
 def test_dry_run_env_is_fail_safe(raw, expected):
     assert lotto_main.parse_dry_run(raw) is expected
 
 
 async def test_expiry_day_bto_after_cutoff_not_emitted(caplog):
     """A lot that fills after the 15:30 expiry flatten gets no flatten timer in the orchestrator,
-    so an expiry-day entry posted at/after the cutoff (default 15:20 ET) is dropped here. The
+    so an expiry-day entry posted at/after the cutoff (default 15:25 ET) is dropped here. The
     book still records it so the later exit is a no-op on THAT contract, not a mis-attribution."""
     et = ZoneInfo("America/New_York")
     bff = FakeBff()
@@ -398,14 +400,14 @@ async def test_expiry_day_bto_after_cutoff_not_emitted(caplog):
     def at(hh: int, mm: int) -> datetime:
         return datetime(2026, 9, 4, hh, mm, tzinfo=et).astimezone(timezone.utc)
 
-    # 0DTE at 15:19 ET → BTO.
-    clock.now = at(15, 19) + timedelta(seconds=5)
-    bff.add(row(at(15, 19), "QQQ 0dte 500p @ .50"))
+    # 0DTE at 15:24 ET → BTO.
+    clock.now = at(15, 24) + timedelta(seconds=5)
+    bff.add(row(at(15, 24), "QQQ 0dte 500p @ .50"))
     assert [p.action.value for p in await poller.poll_once()] == ["BTO"]
 
-    # 0DTE at 15:25 ET → no BTO, warning logged.
-    clock.now = at(15, 25) + timedelta(seconds=5)
-    late = bff.add(row(at(15, 25), "SPY 0dte 650p @ .70"))
+    # 0DTE at 15:26 ET → no BTO, warning logged.
+    clock.now = at(15, 26) + timedelta(seconds=5)
+    late = bff.add(row(at(15, 26), "SPY 0dte 650p @ .70"))
     with caplog.at_level("WARNING", logger="test.lotto"):
         assert await poller.poll_once() == []
     assert any(
@@ -431,7 +433,7 @@ async def test_expiry_day_bto_after_cutoff_not_emitted(caplog):
 
 
 def test_parse_cutoff_et():
-    assert parse_cutoff_et("15:20") == time(15, 20)
+    assert parse_cutoff_et("15:25") == time(15, 25)
     assert parse_cutoff_et(" 9:05 ") == time(9, 5)
 
 
@@ -616,15 +618,14 @@ def _fixture_rows() -> list[dict]:
     ]
 
 
-# The one fixture entry the expiry-day cutoff drops: the roll INTO MU 9/04 1010c was posted at
-# 15:22 ET on 9/04 (trades.csv #20). Its STC half (closing the 1015c) and every later exit on the
-# 1010c are still emitted.
-LATE_EXPIRY_DAY_ENTRY = "MU260904C01010000"
+# The latest expiry-day entry in the fixture: the roll INTO MU 9/04 1010c, posted 15:22 ET on
+# 9/04 (trades.csv #20, one of the three runners). It is in-sample at the 15:25 default and is
+# the first thing a tighter cutoff would drop.
+LATEST_EXPIRY_DAY_ENTRY = "MU260904C01010000"
 
 
 def _expected_shapes() -> list[tuple[str, str, float | None]]:
-    """(action, contract, posted price) per golden row, expanded to the signal stream the poller
-    emits: the golden labels minus the late expiry-day entry."""
+    """(action, contract, posted price) per golden row, expanded to the signal stream."""
     expected = json.loads((FIXTURES / "ttt_expected.json").read_text())
     out: list[tuple[str, str, float | None]] = []
     for e in expected:
@@ -635,8 +636,7 @@ def _expected_shapes() -> list[tuple[str, str, float | None]]:
         elif e["label"] == "ROLL":
             # The golden row names the NEW contract; the closed one is checked below.
             out.append(("STC", None, None))
-            if e["contract"] != LATE_EXPIRY_DAY_ENTRY:
-                out.append(("BTO", e["contract"], e["price"]))
+            out.append(("BTO", e["contract"], e["price"]))
     return out
 
 
@@ -670,25 +670,17 @@ async def test_fixture_end_to_end():
             assert g[1] == w[1]
         if w[2] is not None:
             assert g[2] == w[2]
-    # 26 golden BTOs minus the late expiry-day roll leg.
-    assert sum(1 for a, _, _ in got if a == "BTO") == 25
+    assert sum(1 for a, _, _ in got if a == "BTO") == 26
     assert all(
         workflow_id_for(p).startswith("t-paper_lotto/s-copytrade-lotto-v1/sig/")
         for p in emitter.emitted
     )
-    # The roll: STC on the 1015c emitted, BTO into the 1010c cut off, later 1010c exits emitted.
+    # The roll (15:22 ET, inside the 15:25 cutoff): STC on the 1015c then BTO into the 1010c.
     rolled = [p for p in emitter.emitted if p.signal_id.endswith(":1")]
-    assert rolled == []
-    assert any(
-        p.action.value == "STC" and _payload_contract(p) == "MU260904C01015000"
-        for p in emitter.emitted
-    )
-    late_exits = [
-        p
-        for p in emitter.emitted
-        if _payload_contract(p) == LATE_EXPIRY_DAY_ENTRY
-    ]
-    assert late_exits and all(p.action.value == "STC" for p in late_exits)
+    assert len(rolled) == 1 and _payload_contract(rolled[0]) == LATEST_EXPIRY_DAY_ENTRY
+    roll_stc = emitter.emitted[emitter.emitted.index(rolled[0]) - 1]
+    assert roll_stc.action.value == "STC"
+    assert _payload_contract(roll_stc) == "MU260904C01015000"
 
 
 async def test_replay_reports_every_signal_regardless_of_age():
@@ -711,9 +703,7 @@ async def test_replay_cli_prints_would_emit_list(monkeypatch, capsys):
     monkeypatch.setenv("OPTIONS_CHAT_INGEST_TOKEN", TOKEN)
     monkeypatch.setenv("TENANT_ID", TENANT)
     monkeypatch.setenv("LOTTO_CHANNEL_ID", CHANNEL)
-    rc = await lotto_main.replay_main(
-        since=T0 - timedelta(days=1), transport=bff.transport()
-    )
+    rc = await lotto_main.replay_main(since=T0 - timedelta(days=1), transport=bff.transport())
     assert rc == 0
     out = capsys.readouterr().out
     assert "BTO MU" in out and "STC MU" in out and "would-emit 2" in out
