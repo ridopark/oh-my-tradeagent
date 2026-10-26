@@ -107,6 +107,7 @@ on:
           - signal-source-discord
           - discord-chat-mirror
           - discord-signals-mirror
+          - discord-lotto-mirror
           - tenant-dashboard-bff
           - dashboard
           - stc-intent-service
@@ -137,7 +138,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror tenant-dashboard-bff dashboard stc-intent-service"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror tenant-dashboard-bff dashboard stc-intent-service"
 
 jobs:
   preflight:
@@ -274,8 +275,8 @@ jobs:
             for s in $SERVICES; do want["$s"]=1; done
           fi
           add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
-          # ONE sidecar image, THREE Deployments — see the services/signal-source-discord case below.
-          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror; do want["$s"]=1; done; }
+          # ONE sidecar image, FOUR Deployments — see the services/signal-source-discord case below.
+          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror; do want["$s"]=1; done; }
           add_all() { for s in $SERVICES; do want["$s"]=1; done; }
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -292,7 +293,8 @@ jobs:
               # Merge changes under this path outside market hours.
               services/signal-source-discord/*)         want[signal-source-discord]=1
                                                         want[discord-chat-mirror]=1
-                                                        want[discord-signals-mirror]=1 ;;
+                                                        want[discord-signals-mirror]=1
+                                                        want[discord-lotto-mirror]=1 ;;
               services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
@@ -333,6 +335,7 @@ jobs:
               infra/k8s/55-signal-source-discord.yaml)  want[signal-source-discord]=1 ;;
               infra/k8s/62-discord-chat-mirror.yaml)    want[discord-chat-mirror]=1 ;;
               infra/k8s/63-discord-signals-mirror.yaml) want[discord-signals-mirror]=1 ;;
+              infra/k8s/64-discord-lotto-mirror.yaml)   want[discord-lotto-mirror]=1 ;;
               infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
@@ -533,7 +536,10 @@ jobs:
         # IS the verification — if a new pod fails its probes (or fails to
         # pull :latest) the job fails here.
         run: |
-          kubectl -n "$NAMESPACE" rollout status deployment/${{ matrix.service }} --timeout=180s
+          # discord-lotto-mirror sleeps 150s in its initContainer (64-*.yaml stagger) before the
+          # usual ~70s start-up, so it alone gets a longer budget; it is not on the trading path.
+          TIMEOUT=180s; [ "${{ matrix.service }}" = "discord-lotto-mirror" ] && TIMEOUT=360s
+          kubectl -n "$NAMESPACE" rollout status deployment/${{ matrix.service }} --timeout=$TIMEOUT
 
       - name: Show running pods + image digests
         # Best-effort visibility into what's actually live now. Never blocks
