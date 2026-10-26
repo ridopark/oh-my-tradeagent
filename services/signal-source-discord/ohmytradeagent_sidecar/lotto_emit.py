@@ -27,6 +27,13 @@ audited no-op, and a second post retries a close whose first order failed.
 
 Rows are first-scrape snapshots. The mirror never updates a stored row, so ``deleted`` is never
 true and an edit never changes ``content``; there is deliberately no deleted/edited handling here.
+
+Failure isolation: a row the parser or the payload model rejects (an impossible date, a zero
+strike) is logged with its message id and skipped — the cursor still moves past it, so one poison
+row can never wedge the feed. A failed workflow start (Temporal RPC error) keeps the payload in a
+pending list that the next poll retries first, bounded by the age window; the cursor is NOT held
+back, because re-applying the row to the book would read a BTO as an entry on an already-open
+contract and drop it. There is no cursor persistence: a restart re-reads the lookback window.
 """
 
 from __future__ import annotations
@@ -81,6 +88,9 @@ class ChatRow:
     posted_at: datetime  # aware UTC
     content: str
     reply_to_id: str | None
+    # The BFF row could not be decoded (contract violation). Kept so the poller can advance the
+    # cursor past it; never fed to the book.
+    malformed: bool = False
 
     @staticmethod
     def snowflake_time(message_id: str) -> datetime:
@@ -171,6 +181,7 @@ class LottoPoller:
         self._clock = clock
         self._entry_cutoff_et = expiry_day_entry_cutoff_et
         self.cursor: int = 0
+        self._pending: list[CopytradeSignalPayload] = []  # starts that failed, retried next poll
 
     def _late_expiry_day_entry(self, payload: CopytradeSignalPayload) -> bool:
         if payload.action is not Action.bto:
@@ -186,20 +197,35 @@ class LottoPoller:
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
             return False
-        emitted = await self._process(rows)
-        self._log.info(
-            "lotto boot: rebuilt book from %d rows, %d fresh signal(s) emitted, cursor=%s",
-            len(rows),
-            len(emitted),
-            self.cursor,
-        )
+        try:
+            await self._process(rows, boot=True)
+        except Exception:  # noqa: BLE001 - per-row guards make this unreachable; belt and braces
+            self._log.exception("lotto boot: processing aborted at cursor=%s", self.cursor)
         return True
 
     async def poll_once(self) -> list[CopytradeSignalPayload]:
+        emitted = await self._retry_pending()
         rows = await self._source.since(self._channel_id, self.cursor)
         if rows is None:
-            return []
-        return await self._process(rows)
+            return emitted
+        return emitted + await self._process(rows)
+
+    async def _retry_pending(self) -> list[CopytradeSignalPayload]:
+        pending, self._pending = self._pending, []
+        emitted: list[CopytradeSignalPayload] = []
+        for payload in pending:
+            if self._clock() - payload.posted_at > self._emit_max_age:
+                self._log.warning(
+                    "gave up retrying %s (%s %s): now older than the %ss emit window",
+                    payload.signal_id,
+                    payload.action.value,
+                    payload.ticker,
+                    self._emit_max_age.total_seconds(),
+                )
+                continue
+            if await self._emit_one(payload):
+                emitted.append(payload)
+        return emitted
 
     async def replay(self, since: datetime) -> list[CopytradeSignalPayload] | None:
         """Fresh book from ``since``; every signal counts as fresh. For the ``--replay`` CLI.
@@ -212,28 +238,45 @@ class LottoPoller:
         return await self._process(rows, age_gated=False)
 
     async def _process(
-        self, rows: list[ChatRow], *, age_gated: bool = True
+        self, rows: list[ChatRow], *, age_gated: bool = True, boot: bool = False
     ) -> list[CopytradeSignalPayload]:
         emitted: list[CopytradeSignalPayload] = []
+        stale = 0
         for row in rows:
             self.cursor = max(self.cursor, int(row.message_id))
-            if row.author_name != self._author:
+            if row.malformed or row.author_name != self._author:
                 continue
-            signals = self._book.apply(
-                row.message_id, row.author_name, row.posted_at, row.content, row.reply_to_id
-            )
-            fresh = not age_gated or self._clock() - row.posted_at <= self._emit_max_age
-            for sig in signals:
-                payload = to_payload(
-                    sig,
-                    message_id=row.message_id,
-                    posted_at=row.posted_at,
-                    tenant_id=self._tenant_id,
-                    strategy_id=self._strategy_id,
-                    author=self._author,
+            try:
+                signals = self._book.apply(
+                    row.message_id, row.author_name, row.posted_at, row.content, row.reply_to_id
                 )
+                payloads = [
+                    to_payload(
+                        sig,
+                        message_id=row.message_id,
+                        posted_at=row.posted_at,
+                        tenant_id=self._tenant_id,
+                        strategy_id=self._strategy_id,
+                        author=self._author,
+                    )
+                    for sig in signals
+                ]
+            except Exception:  # noqa: BLE001 - one poison row must not wedge the feed
+                self._log.exception(
+                    "lotto row %s rejected by the parser/payload model, skipped: %r",
+                    row.message_id,
+                    row.content,
+                )
+                continue
+            fresh = not age_gated or self._clock() - row.posted_at <= self._emit_max_age
+            for payload in payloads:
                 if not fresh:
-                    self._log.info(
+                    stale += 1
+                    # At boot, stale rows are the expected lookback history (one INFO summary
+                    # below). In steady state a stale row means mirror lag exceeded the emit
+                    # window, i.e. a real signal was missed.
+                    self._log.log(
+                        logging.DEBUG if boot else logging.WARNING,
                         "stale signal %s (%s %s posted %s) updated state only, not emitted",
                         payload.signal_id,
                         payload.action.value,
@@ -253,15 +296,35 @@ class LottoPoller:
                         self._entry_cutoff_et.strftime("%H:%M"),
                     )
                     continue
-                await self._emit_one(payload)
-                emitted.append(payload)
+                if await self._emit_one(payload):
+                    emitted.append(payload)
+        if boot:
+            self._log.info(
+                "lotto boot: %d rows, %d stale skipped, %d emitted, cursor=%s",
+                len(rows),
+                stale,
+                len(emitted),
+                self.cursor,
+            )
         return emitted
 
-    async def _emit_one(self, payload: CopytradeSignalPayload) -> None:
-        result = await self._emitter.emit(payload)
+    async def _emit_one(self, payload: CopytradeSignalPayload) -> bool:
+        """True when the start went out (or was deduped). A failure parks the payload for the
+        next poll's retry."""
+        try:
+            result = await self._emitter.emit(payload)
+        except Exception:  # noqa: BLE001 - Temporal RPC errors are transient; retry next poll
+            self._log.exception(
+                "lotto emit failed for %s (%s %s), will retry next poll",
+                payload.signal_id,
+                payload.action.value,
+                payload.ticker,
+            )
+            self._pending.append(payload)
+            return False
         if result.deduped:
             self._log.info("deduped %s (workflow_id=%s)", payload.signal_id, result.workflow_id)
-            return
+            return True
         self._log.info(
             "%s %s %s %s %s%s @ %s signal_id=%s workflow_id=%s text=%r",
             "dry-run would-emit" if self._dry_run else "emitted",
@@ -275,3 +338,4 @@ class LottoPoller:
             result.workflow_id,
             payload.raw_line,
         )
+        return True

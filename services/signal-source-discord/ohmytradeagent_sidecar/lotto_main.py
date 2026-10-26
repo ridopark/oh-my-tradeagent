@@ -10,8 +10,11 @@ Temporal is reached through ``TEMPORAL_TARGET`` / ``TEMPORAL_NAMESPACE``, which 
 defaults below exist for local runs only. ``TEMPORAL_TASK_QUEUE`` is unset there and defaults to
 ``orchestrator-core`` exactly as ``main.py`` does.
 
-Dry-run (the default, ``LOTTO_DRY_RUN`` anything but ``false``) swaps in ``InMemoryEmitter`` and
-logs each would-emit payload; flipping that env is the go-live. ``--replay --since <iso>`` runs the
+Dry-run (the default, ``LOTTO_DRY_RUN`` anything but ``false``) swaps in the bounded
+``DryRunEmitter`` and logs each would-emit payload; flipping that env is the go-live. Note that
+the boot rebuild emits rows still inside ``LOTTO_EMIT_MAX_AGE_SECS`` (default 120s), so the
+restart that flips dry-run off emits the prior 120s of posts for real. There is no cursor
+persistence; every start re-reads the lookback window. ``--replay --since <iso>`` runs the
 boot path over stored rows in dry-run and prints the would-emit list.
 """
 
@@ -23,14 +26,16 @@ import logging
 import os
 import pathlib
 import sys
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from dotenv import load_dotenv
+from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSignalPayload
 
 from . import healthz
-from .emitter import Emitter, InMemoryEmitter, TemporalEmitter
+from .emitter import Emitter, EmitResult, TemporalEmitter, workflow_id_for
 from .lotto_emit import ChatRow, LottoPoller, parse_cutoff_et
 from .lotto_parser import AUTHOR, LottoBook
 from .runtime import required, setup_logging
@@ -99,22 +104,48 @@ class BffMessagesClient:
             return None
         code = resp.status_code
         if code == 200:
+            try:
+                body = resp.json()
+                raw_items = body["items"]
+                count = int(body.get("count", len(raw_items)))
+                if not isinstance(raw_items, list):
+                    raise TypeError("items is not a list")
+            except Exception as exc:  # noqa: BLE001 - a proxy page or a reshaped response
+                self._failure(
+                    logging.WARNING,
+                    "lotto messages read returned 200 with an unusable body: %r (%s)",
+                    exc,
+                    self._truncate(resp.text),
+                )
+                return None
             self._consecutive_failures = 0
             self._last_failure = None
-            body = resp.json()
             items: list[ChatRow] = []
-            for item in body.get("items") or []:
+            for item in raw_items:
                 try:
                     items.append(ChatRow.from_json(item))
                 except (KeyError, TypeError, ValueError) as exc:
-                    # A malformed row is skipped rather than wedging the feed; the BFF is ours, so
-                    # this is a contract bug to fix, not a condition to crash-loop on.
-                    self._log.error(
-                        "lotto messages row %s malformed, skipped: %r",
-                        item.get("message_id") if isinstance(item, dict) else item,
-                        exc,
+                    # The BFF is ours, so this is a contract bug to fix, not a condition to
+                    # crash-loop or wedge on: keep the row flagged so the cursor moves past it.
+                    try:
+                        message_id = str(int(item["message_id"]))
+                    except Exception:  # noqa: BLE001 - no usable id: nothing to advance past
+                        self._failure(logging.ERROR, "lotto messages row malformed, dropped: %r", exc)
+                        continue
+                    self._failure(
+                        logging.ERROR, "lotto messages row %s malformed, skipped: %r", message_id, exc
                     )
-            return items, int(body.get("count") or len(items))
+                    items.append(
+                        ChatRow(
+                            message_id=message_id,
+                            author_name="",
+                            posted_at=ChatRow.snowflake_time(message_id),
+                            content="",
+                            reply_to_id=None,
+                            malformed=True,
+                        )
+                    )
+            return items, count
         if code in (401, 403):
             self._failure(
                 logging.ERROR,
@@ -163,6 +194,35 @@ class BffMessagesClient:
             await self._client.aclose()
 
 
+class DryRunEmitter:
+    """Production dry-run emitter: starts nothing, dedupes on a bounded window of workflow ids.
+
+    ``InMemoryEmitter`` keeps every payload for the life of the process, which is right for a test
+    and wrong for a pod that runs dark for weeks. This remembers only the last ``max_ids`` ids;
+    an evicted id would log as would-emit again, which is acceptable for a log-only mode.
+    """
+
+    def __init__(self, max_ids: int = 2000) -> None:
+        self._ids: deque[str] = deque(maxlen=max_ids)
+        self._seen: set[str] = set()
+
+    def __len__(self) -> int:
+        return len(self._seen)
+
+    async def emit(self, payload: CopytradeSignalPayload) -> EmitResult:
+        wf_id = workflow_id_for(payload)
+        if wf_id in self._seen:
+            return EmitResult(workflow_id=wf_id, deduped=True)
+        if len(self._ids) == self._ids.maxlen:
+            self._seen.discard(self._ids[0])
+        self._ids.append(wf_id)
+        self._seen.add(wf_id)
+        return EmitResult(workflow_id=wf_id, deduped=False)
+
+    async def close(self) -> None:
+        return None
+
+
 def parse_dry_run(raw: str | None) -> bool:
     """Fail-safe: only the literal ``false`` goes live."""
     return (raw or "").strip().lower() != "false"
@@ -172,8 +232,8 @@ async def build_emitter(
     *, dry_run: bool, target: str, namespace: str, task_queue: str, log: logging.Logger
 ) -> Emitter:
     if dry_run:
-        log.info("LOTTO_DRY_RUN is on: using InMemoryEmitter, no Temporal workflow is started")
-        return InMemoryEmitter()
+        log.info("LOTTO_DRY_RUN is on: using DryRunEmitter, no Temporal workflow is started")
+        return DryRunEmitter()
     log.info("dialing Temporal target=%s namespace=%s task_queue=%s", target, namespace, task_queue)
     return await TemporalEmitter.connect(target=target, namespace=namespace, task_queue=task_queue)
 
@@ -242,7 +302,7 @@ def _build_poller(
 async def replay_main(since: datetime | None, transport: httpx.BaseTransport | None = None) -> int:
     load_dotenv()
     log = setup_logging(os.getenv("LOG_LEVEL", "WARNING"), "lotto_replay")
-    emitter = InMemoryEmitter()
+    emitter = DryRunEmitter()
     poller, client = _build_poller(emitter=emitter, dry_run=True, log=log, transport=transport)
     if since is None:
         since = datetime.now(timezone.utc) - timedelta(
@@ -295,7 +355,7 @@ async def _run() -> int:
         os.getenv("LOTTO_LOOKBACK_DAYS", "14"),
     )
     try:
-        await run_loop(poller, heartbeat_path, poll_interval)
+        await run_loop(poller, heartbeat_path, poll_interval, log=log)
     finally:
         await client.aclose()
         await emitter.close()
@@ -308,6 +368,7 @@ async def run_loop(
     poll_interval: float,
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    log: logging.Logger = logging.getLogger("lotto_signal"),
 ) -> None:
     """Boot, then poll forever. The liveness probe reads ``heartbeat_path``'s mtime (stale after
     120s, ~150s from container start), so it is touched BEFORE the lookback rebuild — several BFF
@@ -321,7 +382,10 @@ async def run_loop(
         await sleep(poll_interval)
     heartbeat_path.touch()
     while True:
-        await poller.poll_once()
+        try:
+            await poller.poll_once()
+        except Exception:  # noqa: BLE001 - same discipline as watcher.py's tick loop
+            log.exception("lotto poll error")
         heartbeat_path.touch()
         await sleep(poll_interval)
 

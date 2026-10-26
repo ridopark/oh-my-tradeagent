@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -127,7 +128,7 @@ def make_poller(
         log=LOG,
         client=httpx.AsyncClient(transport=bff.transport(), base_url="http://bff:8083"),
     )
-    emitter = emitter or InMemoryEmitter()
+    emitter = emitter if emitter is not None else InMemoryEmitter()
     poller = LottoPoller(
         source=client,
         emitter=emitter,
@@ -171,6 +172,24 @@ async def test_boot_rebuild_emits_nothing():
     bff.add(row(T0 - timedelta(seconds=5), "dumped the rest at .20"))
     emitted = await poller.poll_once()
     assert [(p.action.value, p.ticker, float(p.price)) for p in emitted] == [("STC", "SPY", 0.2)]
+
+
+async def test_boot_stale_drops_are_aggregated_not_warned(caplog):
+    bff = FakeBff()
+    clock = Clock(T0)
+    bff.add(row(T0 - timedelta(hours=2), "SPY 9/4 650p @ .70"))
+    bff.add(row(T0 - timedelta(hours=1), ".85 taking some"))
+    bff.add(row(T0 - timedelta(seconds=30), "dumped the rest at .20"))
+    poller, _ = make_poller(bff, clock)
+    with caplog.at_level("DEBUG", logger="test.lotto"):
+        await poller.boot()
+    stale = [r for r in caplog.records if "stale" in r.message and "boot" not in r.message]
+    assert stale and all(r.levelno == logging.DEBUG for r in stale)
+    summary = [r for r in caplog.records if r.message.startswith("lotto boot:")]
+    assert len(summary) == 1 and summary[0].levelno == logging.INFO
+    assert "3 rows" in summary[0].message
+    assert "2 stale" in summary[0].message
+    assert "1 emitted" in summary[0].message
 
 
 async def test_boot_emits_rows_still_inside_the_age_window():
@@ -255,7 +274,8 @@ async def test_stale_signal_updates_state_not_emitted(caplog):
     bff.add(row(T0 - timedelta(minutes=10), "MU 9/9 1050c @ 1.90"))
     with caplog.at_level("INFO", logger="test.lotto"):
         assert await poller.poll_once() == []
-    assert any("stale" in r.message for r in caplog.records)
+    # Steady-state stale = mirror lag exceeded the window = a real signal was missed: WARNING.
+    assert any(r.levelno == logging.WARNING and "stale" in r.message for r in caplog.records)
     assert emitter.emitted == []
 
     bff.add(row(T0 - timedelta(seconds=30), "2.35 taking some"))
@@ -367,7 +387,7 @@ async def test_dry_run_never_touches_temporal(monkeypatch, caplog):
     emitter = await lotto_main.build_emitter(
         dry_run=True, target="x:1", namespace="n", task_queue="q", log=LOG
     )
-    assert isinstance(emitter, InMemoryEmitter)
+    assert isinstance(emitter, lotto_main.DryRunEmitter)
 
     bff = FakeBff()
     clock = Clock(T0)
@@ -378,6 +398,178 @@ async def test_dry_run_never_touches_temporal(monkeypatch, caplog):
         await poller.poll_once()
     assert any(r.message.startswith("dry-run would-emit") for r in caplog.records)
     assert len(emitter.emitted) == 1
+
+
+async def test_dry_run_emitter_is_bounded_and_dedupes():
+    emitter = lotto_main.DryRunEmitter(max_ids=3)
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, _ = make_poller(bff, clock, emitter=emitter)
+    await poller.boot()
+    first = bff.add(row(T0 - timedelta(seconds=9), "MU 9/9 1050c @ 1.90"))
+    bff.add(row(T0 - timedelta(seconds=8), "2.35 taking some"))
+    bff.add(row(T0 - timedelta(seconds=7), "2.40 taking some"))
+    emitted = await poller.poll_once()
+    assert len(emitted) == 3
+    # A re-send of a remembered id is a dedupe...
+    assert (await emitter.emit(emitted[1])).deduped is True
+    # ...a 4th id evicts the oldest, which then re-emits (bounded memory, not durable dedupe).
+    bff.add(row(T0 - timedelta(seconds=6), "2.45 taking some"))
+    await poller.poll_once()
+    assert len(emitter) == 3
+    assert (await emitter.emit(emitted[0])).deduped is False
+    assert emitted[0].message_id == first["message_id"]
+
+
+# ---------------------------------------------------------------------------
+# Poison rows / failure isolation
+# ---------------------------------------------------------------------------
+
+
+async def test_poison_row_is_skipped_and_feed_continues(caplog):
+    """parser._resolve_expiry raises ValueError on an impossible date; the row must be skipped,
+    the cursor must move past it, and the next row must still emit."""
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, emitter = make_poller(bff, clock)
+    await poller.boot()
+    poison = bff.add(row(T0 - timedelta(seconds=6), "MU 9/31 1050c @ 1.90"))
+    good = bff.add(row(T0 - timedelta(seconds=3), "SPY 9/9 650p @ .70"))
+    with caplog.at_level("ERROR", logger="test.lotto"):
+        emitted = await poller.poll_once()
+    assert [p.ticker for p in emitted] == ["SPY"]
+    assert poller.cursor == int(good["message_id"])
+    assert any(poison["message_id"] in r.message and r.exc_text for r in caplog.records)
+    assert len(emitter.emitted) == 1
+
+
+@pytest.mark.parametrize("age", [timedelta(minutes=10), timedelta(seconds=3)])
+async def test_zero_strike_row_skipped(age, caplog):
+    """to_payload fails pydantic validation (strike > 0) BEFORE the age gate, so both a stale and
+    a fresh zero-strike row must be isolated."""
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, emitter = make_poller(bff, clock)
+    await poller.boot()
+    bad = bff.add(row(T0 - age, "MU 9/9 0c @ 1.90"))
+    good = bff.add(row(T0 - timedelta(seconds=2), "SPY 9/9 650p @ .70", seq=1))
+    with caplog.at_level("ERROR", logger="test.lotto"):
+        emitted = await poller.poll_once()
+    assert [p.ticker for p in emitted] == ["SPY"]
+    assert poller.cursor == int(good["message_id"])
+    assert any(bad["message_id"] in r.message for r in caplog.records)
+    # Zero price too.
+    bff.add(row(T0 - timedelta(seconds=1), "QQQ 9/9 500p @ 0", seq=2))
+    assert await poller.poll_once() == []
+    assert len(emitter.emitted) == 1
+
+
+async def test_non_json_200_keeps_cursor(caplog):
+    bff = FakeBff()
+    clock = Clock(T0)
+    bodies = [httpx.Response(200, text="<html>upstream</html>"), httpx.Response(200, json=[1])]
+    real = bff.handler
+
+    def odd(request: httpx.Request) -> httpx.Response:
+        return bodies.pop(0) if bodies else real(request)
+
+    bff.transport = lambda: httpx.MockTransport(odd)  # type: ignore[method-assign]
+    poller, _ = make_poller(bff, clock)
+    bodies.clear()
+    await poller.boot()
+    cursor = poller.cursor
+    bff.add(row(T0 - timedelta(seconds=3), "MU 9/9 1050c @ 1.90"))
+    bodies += [httpx.Response(200, text="<html>upstream</html>"), httpx.Response(200, json=[1])]
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        assert await poller.poll_once() == []  # html
+        assert poller.cursor == cursor
+        assert await poller.poll_once() == []  # a JSON array, not an object
+        assert poller.cursor == cursor
+    assert any("body" in r.message for r in caplog.records)
+    assert [p.action.value for p in await poller.poll_once()] == ["BTO"]
+
+
+class FlakyEmitter:
+    """Raises on the first ``fail`` emits (Temporal RPC errors), then delegates."""
+
+    def __init__(self, inner: InMemoryEmitter, fail: int) -> None:
+        self.inner = inner
+        self.fail = fail
+        self.calls = 0
+
+    async def emit(self, payload):
+        self.calls += 1
+        if self.fail > 0:
+            self.fail -= 1
+            raise RuntimeError("rpc unavailable")
+        return await self.inner.emit(payload)
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_emit_failure_retries_next_poll(caplog):
+    """A failed start is retried on the next poll WITHOUT re-reading the row: re-applying it to
+    the book would make a BTO look like an entry on an already-open contract and drop it."""
+    bff = FakeBff()
+    clock = Clock(T0)
+    inner = InMemoryEmitter()
+    flaky = FlakyEmitter(inner, fail=1)
+    poller, _ = make_poller(bff, clock, emitter=flaky)  # type: ignore[arg-type]
+    await poller.boot()
+    entry = bff.add(row(T0 - timedelta(seconds=6), "MU 9/9 1050c @ 1.90"))
+    bff.add(row(T0 - timedelta(seconds=3), "2.35 taking some"))
+    with caplog.at_level("ERROR", logger="test.lotto"):
+        emitted = await poller.poll_once()
+    # The BTO start failed (kept for retry); the STC after it still went out.
+    assert [p.action.value for p in emitted] == ["STC"]
+    assert any(entry["message_id"] in r.message for r in caplog.records)
+    assert poller.cursor > int(entry["message_id"])  # cursor is not held back
+
+    emitted = await poller.poll_once()
+    assert [(p.action.value, p.signal_id) for p in emitted] == [
+        ("BTO", f"{entry['message_id']}:0")
+    ]
+    assert [p.action.value for p in inner.emitted] == ["STC", "BTO"]
+    assert await poller.poll_once() == []  # nothing left pending
+
+
+async def test_emit_retry_gives_up_outside_the_age_window(caplog):
+    bff = FakeBff()
+    clock = Clock(T0)
+    flaky = FlakyEmitter(InMemoryEmitter(), fail=5)
+    poller, _ = make_poller(bff, clock, emitter=flaky)  # type: ignore[arg-type]
+    await poller.boot()
+    bff.add(row(T0 - timedelta(seconds=3), "MU 9/9 1050c @ 1.90"))
+    assert await poller.poll_once() == []
+    clock.now = T0 + timedelta(minutes=5)  # now older than the 120s window
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        assert await poller.poll_once() == []
+    assert any("gave up" in r.message for r in caplog.records)
+    assert flaky.calls == 1  # not retried once stale
+
+
+async def test_malformed_page_advances_cursor(caplog):
+    """A page where EVERY row is malformed must not wedge the feed: the cursor moves past the
+    rows and the per-row ERROR is throttled."""
+    bff = FakeBff()
+    clock = Clock(T0)
+    poller, emitter = make_poller(bff, clock)
+    await poller.boot()
+    bad = [
+        bff.add(row(T0 - timedelta(seconds=9), f"MU 9/9 1050c @ 1.9{i}", seq=i)) for i in range(5)
+    ]
+    for r in bad:
+        r["posted_at"] = "2026-09-04T18:42:51"  # naive: contract violation
+    with caplog.at_level("ERROR", logger="test.lotto"):
+        assert await poller.poll_once() == []
+    assert poller.cursor == int(bad[-1]["message_id"])
+    malformed = [r for r in caplog.records if "malformed" in r.message]
+    assert len(malformed) == 2  # consecutive=1 and 3 of the 5
+    assert emitter.emitted == []
+    good = bff.add(row(T0 - timedelta(seconds=2), "SPY 9/9 650p @ .70"))
+    assert [p.ticker for p in await poller.poll_once()] == ["SPY"]
+    assert poller.cursor == int(good["message_id"])
 
 
 @pytest.mark.parametrize(
@@ -420,6 +612,12 @@ async def test_expiry_day_bto_after_cutoff_not_emitted(caplog):
     bff.add(row(at(15, 27), ".90 taking some"))
     stc = await poller.poll_once()
     assert [(p.action.value, p.ticker) for p in stc] == [("STC", "SPY")]
+
+    # Exactly 15:25:00 ET → skipped (the cutoff is inclusive).
+    clock.now = at(15, 25) + timedelta(seconds=5)
+    bff.add(row(at(15, 25), "IWM 0dte 220p @ .40"))
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        assert await poller.poll_once() == []
 
     # 1-DTE contract at 15:40 ET → BTO (only same-day expiry is gated).
     clock.now = at(15, 40) + timedelta(seconds=5)
@@ -476,7 +674,10 @@ async def test_heartbeat_touched_at_startup_and_every_cycle(tmp_path):
         pass
 
     async def fake_sleep(_secs: float) -> None:
+        # Record whether THIS cycle re-touched the file, then zero the mtime so the next cycle
+        # has to touch it again (a non-decreasing check would pass with no touches at all).
         touches.append(heartbeat.stat().st_mtime_ns)
+        os.utime(heartbeat, (0, 0))
         if len(touches) == 2:
             bff.fail_next = []  # boot succeeds on the next attempt
         if len(touches) == 4:
@@ -488,9 +689,42 @@ async def test_heartbeat_touched_at_startup_and_every_cycle(tmp_path):
         await lotto_main.run_loop(poller, heartbeat, 5.0, sleep=fake_sleep)
 
     assert seen_at_first_request == [True]  # touched BEFORE the first BFF read returned
-    assert len(touches) == 6  # 2 failed boots + 1 ok boot-then-poll... every cycle slept once
-    assert all(b >= a for a, b in zip(touches, touches[1:], strict=False))
+    assert len(touches) == 6  # 2 failed boots, 1 ok boot, 3 polls (one a 500): one sleep each
+    assert all(t > 0 for t in touches)  # every cycle re-touched after the previous zeroing
     assert poller.cursor > 0  # the loop did get past boot
+
+
+async def test_poll_exception_does_not_kill_loop(monkeypatch, tmp_path, caplog):
+    heartbeat = tmp_path / "heartbeat"
+    bff = FakeBff()
+    poller, _ = make_poller(bff, Clock(T0))
+    calls = {"n": 0}
+    real_poll = poller.poll_once
+
+    async def flaky_poll():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return await real_poll()
+
+    monkeypatch.setattr(poller, "poll_once", flaky_poll)
+
+    class Stop(Exception):
+        pass
+
+    sleeps: list[int] = []
+
+    async def fake_sleep(_secs: float) -> None:
+        sleeps.append(heartbeat.stat().st_mtime_ns)
+        os.utime(heartbeat, (0, 0))
+        if len(sleeps) == 3:
+            raise Stop
+
+    with caplog.at_level("ERROR", logger="test.lotto"), pytest.raises(Stop):
+        await lotto_main.run_loop(poller, heartbeat, 5.0, sleep=fake_sleep)
+    assert calls["n"] == 3  # the raising poll did not end the loop
+    assert all(t > 0 for t in sleeps)  # heartbeat touched on the raising cycle too
+    assert any("boom" in (r.exc_text or "") for r in caplog.records)
 
 
 async def test_signal_id_shape_and_workflow_id():
@@ -583,7 +817,11 @@ async def test_naive_posted_at_row_is_skipped_with_error(caplog):
     good = bff.add(row(T0, "2.35 taking some", seq=1))
     with caplog.at_level("ERROR", logger="test.lotto"):
         got = await _client(bff).since(CHANNEL, after_id=0)
-    assert [r.message_id for r in got] == [good["message_id"]]
+    # The malformed row is kept, flagged, so the poller can advance the cursor past it.
+    assert [(r.message_id, r.malformed) for r in got] == [
+        (bad["message_id"], True),
+        (good["message_id"], False),
+    ]
     assert any(bad["message_id"] in r.message for r in caplog.records)
 
 
