@@ -18,6 +18,7 @@ import logging
 import os
 import pathlib
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -25,7 +26,7 @@ from dotenv import load_dotenv
 
 from . import healthz
 from .emitter import Emitter, InMemoryEmitter, TemporalEmitter
-from .lotto_emit import ChatRow, LottoPoller
+from .lotto_emit import ChatRow, LottoPoller, parse_cutoff_et
 from .lotto_parser import AUTHOR, LottoBook
 from .runtime import required, setup_logging
 
@@ -224,6 +225,9 @@ def _build_poller(
         strategy_id=os.getenv("STRATEGY_ID", DEFAULT_STRATEGY_ID).strip() or DEFAULT_STRATEGY_ID,
         lookback_days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14")),
         emit_max_age_secs=float(os.getenv("LOTTO_EMIT_MAX_AGE_SECS", "120")),
+        expiry_day_entry_cutoff_et=parse_cutoff_et(
+            os.getenv("LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET", "15:20")
+        ),
         dry_run=dry_run,
         log=log,
     )
@@ -288,18 +292,35 @@ async def _run() -> int:
         os.getenv("LOTTO_LOOKBACK_DAYS", "14"),
     )
     try:
-        # Boot must see the lookback window before anything is emitted; until the BFF answers,
-        # keep the probe alive and retry rather than start from an empty book.
-        while not await poller.boot():
-            heartbeat_path.touch()
-            await asyncio.sleep(poll_interval)
-        while True:
-            await poller.poll_once()
-            heartbeat_path.touch()
-            await asyncio.sleep(poll_interval)
+        await run_loop(poller, heartbeat_path, poll_interval)
     finally:
         await client.aclose()
         await emitter.close()
+    return 1
+
+
+async def run_loop(
+    poller: LottoPoller,
+    heartbeat_path: pathlib.Path,
+    poll_interval: float,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Boot, then poll forever. The liveness probe reads ``heartbeat_path``'s mtime (stale after
+    120s, ~150s from container start), so it is touched BEFORE the lookback rebuild — several BFF
+    reads — and after every iteration whatever the BFF answered: a dark or erroring BFF must log
+    its cause, not kill-loop the pod."""
+    heartbeat_path.touch()
+    # Boot must see the lookback window before anything is emitted; until the BFF answers,
+    # keep the probe alive and retry rather than start from an empty book.
+    while not await poller.boot():
+        heartbeat_path.touch()
+        await sleep(poll_interval)
+    heartbeat_path.touch()
+    while True:
+        await poller.poll_once()
+        heartbeat_path.touch()
+        await sleep(poll_interval)
 
 
 def main(argv: list[str] | None = None) -> None:

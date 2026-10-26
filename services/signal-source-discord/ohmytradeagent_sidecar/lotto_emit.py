@@ -5,13 +5,19 @@
 the resulting ``LottoSignal``s through the same ``Emitter`` Protocol the Discord watcher uses, so
 the orchestrator sees payloads shaped exactly like ``watcher.py``'s.
 
-Two gates decide whether a signal reaches the emitter:
+Three gates decide whether a signal reaches the emitter:
 
 * **Boot emits nothing.** The book is rebuilt from the lookback window so exits can be attributed
   to entries posted before this process started; none of those signals is emitted.
 * **Age.** After boot, only signals whose ``posted_at`` is at most ``emit_max_age_secs`` old are
   emitted. Older rows update the book only, so a restart never re-emits stale history; Temporal's
   ``REJECT_DUPLICATE`` on the deterministic workflow id is the durable backstop behind that.
+* **Expiry-day entry cutoff.** A BTO on a contract expiring on the posted ET date is not emitted
+  at or after ``expiry_day_entry_cutoff_et`` (default 15:20 ET): a lot that fills after the
+  15:30 expiry flatten gets no flatten timer in PositionWorkflowImpl and is marked worthless while
+  the broker position stays open. The book still records the entry so later exit posts attribute
+  to it (and become orchestrator no-ops) instead of landing on an older contract. Exits are never
+  cut off.
 
 Every EXIT is emitted, repeats included: the orchestrator turns an exit on a flat contract into an
 audited no-op, and a second post retries a close whose first order failed.
@@ -25,8 +31,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from ohmytradeagent_contract.models.copytrade_signal_payload import (
     Action,
@@ -38,6 +45,14 @@ from .emitter import Emitter
 from .lotto_parser import LottoBook, LottoSignal
 
 DISCORD_EPOCH_MS = 1420070400000
+_ET = ZoneInfo("America/New_York")
+DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET = time(15, 20)
+
+
+def parse_cutoff_et(raw: str) -> time:
+    """``HH:MM`` wall-clock ET → ``time``; the orchestrator's expiry flatten is 15:30."""
+    hh, mm = raw.strip().split(":")
+    return time(int(hh), int(mm))
 
 
 def snowflake_at(dt: datetime) -> int:
@@ -137,6 +152,7 @@ class LottoPoller:
         dry_run: bool,
         log: logging.Logger,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        expiry_day_entry_cutoff_et: time = DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET,
     ) -> None:
         self._source = source
         self._emitter = emitter
@@ -150,7 +166,14 @@ class LottoPoller:
         self._dry_run = dry_run
         self._log = log
         self._clock = clock
+        self._entry_cutoff_et = expiry_day_entry_cutoff_et
         self.cursor: int = 0
+
+    def _late_expiry_day_entry(self, payload: CopytradeSignalPayload) -> bool:
+        if payload.action is not Action.bto:
+            return False
+        posted_et = payload.posted_at.astimezone(_ET)
+        return payload.expiry == posted_et.date() and posted_et.time() >= self._entry_cutoff_et
 
     async def boot(self) -> bool:
         """Rebuild the book from the lookback window without emitting. False when the BFF did
@@ -211,6 +234,18 @@ class LottoPoller:
                         payload.action.value,
                         payload.ticker,
                         payload.posted_at.isoformat(),
+                    )
+                    continue
+                if self._late_expiry_day_entry(payload):
+                    self._log.warning(
+                        "skipped_late_expiry_day_entry %s (%s %s %s expires today, posted %s ET "
+                        ">= cutoff %s) book updated, not emitted",
+                        payload.signal_id,
+                        payload.ticker,
+                        payload.strike,
+                        payload.right.value,
+                        payload.posted_at.astimezone(_ET).strftime("%H:%M"),
+                        self._entry_cutoff_et.strftime("%H:%M"),
                     )
                     continue
                 await self._emit_one(payload)
