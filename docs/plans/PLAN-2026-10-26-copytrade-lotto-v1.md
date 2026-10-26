@@ -290,6 +290,22 @@ Tag commit precedes the first `EntryFilled` for `paper_lotto`.
 - F4/F5: as recommended (26 BTOs incl. the rolled 1015c; replay dry-run + forward dry-run period instead of a live replay).
 - Blocker acknowledged: PR #986 (lotto mirror) must be merged before Phases 3 and 5 can go in.
 
+## Amendments from the phase-2 goal review (2026-10-26, before any P0 step)
+- **P0-3 order is creds row → create → enable.** `CreateTenantController.java:103-107` DISCARDS the caller's
+  `broker_account_id` and FORCES `enabled=false`; the id binds only from `VerifiedAccountGuard`, which needs the
+  paper_lotto credential row in exec_alpaca_paper (`BROKER_CREDS_SOURCE=db`). Register the new paper account's
+  credentials FIRST (`docs/ops/broker-credential-opt-in.md`), then create, then enable via the tenant-scoped
+  `/config` POST with the full blob (never the onboard wizard: its template injects copytrade-v1's
+  `partial_fractions`). Only then restart the orchestrator and run the #871 drift query.
+- **Expiry-day late entries (phase 4).** A lot that fills after 15:30 ET on its expiry day arms no flatten timer and
+  is marked worthless/terminated with the broker position still open (`PositionWorkflowImpl.java:1780-1811`,
+  `:1918-1924`). The poller does not emit a BTO for a contract expiring on the posted ET date at or after
+  `LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET` (default 15:20); the book is still updated.
+- **P0-4 becomes recurring.** `default_stc_fraction`, `flatten_lead_minutes`, `force_close_0dte_et` and
+  `eod_force_flatten` are SAFE-class editor fields; the raw config POST also accepts a `partial_fractions` blob. Run
+  the P0-4 invariant query daily from the homelab crontab next to `watchlist_forward_alert.sh` and page on drift.
+- `max_signal_age_stc_secs` is inert on the STC path; the exit-age bound is `LOTTO_EMIT_MAX_AGE_SECS` (P0-1 sizes it).
+
 ## Forks for the lead / operator
 - **F1 — full-close mechanism.** *Recommended: config-only* (phase 2). The alternative is a schema
   flag `stc_full_close_always` that forces `effectiveFraction = 1.0` at
