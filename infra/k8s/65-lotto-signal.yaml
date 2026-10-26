@@ -78,16 +78,19 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: OPTIONS_CHAT_INGEST_TOKEN
-            # Writable emptyDir — owns the heartbeat the liveness probe reads and the poll cursor.
+            # Writable emptyDir — owns the heartbeat the liveness probe reads. No cursor is persisted: a
+            # restart rebuilds the book from the lookback window below.
             - name: STATE_DIR
               value: /app/state
             - name: POLL_INTERVAL_SECS
               value: "5"
-            # Boot rebuilds the open-contract book from this window WITHOUT emitting.
+            # Boot rebuilds the open-contract book from this window; rows older than
+            # LOTTO_EMIT_MAX_AGE_SECS update state only.
             - name: LOTTO_LOOKBACK_DAYS
               value: "14"
-            # Only signals posted within this many seconds are emitted; older rows update state
-            # only, so a restart re-emits nothing stale. Size from P0-1's measured mirror lag.
+            # Only signals posted within this many seconds are emitted — at boot too, so a restart
+            # (including the go-live `set env` flip) emits any signal from the prior window for real;
+            # Temporal REJECT_DUPLICATE backstops double emits. Size from P0-1's measured mirror lag.
             - name: LOTTO_EMIT_MAX_AGE_SECS
               value: "120"
             # Temporal — same names and sources as 55-signal-source-discord.yaml. The task queue
