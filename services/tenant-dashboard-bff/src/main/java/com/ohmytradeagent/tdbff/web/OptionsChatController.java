@@ -88,7 +88,11 @@ public class OptionsChatController {
     return ResponseEntity.ok(body);
   }
 
-  private static Map<String, Object> toJson(StoredMessage m) {
+  /**
+   * The message's own fields, without its children — shared with the poller's {@code
+   * /internal/options-chat/messages} so the two reads cannot drift on a field name.
+   */
+  static Map<String, Object> messageJson(StoredMessage m) {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("message_id", Long.toString(m.messageId()));
     out.put("author_name", m.authorName());
@@ -101,6 +105,11 @@ public class OptionsChatController {
     out.put("reply_to_id", m.replyToId() == null ? null : Long.toString(m.replyToId()));
     out.put("edited", m.edited());
     out.put("deleted", m.deletedAt() != null);
+    return out;
+  }
+
+  private static Map<String, Object> toJson(StoredMessage m) {
+    Map<String, Object> out = messageJson(m);
 
     List<Map<String, Object>> attachments = new ArrayList<>();
     for (StoredAttachment a : m.attachments()) {
