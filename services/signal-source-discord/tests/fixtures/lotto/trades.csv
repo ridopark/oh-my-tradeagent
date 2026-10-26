@@ -1,0 +1,26 @@
+n,alert_date_et,alert_time_et,sym,expiry,strike,cp,entry,legs,notes
+1,2026-03-10,13:07,SPY,2026-03-10,681,P,0.70,"0.85:some;1.40:half;1.70:some;3.20:most;2.40:rest",0DTE fade
+2,2026-03-17,15:56,META,2026-03-18,615,P,1.70,"2.94:partial",no further exit posted
+3,2026-03-23,12:27,QQQ,2026-03-24,580,P,1.80,"2.15:some;1.30:rest",stopped rest
+4,2026-03-24,11:43,GLD,2026-03-25,402,P,2.99,"3.35:few;4.00:some;4.25:some;3.76:rest",stop at 2.00 stated
+5,2026-04-02,10:44,USO,2026-04-02,130,P,0.75,"0.40:rest",cut
+6,2026-04-06,15:17,AMZN,2026-04-10,210,P,2.20,"2.56:some;2.75:some;2.30:rest",
+7,2026-04-15,10:16,GOOGL,2026-04-15,335,C,0.38,"0.54:some;0.80:half;0.95:some;1.44:some;2.35:rest",0DTE
+8,2026-04-20,10:29,GOOGL,2026-04-20,342.5,C,0.25,"?:rest",dumped 37 min later price not posted
+9,2026-05-08,13:31,QQQ,2026-05-08,708,P,0.50,"0.60:some;0.68:some;0.50:rest",0DTE
+10,2026-05-14,11:14,MU,2026-05-15,850,C,4.25,"5.00:few;3.00:rest",SL 3.00 hit
+11,2026-05-20,15:37,SPY,2026-05-22,735,P,1.65,"2.05:some;2.30:some;1.65:rest",stop at entry
+12,2026-06-08,12:23,AAPL,2026-06-10,310,P,2.08,"2.59:some;2.90:some;1.90:rest",SL 1.90
+13,2026-06-16,15:07,INTC,2026-06-18,125,C,1.62,"2.22:most;1.62:rest",dumped rest not red
+14,2026-07-07,15:00,META,2026-07-17,580,P,3.50,"4.15:some;5.20:some;6.03:half;4.70:rest",
+15,2026-07-22,15:16,META,2026-07-27,600,P,3.04,"3.50:some;6.85:most;9.50:some;8.12:rest",one kept - treated as closed 8.12
+16,2026-08-17,11:44,SPY,2026-08-17,776,C,0.23,"0.31:partial;0.20:rest",0DTE
+17,2026-08-24,10:10,AMD,2026-08-24,445,P,0.76,"",0DTE no exit posted
+18,2026-08-27,12:55,MU,2026-08-28,965,C,1.26,"1.76:some;2.93:some;3.95:most",rest held to next day no exit posted
+19,2026-09-01,15:18,MU,2026-09-09,1050,C,1.90,"2.50:some;3.00:some;1.90:rest",rest cut at entry
+20,2026-09-04,15:22,MU,2026-09-04,1010,C,0.44,"1.05:some;1.80:half;3.20:most;4.55:rest",0DTE (rolled from 1015c @.51)
+21,2026-09-08,10:50,MU,2026-09-09,1050,C,5.38,"6.30:some;6.86:some;7.80:half;5.38:rest",SL B/E hit
+22,2026-09-08,14:53,MU,2026-09-09,1050,C,3.30,"2.00:rest",stop hit
+23,2026-09-28,12:18,SNDK,2026-10-09,2000,C,12.90,"15.70:some;17.00:some;13.50:rest",
+24,2026-10-05,12:51,SNDK,2026-10-16,2000,C,6.90,"4.50:rest",dumped next day
+25,2026-10-20,12:20,MU,2026-10-21,875,P,2.35,"3.22:some;3.50:some",couple swung to expiry no exit posted
