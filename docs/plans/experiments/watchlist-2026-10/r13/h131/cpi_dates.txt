@@ -1,0 +1,39 @@
+# US CPI (BLS) news-release dates, 08:30 ET. Fixed 2026-10-23 BEFORE any H13.1 outcome was computed.
+# SOURCE: BLS "Schedule of Releases for the Consumer Price Index" (bls.gov/schedule/news_release/cpi.htm) as recalled
+# from the published 2024/2025/2026 schedules. NOT web-verified from this host: bls.gov returned HTTP 403 (bot block),
+# fred/alfred.stlouisfed.org timed out, api.stlouisfed.org needs an API key. 2025-10-24 = Sep-2025 CPI released late
+# (Oct-2025 government shutdown); the Oct-2025 CPI was never published; 2025-12-18 = Nov-2025 CPI. Dates after
+# 2026-06 are from the pre-announced 2026 schedule and could have been rescheduled without my knowledge.
+2024-01-11
+2024-02-13
+2024-03-12
+2024-04-10
+2024-05-15
+2024-06-12
+2024-07-11
+2024-08-14
+2024-09-11
+2024-10-10
+2024-11-13
+2024-12-11
+2025-01-15
+2025-02-12
+2025-03-12
+2025-04-10
+2025-05-13
+2025-06-11
+2025-07-15
+2025-08-12
+2025-09-11
+2025-10-24
+2025-12-18
+2026-01-13
+2026-02-11
+2026-03-11
+2026-04-10
+2026-05-12
+2026-06-10
+2026-07-14
+2026-08-12
+2026-09-11
+2026-10-14
