@@ -1,6 +1,7 @@
 package com.ohmytradeagent.orchestrator.workflows;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -45,6 +46,7 @@ import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import com.ohmytradeagent.orchestrator.domain.ContractResolveResult;
 import com.ohmytradeagent.orchestrator.domain.RejectionReason;
 import com.ohmytradeagent.orchestrator.domain.RiskDecision;
+import com.ohmytradeagent.orchestrator.platform.YamlStrategyRegistry;
 import io.temporal.api.enums.v1.IndexedValueType;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -53,6 +55,8 @@ import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -64,6 +68,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -3408,10 +3414,221 @@ class CopytradeSignalWorkflowImplTest {
     }
   }
 
+  // ---------- #987 phase 2: copytrade-lotto-v1 — full close on EVERY exit ----------
+
+  /**
+   * #987 fork F1 (config-only full close): under the dev {@code copytrade-lotto-v1.yaml} — {@code
+   * default_stc_fraction: 1.0} and NO {@code partial_fractions} — every phase-1 exit text,
+   * including ones that carry an explicit PARTIAL keyword under copytrade-v1's map ("half",
+   * "partial", "some"), reaches the PositionWorkflow as {@code PartialExitRequest.fraction == 1.0}.
+   * The receiving double records the request verbatim, so this pins the dispatched VALUE, not just
+   * the parent-side audit.
+   */
+  @ParameterizedTest(name = "[{index}] \"{0}\" → fraction 1.0 under copytrade-lotto-v1")
+  @ValueSource(
+      strings = {
+        "1.40 100% sold half",
+        ".31 partial",
+        "3.22 taking some profits here",
+        "stop hit on the rest",
+        "dumping these",
+        "2.35 I'm out",
+        "6.03 half out",
+        "3.20 mostly out",
+        "4.55 ALL OUT"
+      })
+  void lottoConfig_everyFixtureExitTail_dispatchesFraction1(String tail) throws Exception {
+    StrategyConfig lotto = repoDevConfig("copytrade-lotto-v1");
+    assumeTrue(lotto != null, "repo tenants/ dir not found from test working directory");
+
+    PartialExitRequest received = runStcCapturingPartialExit(lotto, tail);
+
+    assertThat(received.getFraction()).isEqualByComparingTo("1.0");
+    assertThat(received.getReason()).isEqualTo("stc_signal");
+    assertThat(received.getRefPremium()).isEqualByComparingTo("2.30");
+    // Parent-side audit agrees: no keyword matched, the 1.0 came from the default.
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(((Number) exit.getSubject().get("fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(((Number) exit.getSubject().get("keyword_fraction")).doubleValue()).isEqualTo(1.0);
+    assertThat(exit.getSubject().get("matched_keyword")).isNull();
+    assertThat(exit.getSubject()).containsEntry("intent_source", "keyword");
+  }
+
+  /**
+   * Control for the test above: the SAME text under copytrade-v1's keyword map is a PARTIAL ("half"
+   * → 0.5). Proves the 1.0 in the lotto run comes from the lotto config, not from the harness.
+   */
+  @Test
+  void lottoConfig_control_copytradeV1Map_halfDispatchesFractionHalf() throws Exception {
+    StrategyConfig v1 = repoDevConfig("copytrade-v1");
+    assumeTrue(v1 != null, "repo tenants/ dir not found from test working directory");
+    assertThat(v1.getPartialFractions()).containsEntry("half", new BigDecimal("0.5"));
+
+    PartialExitRequest received = runStcCapturingPartialExit(v1, "1.40 100% sold half");
+
+    assertThat(received.getFraction()).isEqualByComparingTo("0.5");
+    AuditEvent exit = capture("ExitRequested");
+    assertThat(exit.getSubject()).containsEntry("matched_keyword", "half");
+  }
+
+  /**
+   * #987: the author posts a second exit after the first one already closed the whole position. The
+   * OCC → PositionWorkflow mapping is gone (the lot drained and the workflow completed), so the STC
+   * exhausts its lookup buffer and lands on the benign {@code StcNoOpenPosition} audit — never an
+   * {@code ExitRequested}, never a broker order. Modelled on {@link
+   * #stcAction_cacheMissAndBufferExpires_emitsStcNoOpenPosition}, under the lotto config of record
+   * (pending_ttl_paper_secs 90 → 9 lookup attempts).
+   */
+  @Test
+  void lottoConfig_secondStcAfterClose_emitsStcNoOpenPosition_noOrder() {
+    StrategyConfig lotto = repoDevConfig("copytrade-lotto-v1");
+    assumeTrue(lotto != null, "repo tenants/ dir not found from test working directory");
+    when(strategy.get(anyString(), anyString())).thenReturn(lotto);
+    when(contract.resolve(any()))
+        .thenReturn(
+            new ContractResolveResult(
+                "NVDA  260516C00140000",
+                "NVDA",
+                LocalDate.of(2026, 5, 16),
+                new BigDecimal("140"),
+                "C",
+                ContractResolveResult.SOURCE_GENERATED));
+    when(positionLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+        .thenReturn(null);
+
+    CopytradeSignalPayload p = lottoStcPayload("stop hit on the rest", "lotto-msg-2:0");
+    runWorkflow(p);
+
+    AuditEvent benign = capture("StcNoOpenPosition");
+    assertThat(benign.getSubject()).containsEntry("signal_id", "lotto-msg-2:0");
+    assertThat(benign.getSubject()).containsEntry("author", "TradingTheTrend");
+    assertThat(((Number) benign.getSubject().get("attempts")).intValue()).isEqualTo(9);
+
+    ArgumentCaptor<AuditEvent> all = ArgumentCaptor.forClass(AuditEvent.class);
+    verify(audit, atLeastOnce()).log(all.capture());
+    assertThat(all.getAllValues().stream().map(AuditEvent::getKind))
+        .doesNotContain("ExitRequested", "OrphanSTC");
+    verify(exec, never()).placeOrder(any());
+  }
+
+  /** An STC payload shaped like a lotto_main emission: TTT author, lotto strategy id. */
+  private CopytradeSignalPayload lottoStcPayload(String tail, String signalId) {
+    CopytradeSignalPayload p = btoPayload();
+    p.setStrategyId("copytrade-lotto-v1");
+    p.setAuthor("TradingTheTrend");
+    p.setAction(CopytradeSignalPayload.Action.STC);
+    p.setTail(tail);
+    p.setRawLine(tail);
+    p.setSignalId(signalId);
+    return p;
+  }
+
+  /**
+   * Loads a dev strategy YAML from the repo {@code tenants/} tree via the production reader, or
+   * returns null when the tree cannot be located (callers {@code assumeTrue} on it, mirroring
+   * RepoTenantsBrokerTargetGuardTest).
+   */
+  private static StrategyConfig repoDevConfig(String strategyId) {
+    Path dir = Path.of("").toAbsolutePath();
+    for (int i = 0; i < 6 && dir != null; i++) {
+      Path candidate = dir.resolve("tenants");
+      if (Files.isDirectory(candidate)) {
+        return new YamlStrategyRegistry(candidate.toString()).get("dev", strategyId);
+      }
+      dir = dir.getParent();
+    }
+    return null;
+  }
+
+  /**
+   * Drives the STC dispatch path on a dedicated env whose target PositionWorkflow is a {@link
+   * RecordingPositionWorkflowImpl}, and returns the {@link PartialExitRequest} it RECEIVED. The
+   * parent's ExitRequested audit is captured on the shared {@code audit} mock so {@link
+   * #capture(String)} still works afterwards. Mirrors {@link #runBtoCapturingChildInput} for the
+   * exit side.
+   */
+  private PartialExitRequest runStcCapturingPartialExit(StrategyConfig cfg, String tail)
+      throws Exception {
+    RecordingPositionWorkflowImpl.STARTED.clear();
+    RecordingPositionWorkflowImpl.FILLS.clear();
+    RecordingPositionWorkflowImpl.PARTIAL_EXITS.clear();
+
+    String posWfId = "t-dev/s-" + cfg.getStrategyId() + "/pos/NVDA  260516C00140000/entry-1";
+    TestWorkflowEnvironment localEnv = TestWorkflowEnvironment.newInstance();
+    try {
+      localEnv.registerSearchAttribute(
+          "TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      localEnv.registerSearchAttribute(
+          "ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker core = localEnv.newWorker(CORE_QUEUE);
+      core.registerWorkflowImplementationTypes(
+          CopytradeSignalWorkflowImpl.class, RecordingPositionWorkflowImpl.class);
+
+      StrategyActivities localStrategy = Mockito.mock(StrategyActivities.class);
+      ContractActivities localContract = Mockito.mock(ContractActivities.class);
+      PositionLookupActivities localLookup = Mockito.mock(PositionLookupActivities.class);
+      MarketCalendarActivities localCalendar = Mockito.mock(MarketCalendarActivities.class);
+      when(localCalendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(localStrategy.get(anyString(), anyString())).thenReturn(cfg);
+      when(localContract.resolve(any()))
+          .thenReturn(
+              new ContractResolveResult(
+                  "NVDA  260516C00140000",
+                  "NVDA",
+                  LocalDate.of(2026, 5, 16),
+                  new BigDecimal("140"),
+                  "C",
+                  ContractResolveResult.SOURCE_GENERATED));
+      when(localLookup.findPositionWorkflowId(anyString(), anyString(), anyString()))
+          .thenReturn(posWfId);
+      when(localLookup.isPositionWorkflowRunning(anyString())).thenReturn(true);
+      core.registerActivitiesImplementations(
+          audit, localStrategy, risk, localContract, localLookup, localCalendar);
+      localEnv.start();
+
+      PositionWorkflow target =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  PositionWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setTaskQueue(CORE_QUEUE)
+                      .setWorkflowId(posWfId)
+                      .build());
+      WorkflowStub.fromTyped(target).start(positionInput());
+
+      CopytradeSignalWorkflow wf =
+          localEnv
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CopytradeSignalWorkflow.class,
+                  WorkflowOptions.newBuilder().setTaskQueue(CORE_QUEUE).build());
+      CopytradeSignalPayload p = lottoStcPayload(tail, "lotto-stc:0");
+      p.setStrategyId(cfg.getStrategyId());
+      wf.process(p);
+
+      long deadline = System.currentTimeMillis() + 10_000;
+      while (!RecordingPositionWorkflowImpl.PARTIAL_EXITS.containsKey(posWfId)
+          && System.currentTimeMillis() < deadline) {
+        Thread.sleep(50);
+      }
+      PartialExitRequest received = RecordingPositionWorkflowImpl.PARTIAL_EXITS.get(posWfId);
+      assertThat(received).as("PositionWorkflow received the partialExit signal").isNotNull();
+      // Release the parked double so the env closes cleanly.
+      target.onFill(fillFor("brk-lotto"));
+      return received;
+    } finally {
+      localEnv.close();
+    }
+  }
+
   /** Light PositionWorkflow double: records the start input and parks until terminated. */
   public static final class RecordingPositionWorkflowImpl implements PositionWorkflow {
     static final Map<String, PositionWorkflowInput> STARTED = new ConcurrentHashMap<>();
     static final Map<String, FillSignalPayload> FILLS = new ConcurrentHashMap<>();
+
+    /** #987: the last {@link PartialExitRequest} received, keyed by workflow id. */
+    static final Map<String, PartialExitRequest> PARTIAL_EXITS = new ConcurrentHashMap<>();
 
     @Override
     public String run(PositionWorkflowInput input) {
@@ -3421,7 +3638,9 @@ class CopytradeSignalWorkflowImplTest {
     }
 
     @Override
-    public void partialExit(PartialExitRequest req) {}
+    public void partialExit(PartialExitRequest req) {
+      PARTIAL_EXITS.put(Workflow.getInfo().getWorkflowId(), req);
+    }
 
     @Override
     public void onFill(FillSignalPayload event) {
