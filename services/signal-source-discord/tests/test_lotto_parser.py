@@ -345,3 +345,130 @@ def test_reply_attributes_through_parent():
 
 def test_exit_with_no_open_contract_is_none():
     assert _book().apply("m1", AUTHOR, T0, "2.35 I'm out", None) == []
+
+
+# ---------------------------------------------------------------------------
+# Forward-behaviour guards (adversarial review of phase 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "added more @ 1.90",
+        "adding here at 1.85",
+        "will add more at 1.50",
+        "1.90 added more",
+        "target at 4.00",
+        "MU at 1000.50 now, support",
+        "2.00 stop",
+        "1.40 is the target",
+    ],
+)
+def test_add_intent_and_levels_veto_price_exit(text):
+    assert classify_exit(text) is None
+
+
+@pytest.mark.parametrize(
+    "text,price", [("1.44 ", 1.44), ("3.00 now", 3.0), ("8.12 lol keeping one", 8.12)]
+)
+def test_bare_lead_price_is_exit(text, price):
+    assert classify_exit(text).price == price
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "stop loss @ 2.00",
+        "stop loss at 2.00",
+        "setting stop loss at 2.00",
+        "stops at 1.50",
+        "SL to 1.50",
+        "stop loss to entry",
+    ],
+)
+def test_stop_placement_variants_are_none(text):
+    assert classify_exit(text) is None
+
+
+def test_stop_hit_variants_are_exit():
+    assert classify_exit("Stop hit @ 2.00").price == 2.0
+    assert classify_exit("stop loss hit").price is None
+    assert classify_exit("SL hit on the rest @ 1.90").price == 1.9
+
+
+def test_implausible_exit_price_is_none():
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "SPY 9/4 681p @ .70", None)
+    assert book.apply("m2", AUTHOR, T0, "taking some at 681.50", None) == []
+    assert book.apply("m3", AUTHOR, T0, "taking some at .01", None) == []
+    assert book.apply("m4", AUTHOR, T0, ".85 taking some", None)[0].price == 0.85
+
+
+def test_reply_to_pruned_parent_is_none():
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "SPY 9/4 650p @ .70", None)
+    book.apply("m2", AUTHOR, T0, ".90 taking some", None)
+    next_day = datetime(2026, 9, 5, 14, 0, tzinfo=timezone.utc)
+    assert book.apply("m3", AUTHOR, next_day, "QQQ 9/10 500p @ 1.00", None)
+    # Parent m2 was attributed to the SPY contract, now pruned → never fall back to QQQ.
+    assert book.apply("m4", AUTHOR, next_day, "stop hit on the rest", "m2") == []
+
+
+def test_ticker_named_exit_attributes_by_ticker(caplog):
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "MU 9/9 1050c @ 5.38", None)
+    book.apply("m2", AUTHOR, T0, "SPY 9/4 650p @ .70", None)
+    assert book.apply("m3", AUTHOR, T0, "MU stopped out", None)[0].ticker == "MU"
+    assert book.apply("m4", AUTHOR, T0, "SPY and MU both stopped out", None) == []
+    with caplog.at_level("WARNING", logger="ohmytradeagent_sidecar.lotto_parser"):
+        assert book.apply("m5", AUTHOR, T0, "dumped the rest", None)[0].ticker == "SPY"
+    assert any("fallback" in r.message for r in caplog.records)
+
+
+def test_exit_followed_by_plan_is_exit():
+    assert classify_exit("took some off, will add back lower").price is None
+    assert classify_exit("sold most, hoping the rest runs") is not None
+    assert classify_exit("1.50 taking some, will add back lower").price == 1.5
+
+
+@pytest.mark.parametrize("text", ["trimmed some here", "scaled out of half", "scaling out here"])
+def test_more_exit_verbs(text):
+    assert classify_exit(text) is not None
+
+
+def test_roll_variants_and_date_like_strike():
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "MU 9/04 1015c @ .51", None)
+    assert [s.action for s in book.apply("m2", AUTHOR, T0, "rolling to 1010 @ .44", None)] == [
+        "STC",
+        "BTO",
+    ]
+    assert [s.action for s in book.apply("m3", AUTHOR, T0, "roll to 1005 @ .40", None)] == [
+        "STC",
+        "BTO",
+    ]
+    # "10/23" is a date, not a strike: unparseable roll → NONE, nothing opened.
+    assert book.apply("m4", AUTHOR, T0, "rolled these to 10/23 @ 1.20", None) == []
+    assert book.apply("m5", AUTHOR, T0, ".60 taking some", None)[0].strike == 1005.0
+
+
+def test_entry_recap_on_closed_contract_is_none():
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "SPY 9/4 681p @ .70", None)
+    book.apply("m2", AUTHOR, T0, "1.40 sold half", None)
+    assert book.apply("m3", AUTHOR, T0, "SPY 9/4 681p @ 1.40 now", None) == []
+    assert book.apply("m4", AUTHOR, T0, "SPY 9/4 681p @ 1.20 currently", None) == []
+    assert [
+        s.action for s in book.apply("m5", AUTHOR, T0, "SPY 9/4 681p @ .60 trying this again", None)
+    ] == ["BTO"]
+
+
+def test_et_date_boundary():
+    # 00:30Z on 9/5 is 20:30 ET on 9/4: the 9/4 contract is still in the book and 0dte = 9/4.
+    book = _book()
+    book.apply("m1", AUTHOR, T0, "SPY 9/4 650p @ .70", None)
+    late = datetime(2026, 9, 5, 0, 30, tzinfo=timezone.utc)
+    assert book.apply("m2", AUTHOR, late, "dumped the rest at .20", None)[0].ticker == "SPY"
+    zero = book.apply("m3", AUTHOR, late, "QQQ 0dte 500p @ .50", None)
+    assert zero[0].expiry == date(2026, 9, 4)
