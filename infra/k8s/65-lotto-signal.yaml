@@ -16,6 +16,13 @@
 #
 # Same image as the sidecar and the mirrors; deploy.yml rolls it with every
 # services/signal-source-discord/* change.
+#
+# FIRST-TIME CREATE IS MANUAL. deploy.yml's "Verify :latest is current" step runs `kubectl get
+# deployment/<service>` BEFORE the apply step, so a Deployment that does not exist yet fails the
+# roll job and is never created by CI (64-discord-lotto-mirror.yaml was hand-applied the same way).
+# Operator, once, after the phase-4 sidecar image has been built (lotto_main must be in the image):
+#   kubectl -n copytrade apply -f infra/k8s/65-lotto-signal.yaml
+# Every later change rolls through deploy.yml normally.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
