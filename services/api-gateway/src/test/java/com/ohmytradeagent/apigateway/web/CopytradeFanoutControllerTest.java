@@ -1,6 +1,7 @@
 package com.ohmytradeagent.apigateway.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,9 @@ import org.jooq.tools.jdbc.MockConnection;
 import org.jooq.tools.jdbc.MockDataProvider;
 import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
@@ -30,6 +34,7 @@ import org.springframework.http.ResponseEntity;
 class CopytradeFanoutControllerTest {
 
   private static final String STRATEGY = "copytrade-v1";
+  private static final String LOTTO_STRATEGY = "copytrade-lotto-v1";
 
   /** A fixture row as it would live in {@code strategy_config}. {@code enabled} null == absent. */
   private record Row(String tenant, String strategy, String enabled) {}
@@ -82,7 +87,7 @@ class CopytradeFanoutControllerTest {
     CopytradeFanoutController controller =
         new CopytradeFanoutController(dslOver(dataset), STRATEGY);
 
-    ResponseEntity<Map<String, Object>> resp = controller.targets();
+    ResponseEntity<Map<String, Object>> resp = controller.targets(null);
 
     assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
     List<Map<String, Object>> targets = targetsOf(resp);
@@ -98,7 +103,7 @@ class CopytradeFanoutControllerTest {
     CopytradeFanoutController controller =
         new CopytradeFanoutController(dslOver(List.of()), STRATEGY);
 
-    controller.targets();
+    controller.targets(null);
 
     assertThat(capturedSql.get().toLowerCase()).contains("is distinct from 'false'");
     // The strategy id is a bind parameter (not a hardcoded literal) so it is configurable.
@@ -117,7 +122,7 @@ class CopytradeFanoutControllerTest {
     CopytradeFanoutController controller =
         new CopytradeFanoutController(dslOver(dataset), customStrategy);
 
-    ResponseEntity<Map<String, Object>> resp = controller.targets();
+    ResponseEntity<Map<String, Object>> resp = controller.targets(null);
 
     assertThat(targetsOf(resp))
         .containsExactly(Map.of("tenant_id", "acme", "strategy_id", customStrategy));
@@ -129,9 +134,78 @@ class CopytradeFanoutControllerTest {
     CopytradeFanoutController controller =
         new CopytradeFanoutController(dslOver(List.of()), STRATEGY);
 
-    ResponseEntity<Map<String, Object>> resp = controller.targets();
+    ResponseEntity<Map<String, Object>> resp = controller.targets(null);
 
     assertThat(targetsOf(resp)).isEmpty();
     assertThat(resp.getBody()).containsEntry("count", 0);
+  }
+
+  // ---- #987: optional ?strategy_id= override --------------------------------------------------
+
+  @ParameterizedTest
+  @NullAndEmptySource
+  @ValueSource(strings = {"  "})
+  void strategyParamAbsentOrBlank_bindsConfiguredDefault(String param) {
+    List<Row> dataset =
+        new ArrayList<>(
+            List.of(new Row("acme", STRATEGY, "true"), new Row("lotto1", LOTTO_STRATEGY, "true")));
+    CopytradeFanoutController controller =
+        new CopytradeFanoutController(dslOver(dataset), STRATEGY);
+
+    ResponseEntity<Map<String, Object>> resp = controller.targets(param);
+
+    assertThat(capturedBindings.get()).contains(STRATEGY);
+    assertThat(targetsOf(resp))
+        .containsExactly(Map.of("tenant_id", "acme", "strategy_id", STRATEGY));
+    assertThat(resp.getBody()).containsEntry("count", 1);
+  }
+
+  @Test
+  void strategyParamPresent_returnsOnlyThatStrategysEnabledRows() {
+    List<Row> dataset =
+        new ArrayList<>(
+            List.of(
+                new Row("acme", STRATEGY, "true"), // default strategy → excluded
+                new Row("lotto1", LOTTO_STRATEGY, "true"), // enabled → included
+                new Row("lotto2", LOTTO_STRATEGY, null), // enabled absent → included
+                new Row("lotto3", LOTTO_STRATEGY, "false"))); // disabled → excluded
+    CopytradeFanoutController controller =
+        new CopytradeFanoutController(dslOver(dataset), STRATEGY);
+
+    ResponseEntity<Map<String, Object>> resp = controller.targets(LOTTO_STRATEGY);
+
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(capturedBindings.get()).contains(LOTTO_STRATEGY).doesNotContain(STRATEGY);
+    assertThat(capturedSql.get().toLowerCase()).contains("is distinct from 'false'");
+    assertThat(targetsOf(resp))
+        .containsExactlyInAnyOrder(
+            Map.of("tenant_id", "lotto1", "strategy_id", LOTTO_STRATEGY),
+            Map.of("tenant_id", "lotto2", "strategy_id", LOTTO_STRATEGY));
+    assertThat(resp.getBody()).containsEntry("count", 2);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "Copytrade-V1", // upper case
+        "-leading-dash",
+        "has space",
+        "a_b", // underscore not allowed
+        "x';drop table strategy_config;--",
+        "a123456789a123456789a123456789a123456789a123456789a123456789a1234" // 65 chars
+      })
+  void invalidStrategyParam_isBadRequest_andNeverHitsTheDb(String param) {
+    CopytradeFanoutController controller =
+        new CopytradeFanoutController(dslOver(List.of()), STRATEGY);
+
+    assertThatThrownBy(() -> controller.targets(param))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("strategy_id");
+    assertThat(capturedSql.get()).as("query must not run for an invalid id").isNull();
+    // IllegalArgumentException is what the gateway maps to 400 {"error":"bad_request",...}.
+    ResponseEntity<Map<String, Object>> mapped =
+        new GlobalExceptionHandler().badRequest(new IllegalArgumentException("strategy_id"));
+    assertThat(mapped.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    assertThat(mapped.getBody()).containsEntry("error", "bad_request");
   }
 }
