@@ -58,13 +58,22 @@ def main():
     for u in read_universe(a.universe_file):
         try:
             rows = oi_rows(contracts(u, headers, today, a.expiry_days), today.isoformat())
+            if not rows:  # a transient empty response must never replace a good day's snapshot (#998)
+                failed += 1
+                print(f"{today} {u}: ERROR 0 contracts returned, keeping existing file", file=sys.stderr, flush=True)
+                continue
             day_dir = os.path.join(a.out, u)
             os.makedirs(day_dir, exist_ok=True)
             path = os.path.join(day_dir, f"{today}.ndjson.gz")
-            with gzip.open(path + ".tmp", "wt") as f:
-                for r in rows:
-                    f.write(json.dumps(r) + "\n")
-            os.replace(path + ".tmp", path)  # whole-day snapshot: a re-run replaces, never appends
+            tmp = path + ".tmp"
+            try:
+                with gzip.open(tmp, "wt") as f:
+                    for r in rows:
+                        f.write(json.dumps(r) + "\n")
+                os.replace(tmp, path)  # whole-day snapshot: a re-run replaces, never appends
+            finally:
+                if os.path.exists(tmp):  # failed write: leave no partial .tmp behind
+                    os.unlink(tmp)
             print(f"{today} {u}: {len(rows)} contracts", flush=True)
         except Exception as e:
             failed += 1
