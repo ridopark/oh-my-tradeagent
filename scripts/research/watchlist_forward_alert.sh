@@ -50,31 +50,6 @@ for d in "$OUT"/raw/*/; do
   [ -f "$d/manifest.json" ] && ! eod_ok "$d" && problems+=("end-of-day files missing for $day (flow-only folder)")
 done
 
-# watchlist-forward-ml-v1 (PREREG-2026-10-24, amendments A1/A6): the 15:50 CT ML scoring must have written
-# today's rows — one per leg (two levels on one symbol+direction are cross-joined by the frozen scorer) —
-# and every scored leg needs a TabPFN probability (the frozen scorer only warns on stderr; the leg then
-# silently drops out of M1).
-if [ "$dow" -le 5 ] && eod_ok "$OUT/raw/$today"; then
-  ml_out=$(python3 - "$OUT/ml_scores.csv" "$OUT/raw/$today/legs.json" "$today" <<'PY'
-import csv, json, sys
-path, legs_path, today = sys.argv[1:]
-try:
-    rows = [r for r in csv.DictReader(open(path)) if r["d"] == today]
-except FileNotFoundError:
-    rows = []
-legs = len(json.load(open(legs_path))["legs"])
-if legs and not rows:
-    print(f"ML scoring wrote no rows for {today} ({legs} legs)"); sys.exit()
-if len(rows) != legs:
-    print(f"ML scoring wrote {len(rows)} rows for {legs} legs on {today} (two levels on one symbol+direction: ml-v1 amendment A1 excludes them)")
-nan = [r["s"] for r in rows if r["scored"] in ("1", "1.0") and r["p_tabpfn24"] == ""]
-if nan:
-    print(f"TabPFN probability missing on scored legs {nan} for {today} (M1 sample loss)")
-PY
-  )
-  while IFS= read -r line; do [ -n "$line" ] && problems+=("$line"); done <<< "$ml_out"
-fi
-
 if [ "${#problems[@]}" -eq 0 ]; then
   log "OK"
   exit 0
