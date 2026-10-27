@@ -1,0 +1,168 @@
+# Lotto signal poller (PLAN-2026-10-26-copytrade-lotto-v1, phase 5; issue #987). Turns new
+# TradingTheTrend posts in #lotto-alerts — already mirrored into the BFF's options_chat_message
+# table by 64-discord-lotto-mirror.yaml — into CopytradeSignalWorkflow starts for the
+# `copytrade-lotto-v1` strategy on EVERY tenant that enables it (registry fan-out), exactly as the
+# Discord sidecar does for copytrade-v1.
+#
+# NO Discord session, NO Chromium, NO Playwright: it only polls the BFF's internal
+# /internal/options-chat/messages read with the route-scoped ingest token, so it carries no session
+# PVC and can roll with the default RollingUpdate (a surge pod is harmless — Temporal's
+# REJECT_DUPLICATE workflow-id policy de-duplicates any overlap).
+#
+# DARK BY DEFAULT. LOTTO_DRY_RUN=true makes it log `dry-run would-emit` lines and start NO
+# workflows. The go-live flip (plan P0-6, AFTER the PREREG is committed and tagged) is:
+#     kubectl -n copytrade set env deploy/lotto-signal LOTTO_DRY_RUN=false
+# A later manifest re-apply (deploy.yml rolls this file on change) re-asserts the dark value, so
+# once live, change the value HERE as well.
+#
+# Same image as the sidecar and the mirrors; deploy.yml rolls it with every
+# services/signal-source-discord/* change.
+#
+# FIRST-TIME CREATE IS MANUAL. deploy.yml's "Verify :latest is current" step runs `kubectl get
+# deployment/<service>` BEFORE the apply step, so a Deployment that does not exist yet fails the
+# roll job and is never created by CI (64-discord-lotto-mirror.yaml was hand-applied the same way).
+# Operator, once, after the phase-4 sidecar image has been built (lotto_main must be in the image):
+#   kubectl -n copytrade apply -f infra/k8s/65-lotto-signal.yaml
+# Every later change rolls through deploy.yml normally.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lotto-signal
+  namespace: copytrade
+  labels:
+    app: lotto-signal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lotto-signal
+  template:
+    metadata:
+      labels:
+        app: lotto-signal
+    spec:
+      containers:
+        - name: poller
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          # MUST be `command:` — NEVER `args:`. The Dockerfile's ENTRYPOINT is exec-form with no
+          # CMD, so `args:` would APPEND rather than replace and start
+          # `... main -m ... lotto_main` — i.e. a SECOND live trading signal watcher against the
+          # real Discord account. This is the highest-consequence line in the file.
+          command: ["python", "-m", "ohmytradeagent_sidecar.lotto_main"]
+          # NO securityContext, deliberately — matching 55-signal-source-discord.yaml and the
+          # mirrors, which run this image with `{}` (its USER is the NAME `pwuser`, which
+          # `runAsNonRoot: true` cannot verify). Harden in its own PR, not here.
+          env:
+            # Dark switch — see the header. "true" = log would-emit, start nothing.
+            - name: LOTTO_DRY_RUN
+              value: "true"
+            # #lotto-alerts. Must also be in the BFF allow-list (options-chat.channel-ids) or the
+            # internal read is a 400.
+            - name: LOTTO_CHANNEL_ID
+              value: "880503518878892143"
+            # Rows by any other author_name are dropped before parsing; the orchestrator's
+            # author_whitelist is the second gate.
+            - name: LOTTO_AUTHOR
+              value: TradingTheTrend
+            # Fan-out: the strategy is a row ANY tenant can enable (e.g. staging_paper), exactly like
+            # copytrade-v1. The poller reads the enabled (tenant, copytrade-lotto-v1) set from the
+            # api-gateway registry (GET /internal/copytrade-fanout-targets?strategy_id=...) and starts
+            # one workflow per target. Same creds bundle as 55-signal-source-discord.yaml.
+            - name: LOTTO_FANOUT_SOURCE
+              value: registry
+            - name: API_GATEWAY_BASE_URL
+              value: http://api-gateway:8082
+            - name: API_GATEWAY_SHARED_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: API_GATEWAY_SHARED_TOKEN
+            - name: SIGNAL_FANOUT_REFRESH_SECS
+              value: "60"
+            - name: STRATEGY_ID
+              value: copytrade-lotto-v1
+            - name: BFF_INTERNAL_URL
+              value: http://tenant-dashboard-bff:8083
+            # Route-scoped ingest credential — NOT BFF_SHARED_TOKEN. ServiceTokenFilter accepts
+            # only this token on /internal/options-chat/** and rejects the shared token there, so
+            # this pod can never set X-Tenant-Id and read real-money positions.
+            - name: OPTIONS_CHAT_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: OPTIONS_CHAT_INGEST_TOKEN
+            # Writable emptyDir — owns the heartbeat the liveness probe reads. No cursor is persisted: a
+            # restart rebuilds the book from the lookback window below.
+            - name: STATE_DIR
+              value: /app/state
+            - name: POLL_INTERVAL_SECS
+              value: "5"
+            # Boot rebuilds the open-contract book from this window; rows older than
+            # LOTTO_EMIT_MAX_AGE_SECS update state only.
+            - name: LOTTO_LOOKBACK_DAYS
+              value: "14"
+            # Only signals posted within this many seconds are emitted — at boot too, so a restart
+            # (including the go-live `set env` flip) emits any signal from the prior window for real;
+            # Temporal REJECT_DUPLICATE backstops double emits. Size from P0-1's measured mirror lag.
+            - name: LOTTO_EMIT_MAX_AGE_SECS
+              value: "120"
+            # Temporal — same names and sources as 55-signal-source-discord.yaml. The task queue
+            # is left to the code default (orchestrator-core), as it is there.
+            - name: TEMPORAL_TARGET
+              value: temporal-frontend.temporal.svc.cluster.local:7233
+            - name: TEMPORAL_NAMESPACE
+              value: copytrade
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+          # Same contract as 55-signal-source-discord.yaml: heartbeat present and mtime within 120s.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 120
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              # No Chromium: a Python poller plus the Temporal client. 128Mi is generous.
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: state
+          emptyDir: {}
+---
+# ADDITIVE ingress rule for the BFF, a sibling of the mirrors' (62/63/64). Kept as its OWN policy
+# so that deleting this poller deletes exactly its own access. NetworkPolicies selecting the same
+# pod are UNIONed, not overridden, so this grants lotto-signal -> BFF:8083 WITHOUT touching
+# `tenant-dashboard-bff-allow-dashboard-only` in 58-tenant-dashboard-bff.yaml — which matters,
+# because that manifest is drifted from live (applying it yields a BFF that cannot boot).
+# It lives in THIS file so CI applies the grant with the pod that needs it.
+#
+# No policy is needed for Temporal: nothing in infra/k8s selects the temporal namespace's pods
+# and there are no Egress policies, which is why 55-signal-source-discord.yaml reaches it with none.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-lotto-signal
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: lotto-signal
+      ports:
+        - protocol: TCP
+          port: 8083
