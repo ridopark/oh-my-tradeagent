@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -12,6 +13,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -26,8 +28,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>"Enabled" = {@code enabled} true OR absent.</b> The predicate {@code (config->>'enabled')
  * IS DISTINCT FROM 'false'} matches the schema default ({@code true}) and the runtime gate in
  * {@code CopytradeSignalWorkflowImpl}, which rejects only {@code Boolean.FALSE}. The {@code
- * strategy_id} is a configurable bind parameter (default {@code copytrade-v1}), never a hardcoded
- * query literal.
+ * strategy_id} is a bind parameter, never a hardcoded query literal: it defaults to the configured
+ * {@code copytrade.fanout.strategy-id} ({@code copytrade-v1}) and an optional {@code ?strategy_id=}
+ * query parameter overrides it per request (#987: a second signal source, e.g. {@code
+ * copytrade-lotto-v1}, fans out to the tenants that enable ITS strategy). The override must match
+ * {@link #STRATEGY_ID_PATTERN}; anything else is a 400 {@code bad_request}.
  *
  * <p><b>Auth.</b> The caller is a SERVICE (the sidecar), not an operator, so this route is
  * bearer-gated by {@link com.ohmytradeagent.apigateway.security.ServiceTokenFilter} (shared service
@@ -43,6 +48,9 @@ import org.springframework.web.bind.annotation.RestController;
 @ConditionalOnProperty(name = "copytrade.fanout.enabled", havingValue = "true")
 public class CopytradeFanoutController {
 
+  /** Format guard for the per-request {@code strategy_id} override. */
+  static final Pattern STRATEGY_ID_PATTERN = Pattern.compile("^[a-z0-9][a-z0-9-]{0,63}$");
+
   private final DSLContext dsl;
   private final String strategyId;
 
@@ -53,14 +61,16 @@ public class CopytradeFanoutController {
   }
 
   @GetMapping
-  public ResponseEntity<Map<String, Object>> targets() {
+  public ResponseEntity<Map<String, Object>> targets(
+      @RequestParam(name = "strategy_id", required = false) String requestedStrategyId) {
+    String effectiveStrategyId = resolveStrategyId(requestedStrategyId);
     List<Map<String, Object>> targets =
         dsl
             .select(DSL.field("tenant_id"), DSL.field("strategy_id"))
             .from(DSL.table("strategy_config"))
             .where(
                 DSL.field("strategy_id")
-                    .eq(strategyId)
+                    .eq(effectiveStrategyId)
                     // enabled true OR absent — exclude only an explicit enabled:false.
                     .and(DSL.condition("(config ->> 'enabled') is distinct from 'false'")))
             .fetch()
@@ -72,6 +82,17 @@ public class CopytradeFanoutController {
     body.put("targets", targets);
     body.put("count", targets.size());
     return ResponseEntity.ok(body);
+  }
+
+  /** Absent/blank → the configured default; present → validated against the format guard. */
+  private String resolveStrategyId(String requested) {
+    if (requested == null || requested.isBlank()) {
+      return strategyId;
+    }
+    if (!STRATEGY_ID_PATTERN.matcher(requested).matches()) {
+      throw new IllegalArgumentException("strategy_id must match " + STRATEGY_ID_PATTERN.pattern());
+    }
+    return requested;
   }
 
   private static Map<String, Object> target(Record r) {

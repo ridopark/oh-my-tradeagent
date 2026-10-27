@@ -1,0 +1,80 @@
+independent BTO signals used: 25  (include_manual=False)
+author
+Donald T                 1
+Lars                     5
+Shakira T                2
+TB22                     7
+beendoubleyou            5
+sloth  legooman NR100    5
+
+=== real: tag counts per half ===
+tag   AGREE  SILENT
+half               
+FIT       1     158
+TEST      1     149
+
+=== real: mean bps (n) per tag per half ===
+               n  n_days   r60  rclose
+half tag                              
+FIT  AGREE     1       1 -17.0   -54.0
+     SILENT  158      44  -6.2    -6.7
+TEST AGREE     1       1 -12.2    21.1
+     SILENT  149      36  -4.5     1.7
+
+=== real: contrasts, bps, day-clustered 95% CI ===
+FIT r60    AGREE-SILENT     -10.8 [  -26.6,   +5.8]  AGREE-days=1
+FIT r60    AGREE-DISAGREE    +nan [   +nan,   +nan]  AGREE-days=1
+FIT rclose AGREE-SILENT     -47.3 [  -72.8,  -22.9]  AGREE-days=1
+FIT rclose AGREE-DISAGREE    +nan [   +nan,   +nan]  AGREE-days=1
+TEST r60    AGREE-SILENT      -7.7 [  -29.0,   +9.3]  AGREE-days=1
+TEST r60    AGREE-DISAGREE    +nan [   +nan,   +nan]  AGREE-days=1
+TEST rclose AGREE-SILENT     +19.4 [   -8.5,  +43.9]  AGREE-days=1
+TEST rclose AGREE-DISAGREE    +nan [   +nan,   +nan]  AGREE-days=1
+
+=== placebo: tag counts per half ===
+tag   AGREE  DISAGREE  SILENT
+half                         
+FIT       8         5    1468
+TEST      4         2    1306
+
+=== placebo: mean bps (n) per tag per half ===
+                  n  n_days   r60  rclose
+half tag                                 
+FIT  AGREE        8       3 -29.5   166.8
+     DISAGREE     5       3 -11.6   -63.7
+     SILENT    1468      53   2.1     2.0
+TEST AGREE        4       2 -27.3   -57.1
+     DISAGREE     2       1  54.0    52.0
+     SILENT    1306      37   3.5    12.7
+
+=== placebo: contrasts, bps, day-clustered 95% CI ===
+FIT r60    AGREE-SILENT     -31.6 [  -88.0,  +18.3]  AGREE-days=3
+FIT r60    AGREE-DISAGREE   -17.9 [  -74.9,   -0.1]  AGREE-days=3
+FIT rclose AGREE-SILENT    +164.7 [  -14.2, +223.2]  AGREE-days=3
+FIT rclose AGREE-DISAGREE  +230.5 [   -2.2, +291.9]  AGREE-days=3
+TEST r60    AGREE-SILENT     -30.9 [  -65.8,   +4.5]  AGREE-days=2
+TEST r60    AGREE-DISAGREE   -81.3 [ -109.9,  -52.7]  AGREE-days=2
+TEST rclose AGREE-SILENT     -69.8 [ -170.8,  +31.2]  AGREE-days=2
+TEST rclose AGREE-DISAGREE  -109.0 [ -199.1,  -19.0]  AGREE-days=2
+
+=== placebo comparison: AGREE(real) - AGREE(placebo), and (A-S real) - (A-S placebo) point, bps ===
+FIT r60    AGREE real -17.0 vs placebo -29.5 -> +12.5;  DiD +20.8
+FIT rclose AGREE real -54.0 vs placebo +166.8 -> -220.8;  DiD -212.0
+TEST r60    AGREE real -12.2 vs placebo -27.3 -> +15.1;  DiD +23.2
+TEST rclose AGREE real +21.1 vs placebo -57.1 -> +78.2;  DiD +89.2
+
+=== PASS RULE (r60) ===
+FIT: A-S>0 & CI excl 0: False;  A-D>0: False (n/a, no DISAGREE legs)
+TEST: A-S>0 & CI excl 0: False;  A-D>0: False (n/a, no DISAGREE legs)
+H9.1: FAIL
+
+=== AGREE/DISAGREE/BOTH real legs ===
+half          d    s   dir  fire_min   tag authors       r60    rclose
+ FIT 2026-07-01 MSFT ABOVE      97.0 AGREE    TB22 -0.001696 -0.005398
+TEST 2026-09-21 AMZN ABOVE     181.0 AGREE    TB22 -0.001221  0.002112
+
+=== per-author AGREE legs (real) ===
+             n  r60_bps  rclose_bps
+author half                        
+TB22   FIT   1    -17.0       -54.0
+       TEST  1    -12.2        21.1

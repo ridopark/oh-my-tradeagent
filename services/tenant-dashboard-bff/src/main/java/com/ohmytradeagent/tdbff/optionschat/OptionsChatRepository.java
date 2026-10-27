@@ -300,20 +300,52 @@ public class OptionsChatRepository {
     for (Record r : rows) {
       long id = r.get("message_id", Long.class);
       out.add(
-          new StoredMessage(
-              id,
-              r.get("author_name", String.class),
-              r.get("author_color", String.class),
-              r.get("author_avatar_url", String.class),
-              r.get("posted_at", OffsetDateTime.class),
-              r.get("content", String.class),
-              r.get("reply_to_id", Long.class),
-              Boolean.TRUE.equals(r.get("edited", Boolean.class)),
-              r.get("deleted_at", OffsetDateTime.class),
-              attachments.getOrDefault(id, List.of()),
-              embeds.getOrDefault(id, List.of())));
+          toStoredMessage(
+              r, attachments.getOrDefault(id, List.of()), embeds.getOrDefault(id, List.of())));
     }
     return out;
+  }
+
+  /**
+   * Oldest-first page of messages for {@code channelId} strictly after {@code afterId} — the mirror
+   * of {@link #recent} for a poller that walks forward from a cursor and never pages up. Same
+   * projection and the same {@code (channel_id, message_id DESC)} index, scanned backwards.
+   *
+   * <p>No children: the caller reads text only, and loading attachments for a tail poll would query
+   * two more tables every few seconds for rows whose images it never shows. {@code attachments} and
+   * {@code embeds} come back empty, not null.
+   */
+  public List<StoredMessage> since(long channelId, long afterId, int limit) {
+    Result<Record> rows =
+        writerDsl.fetch(
+            "SELECT message_id, author_name, author_color, author_avatar_url, posted_at, content,"
+                + " reply_to_id, edited, deleted_at FROM options_chat_message"
+                + " WHERE channel_id = ? AND message_id > ? ORDER BY message_id ASC LIMIT ?",
+            channelId,
+            afterId,
+            limit);
+    List<StoredMessage> out = new ArrayList<>(rows.size());
+    for (Record r : rows) {
+      out.add(toStoredMessage(r, List.of(), List.of()));
+    }
+    return out;
+  }
+
+  /** One projected {@code options_chat_message} row, with whatever children the caller fetched. */
+  private static StoredMessage toStoredMessage(
+      Record r, List<StoredAttachment> attachments, List<StoredEmbed> embeds) {
+    return new StoredMessage(
+        r.get("message_id", Long.class),
+        r.get("author_name", String.class),
+        r.get("author_color", String.class),
+        r.get("author_avatar_url", String.class),
+        r.get("posted_at", OffsetDateTime.class),
+        r.get("content", String.class),
+        r.get("reply_to_id", Long.class),
+        Boolean.TRUE.equals(r.get("edited", Boolean.class)),
+        r.get("deleted_at", OffsetDateTime.class),
+        attachments,
+        embeds);
   }
 
   /**

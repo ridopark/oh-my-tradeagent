@@ -1,0 +1,23 @@
+I wrote the review to `./review/REVIEW.md`. Every number in it comes from my own scripts (`review/r1…r7_*.py`); nothing outside the directory was touched. I rebuilt C1, C2 and the key C4 numbers independently, and they match yours exactly. The main conclusion, no tradeable edge on the author's levels, survives. Two of the supporting claims don't.
+
+**Verdicts**
+- **C1 HOLDS.** r60 is −6.3 (FIT) / −4.6 (TEST). The placebo flaw is real: 50% of fired placebo legs gap vs 4% of real ones, because offsets are anchored to the prior close. But a gap-matched placebo (offset from today's open) puts real legs *below* placebo: r60 −17 FIT, and r5 TEST −11 to −14 with the CI excluding 0. If anything there's a slight short-horizon fade, not continuation.
+- **C2 HOLDS.** 0/64, and best-on-FIT is −10.2 on TEST. Still 0/64 when target is checked before stop on the same bar.
+- **C3 HOLDS, weakly evidenced.** I get 43.7% vs 31% in my own placebos, and the best single rule (PMH) hits 16.5%. There's no code behind your 33% placebo or "best rule 33%". 94% of levels are integers or .5, a rule you never tested; my best round-number rule hits 24%.
+- **C4: "no survivor" HOLDS; the gap-through candidate is noise.** p=0.061 comes from an unstudentized White RC (`evalh.py:15`), not the Hansen-style test PREREG2 specified. Studentized, it is p=0.59. Its FIT half is weak (median −25 bps, 4/9 positive), it includes a typo leg, and generic premarket-level gap-throughs 2016–2025 show no support (NVDA −47 bps, n=32). "Min RC p 0.58 intraday" only reproduces on an intraday-only family; over the full ledger it's 0.92.
+- **C5:** the MDE is right only for the round-1 intraday arm (23–39 bps); for gap-through it's ~260+ bps. **The cost claim is unsupported.** No quote data or code produces the 84 bps. Inferred from option trade prices, spreads are about 378 bps of premium, roughly 10 bps of underlying. Overnight theta (~15–30 bps) is ignored.
+- **C6 WEAKENED.** The numbers reproduce only by excluding RT01. Unclosed trades are handled one-sidedly: the AMD alert (RT08), modelled as −99.6%, actually traded at 7.50–11.45, consistent with the author's "2.50 to 8.00" claim. Depending on how open trades are marked, the mean ranges from −2% to +19%.
+
+**Bugs that matter**
+1. **Look-ahead in the H-a vol filter** (`hyp.py:15,57–62`). It uses the 09:30–10:00 range, but 77% of entries happen before 10:00. It doesn't change the 2026 result (H-a fails anyway). But the decade NVDA H-a result (+17 bps in both halves) comes entirely from this: entries after 10:00 make −0.6/−7.3 bps. Fix this before reporting any decade results.
+2. **Wrong reality-check test** (`evalh.py:15`); this is what removes the C4 candidate.
+3. **Four typo levels** with no sanity filter: SPY 549/554 on 07-13 (SPY was ~752), DELL 540, AMD 965.
+
+**Smaller issues**
+- The vol threshold of 1.2 selects the top 21%, not the top tercile PREREG2 called for.
+- The decade run went ahead although the 60% reconstruction gate failed, and only 3 of 9 symbols were processed.
+- Five legs dated 07-01 were ingested after that session closed.
+
+**Checked and found correct:** BELOW sign handling (MFE/MAE and barrier), timezone/DST conversion, dedupe (647 legs), and RC demeaning.
+
+The "what I'd test next" list is at the end of `REVIEW.md`.

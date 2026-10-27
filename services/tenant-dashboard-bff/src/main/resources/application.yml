@@ -106,7 +106,7 @@ options-chat:
   #
   # Entries are `id` or `id:Label`; the label is what the page's tab shows, so the page has no
   # channel ids compiled into it. The FIRST entry is the default the page opens on.
-  channel-ids: ${OPTIONS_CHAT_CHANNEL_IDS:786109983065505792:Discussion,769797179992571914:Signals}
+  channel-ids: ${OPTIONS_CHAT_CHANNEL_IDS:786109983065505792:Discussion,769797179992571914:Signals,880503518878892143:Lotto}
   # SEPARATE credential from bff.service-token, enforced by ServiceTokenFilter's route scoping on
   # /internal/options-chat/**. The caller is the Discord-scraping pod; with the shared token it
   # could spoof any X-Tenant-Id and read real-money positions. NO default — blank fails closed and

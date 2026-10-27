@@ -2,6 +2,7 @@ package com.ohmytradeagent.marketdata.provider.alpaca;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ohmytradeagent.marketdata.MarketHours;
 import com.ohmytradeagent.marketdata.health.FeedHealth;
 import com.ohmytradeagent.marketdata.provider.Bar;
 import com.ohmytradeagent.marketdata.provider.ChainContract;
@@ -14,6 +15,7 @@ import com.ohmytradeagent.marketdata.provider.Quote;
 import com.ohmytradeagent.marketdata.provider.Subscription;
 import com.ohmytradeagent.marketdata.provider.Tick;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.math.BigDecimal;
 import java.net.URI;
@@ -24,6 +26,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -73,6 +76,12 @@ public class AlpacaMarketData implements MarketDataProvider {
 
   private static final Logger log = LoggerFactory.getLogger(AlpacaMarketData.class);
   private static final Duration MAX_BACKOFF = Duration.ofSeconds(30);
+  // A stock socket can go silent with no onError/onClose (half-open): on 2026-10-20 it delivered
+  // nothing for 4h of RTH while every watchlist leg's silence re-subscribe hit the per-(ticker,
+  // workflow) dedup and reused the dead subscription. Only a new socket fixes that, so the watchdog
+  // reconnects a socket that has subscribers but has sent no frame for this long during RTH.
+  static final Duration STOCK_SILENCE_RECONNECT = Duration.ofSeconds(60);
+  private static final Duration STOCK_SILENCE_CHECK_EVERY = Duration.ofSeconds(15);
 
   private final RestClient rest;
   private final ObjectMapper mapper;
@@ -178,6 +187,15 @@ public class AlpacaMarketData implements MarketDataProvider {
   // Subscribes are gated on this flag; the authenticated control frame applies the byTicker set.
   // Package-private for test assertions. Reset on every (re)connect/close.
   volatile boolean stockAuthenticated;
+  // Last frame received on, connect of, or subscribe sent to the stock socket (epoch millis). A
+  // subscribe counts so a socket left idle with no subscribers is not reconnected the moment one
+  // arrives.
+  private volatile long stockLastActivityMillis;
+  // The socket the silence watchdog last replaced. Its late onError/onClose must not schedule a
+  // reconnect: runStockReconnect would drop the NEW socket without closing it, and Alpaca allows
+  // one
+  // stock connection.
+  private volatile WebSocket retiredStockWs;
 
   @Autowired
   public AlpacaMarketData(
@@ -788,6 +806,7 @@ public class AlpacaMarketData implements MarketDataProvider {
    * tick.
    */
   void dispatchStockWsMessage(String json) {
+    stockLastActivityMillis = System.currentTimeMillis();
     JsonNode root;
     try {
       root = mapper.readTree(json);
@@ -1056,6 +1075,7 @@ public class AlpacaMarketData implements MarketDataProvider {
         return;
       }
       socket.sendText(subscribeAction("subscribe", ticker), true);
+      stockLastActivityMillis = System.currentTimeMillis();
     }
   }
 
@@ -1109,6 +1129,7 @@ public class AlpacaMarketData implements MarketDataProvider {
       try {
         stockAuthenticated = false;
         stockWs = connectStockBlocking();
+        stockLastActivityMillis = System.currentTimeMillis();
         stockNextBackoff = Duration.ofSeconds(1);
         // Authenticate in-band; FeedHealth.markConnected(EQUITY) is deferred to the `authenticated`
         // control frame (handleStockControlSuccess), which is when data can actually flow.
@@ -1122,7 +1143,8 @@ public class AlpacaMarketData implements MarketDataProvider {
     }
   }
 
-  private WebSocket connectStockBlocking() {
+  /** Package-private so tests can stand in a fake socket. */
+  WebSocket connectStockBlocking() {
     String url =
         props
             .effectiveStockDataWsUrl()
@@ -1169,6 +1191,58 @@ public class AlpacaMarketData implements MarketDataProvider {
     ensureStockWs();
   }
 
+  @PostConstruct
+  void startStockSilenceWatchdog() {
+    long every = STOCK_SILENCE_CHECK_EVERY.toMillis();
+    scheduler.scheduleWithFixedDelay(
+        () -> {
+          try {
+            checkStockSilence(System.currentTimeMillis(), ZonedDateTime.now(MarketHours.ET));
+          } catch (RuntimeException e) {
+            // A throw would cancel the fixed-delay task for good.
+            log.error("AUDIT stock-ws-silence-check-failed: {}", e.getMessage());
+          }
+        },
+        every,
+        every,
+        TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Replaces a stock socket that has gone silent: open, subscribers waiting, RTH, and no frame for
+   * {@link #STOCK_SILENCE_RECONNECT}. The old socket is aborted (its late events are ignored by the
+   * listener) and a new one connects; its `authenticated` frame re-subscribes every ticker.
+   * Package-private so tests can drive it with a fixed clock.
+   */
+  void checkStockSilence(long nowMillis, ZonedDateTime nowEt) {
+    WebSocket socket = stockWs;
+    if (socket == null
+        || stockReconnectInFlight.get()
+        || !MarketHours.isRegularTradingHours(nowEt)
+        || byTicker.values().stream().allMatch(List::isEmpty)) {
+      return;
+    }
+    long silentMs = nowMillis - stockLastActivityMillis;
+    if (silentMs < STOCK_SILENCE_RECONNECT.toMillis()) {
+      return;
+    }
+    synchronized (stockWsLock) {
+      if (stockWs != socket) {
+        return; // reconnected meanwhile
+      }
+      stockWs = null;
+      stockAuthenticated = false;
+      retiredStockWs = socket;
+    }
+    log.error(
+        "AUDIT stock-ws-silent: no frame for {}s with {} ticker(s) subscribed; reconnecting",
+        silentMs / 1000,
+        byTicker.size());
+    feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
+    socket.abort();
+    ensureStockWs();
+  }
+
   /**
    * Accumulate one message's fragments into {@code buf}, returning the complete frame (and
    * resetting {@code buf}) only on the final fragment; otherwise null. The buffer is snapshotted
@@ -1203,6 +1277,9 @@ public class AlpacaMarketData implements MarketDataProvider {
 
     @Override
     public void onError(WebSocket socket, Throwable error) {
+      if (socket == retiredStockWs) {
+        return; // the silence watchdog already replaced it
+      }
       log.error("AUDIT stock-ws-error: {}", error.getMessage());
       stockAuthenticated = false;
       feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);
@@ -1211,6 +1288,9 @@ public class AlpacaMarketData implements MarketDataProvider {
 
     @Override
     public CompletableFuture<?> onClose(WebSocket socket, int statusCode, String reason) {
+      if (socket == retiredStockWs) {
+        return null; // the silence watchdog already replaced it
+      }
       log.error("AUDIT stock-ws-closed status={} reason={}", statusCode, reason);
       stockAuthenticated = false;
       feedHealth.markDisconnected(FeedHealth.Feed.EQUITY);

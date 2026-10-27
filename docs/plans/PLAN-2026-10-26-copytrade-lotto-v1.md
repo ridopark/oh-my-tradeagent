@@ -208,9 +208,12 @@ with no Discord session and no Playwright.
     `LOTTO_AUTHOR=TradingTheTrend`, `TENANT_ID`, `STRATEGY_ID=copytrade-lotto-v1`,
     `TEMPORAL_TARGET/NAMESPACE/TASK_QUEUE` (as `main.py:103-105`), `POLL_INTERVAL_SECS=5`,
     `LOTTO_LOOKBACK_DAYS=14`, `LOTTO_EMIT_MAX_AGE_SECS`, `LOTTO_DRY_RUN` (default `true`).
-  - On boot it rebuilds `LottoBook` from `since(snowflake(now − lookback))`, without emitting. Then
-    it polls `since(cursor)`.
-  - It drops rows where `author_name != LOTTO_AUTHOR` or `deleted`. It ignores edits after first read.
+  - On boot it rebuilds `LottoBook` from `since(snowflake(now − lookback))`; rows still inside
+    `LOTTO_EMIT_MAX_AGE_SECS` ARE emitted (an exit posted during a restart must still close; Temporal
+    `REJECT_DUPLICATE` backstops double emits — so the go-live `set env` restart emits the prior window for
+    real). Then it polls `since(cursor)`, paging while `count == limit`. No cursor is persisted.
+  - It drops rows where `author_name != LOTTO_AUTHOR`. (`deleted`/edits never change after first scrape —
+    ingest is `ON CONFLICT DO NOTHING` — so there is nothing to filter.)
   - It emits only signals whose `posted_at` age is ≤ `LOTTO_EMIT_MAX_AGE_SECS`. Older ones update
     state only, so a restart re-emits nothing stale, and Temporal `REJECT_DUPLICATE` backstops it.
   - It emits **every** EXIT. The orchestrator turns repeats into audited no-ops, and a second post
@@ -289,6 +292,26 @@ Tag commit precedes the first `EntryFilled` for `paper_lotto`.
   carries M1 (r18 band), M2 (realized), M3 (first-exit-full-close rescore) as written.
 - F4/F5: as recommended (26 BTOs incl. the rolled 1015c; replay dry-run + forward dry-run period instead of a live replay).
 - Blocker acknowledged: PR #986 (lotto mirror) must be merged before Phases 3 and 5 can go in.
+
+## Amendments from the phase-2 goal review (2026-10-26, before any P0 step)
+- **P0-3 order is creds row → create → enable.** `CreateTenantController.java:103-107` DISCARDS the caller's
+  `broker_account_id` and FORCES `enabled=false`; the id binds only from `VerifiedAccountGuard`, which needs the
+  paper_lotto credential row in exec_alpaca_paper (`BROKER_CREDS_SOURCE=db`). Register the new paper account's
+  credentials FIRST (`docs/ops/broker-credential-opt-in.md`), then create, then enable via the tenant-scoped
+  `/config` POST with the full blob (never the onboard wizard: its template injects copytrade-v1's
+  `partial_fractions`). Only then restart the orchestrator and run the #871 drift query.
+- **Expiry-day late entries (phase 4).** A lot that fills after 15:30 ET on its expiry day arms no flatten timer and
+  is marked worthless/terminated with the broker position still open (`PositionWorkflowImpl.java:1780-1811`,
+  `:1918-1924`). The poller does not emit a BTO for a contract expiring on the posted ET date at or after
+  `LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET` (default 15:25 — five minutes before the flatten covers the paper pending TTL; keeps the 15:22 MU 1010c runner in-sample); the book is still updated. The PREREG excludes such entries from M1–M3.
+- **P0-4 becomes recurring.** `default_stc_fraction`, `flatten_lead_minutes`, `force_close_0dte_et` and
+  `eod_force_flatten` are SAFE-class editor fields; the raw config POST also accepts a `partial_fractions` blob. Run
+  the P0-4 invariant query daily from the homelab crontab next to `watchlist_forward_alert.sh` and page on drift.
+- `max_signal_age_stc_secs` is inert on the STC path; the exit-age bound is `LOTTO_EMIT_MAX_AGE_SECS` (P0-1 sizes it).
+- **P0-5b (from the phase-5 review): the first create of Deployment `lotto-signal` is a one-time manual
+  `kubectl -n copytrade apply -f infra/k8s/65-lotto-signal.yaml`**, AFTER the phase-4 sidecar image is built and
+  the phase-5 PR is merged. deploy.yml's verify step runs `kubectl get deployment` before apply and fails on a
+  Deployment that does not exist, so CI never bootstraps it (64-discord-lotto-mirror was hand-applied the same way).
 
 ## Forks for the lead / operator
 - **F1 — full-close mechanism.** *Recommended: config-only* (phase 2). The alternative is a schema

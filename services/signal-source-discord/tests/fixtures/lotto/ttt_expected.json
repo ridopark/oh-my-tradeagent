@@ -1,0 +1,793 @@
+[
+ {
+  "i": "1480975278317768735",
+  "text": "SPY 3/10 681p @.70 trying to fade this pump",
+  "label": "ENTRY",
+  "contract": "SPY260310P00681000",
+  "price": 0.7
+ },
+ {
+  "i": "1480976800648528055",
+  "text": ".85 taking some",
+  "label": "EXIT",
+  "contract": "SPY260310P00681000",
+  "price": 0.85
+ },
+ {
+  "i": "1480976930307047670",
+  "text": "hoping for 100%, if we dip back to 680",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1480983315233116230",
+  "text": "1.40 100% sold half",
+  "label": "EXIT",
+  "contract": "SPY260310P00681000",
+  "price": 1.4
+ },
+ {
+  "i": "1480992225642156053",
+  "text": "1.70 took more off",
+  "label": "EXIT",
+  "contract": "SPY260310P00681000",
+  "price": 1.7
+ },
+ {
+  "i": "1480992425739813048",
+  "text": "3.20 3/4 out now weeeeee",
+  "label": "EXIT",
+  "contract": "SPY260310P00681000",
+  "price": 3.2
+ },
+ {
+  "i": "1481007366316228660",
+  "text": "Cut the last @ 2.40",
+  "label": "EXIT",
+  "contract": "SPY260310P00681000",
+  "price": 2.4
+ },
+ {
+  "i": "1483554636295176274",
+  "text": "META 3/18 615p @ 1.70",
+  "label": "ENTRY",
+  "contract": "META260318P00615000",
+  "price": 1.7
+ },
+ {
+  "i": "1483554727685001266",
+  "text": "eyeing this gap fill",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1483819835870675126",
+  "text": "2.94 partial",
+  "label": "EXIT",
+  "contract": "META260318P00615000",
+  "price": 2.94
+ },
+ {
+  "i": "1485676279587012730",
+  "text": "BTO QQQ 3/24 580p @ 1.80 high risk",
+  "label": "ENTRY",
+  "contract": "QQQ260324P00580000",
+  "price": 1.8
+ },
+ {
+  "i": "1485677010876633299",
+  "text": "2..15 taking some quickies",
+  "label": "EXIT",
+  "contract": "QQQ260324P00580000",
+  "price": 2.15
+ },
+ {
+  "i": "1485677637073375243",
+  "text": "May cut if 587 holds",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1485677698482438294",
+  "text": "big spot and we already dropped a good amount",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1485693147299319829",
+  "text": "1.30 stopped out on the rest. 587 sup[port held",
+  "label": "EXIT",
+  "contract": "QQQ260324P00580000",
+  "price": 1.3
+ },
+ {
+  "i": "1486027683782725699",
+  "text": "BTO GLD 3/25 402p @ 2.99 risky. Stop @ 2.00",
+  "label": "ENTRY",
+  "contract": "GLD260325P00402000",
+  "price": 2.99
+ },
+ {
+  "i": "1486027717823692901",
+  "text": "Watching this bear pennant on hourly",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1486027843153690674",
+  "text": "4 hour",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1486033650607853801",
+  "text": "3.35 taking just a few after a great entry",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": 3.35
+ },
+ {
+  "i": "1486033770623668377",
+  "text": "Plan to add more if we get the breakdown",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1486048344685154434",
+  "text": "4.00 weeeeeeeeee",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": 4.0
+ },
+ {
+  "i": "1486048358861635594",
+  "text": "took some more",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": null
+ },
+ {
+  "i": "1486048856054566943",
+  "text": "Took a bunch off. Eyeing 390p for Friday if we can get the breakdown",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": null
+ },
+ {
+  "i": "1486048904402309161",
+  "text": "",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1486051100540014643",
+  "text": "Sold more @ 4.25, holding the rest for the home run, SL @ entry price (edited) | Tuesday, March 24, 2026 at 12:16 PM",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": 4.25
+ },
+ {
+  "i": "1486068018021793912",
+  "text": "Dumped the last @ 3.76 it's trying to hold for now, not playing these games",
+  "label": "EXIT",
+  "contract": "GLD260325P00402000",
+  "price": 3.76
+ },
+ {
+  "i": "1489274400107921431",
+  "text": "USO 0dte 130p @ .75",
+  "label": "ENTRY",
+  "contract": "USO260402P00130000",
+  "price": 0.75
+ },
+ {
+  "i": "1489281861464358963",
+  "text": "cutting it @ .40. Oil still holding up well",
+  "label": "EXIT",
+  "contract": "USO260402P00130000",
+  "price": 0.4
+ },
+ {
+  "i": "1490792631608021253",
+  "text": "AMZN 4/10 210p @ 2.20 yolo",
+  "label": "ENTRY",
+  "contract": "AMZN260410P00210000",
+  "price": 2.2
+ },
+ {
+  "i": "1491067603156733952",
+  "text": "2.56 taking some",
+  "label": "EXIT",
+  "contract": "AMZN260410P00210000",
+  "price": 2.56
+ },
+ {
+  "i": "1491068546782990509",
+  "text": "2.75 taking more, hard to trust anything here we will see what we can get",
+  "label": "EXIT",
+  "contract": "AMZN260410P00210000",
+  "price": 2.75
+ },
+ {
+  "i": "1491070621411573822",
+  "text": "2.30 taking profit, not letting go red",
+  "label": "EXIT",
+  "contract": "AMZN260410P00210000",
+  "price": 2.3
+ },
+ {
+  "i": "1493978349247402216",
+  "text": "GOOGL 4/15 335c @ .38 lotto lotto",
+  "label": "ENTRY",
+  "contract": "GOOGL260415C00335000",
+  "price": 0.38
+ },
+ {
+  "i": "1493978649014173736",
+  "text": "yes 0dte",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1493979335562887278",
+  "text": ".54 taking some",
+  "label": "EXIT",
+  "contract": "GOOGL260415C00335000",
+  "price": 0.54
+ },
+ {
+  "i": "1493980065942212730",
+  "text": ".80 half out",
+  "label": "EXIT",
+  "contract": "GOOGL260415C00335000",
+  "price": 0.8
+ },
+ {
+  "i": "1494030043645481021",
+  "text": "Took more off @ .95",
+  "label": "EXIT",
+  "contract": "GOOGL260415C00335000",
+  "price": 0.95
+ },
+ {
+  "i": "1494044604914208809",
+  "text": "1.44 ",
+  "label": "EXIT",
+  "contract": "GOOGL260415C00335000",
+  "price": 1.44
+ },
+ {
+  "i": "1494047994952028282",
+  "text": "2.35 I'm out ",
+  "label": "EXIT",
+  "contract": "GOOGL260415C00335000",
+  "price": 2.35
+ },
+ {
+  "i": "1495793498459340961",
+  "text": "BTO GOOGL 4/20 342,5c @ .25 risky lotto",
+  "label": "ENTRY",
+  "contract": "GOOGL260420C00342500",
+  "price": 0.25
+ },
+ {
+  "i": "1495802886725046354",
+  "text": "dumping these",
+  "label": "EXIT",
+  "contract": "GOOGL260420C00342500",
+  "price": null
+ },
+ {
+  "i": "1502362423162699978",
+  "text": "BTO QQQ 5/08 708p @ .50 yolo",
+  "label": "ENTRY",
+  "contract": "QQQ260508P00708000",
+  "price": 0.5
+ },
+ {
+  "i": "1502365446161305611",
+  "text": ".60 guess I will take some",
+  "label": "EXIT",
+  "contract": "QQQ260508P00708000",
+  "price": 0.6
+ },
+ {
+  "i": "1502365484656492614",
+  "text": "I want a monster dump",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1502383650283716779",
+  "text": ".68 taking more",
+  "label": "EXIT",
+  "contract": "QQQ260508P00708000",
+  "price": 0.68
+ },
+ {
+  "i": "1502384122226540624",
+  "text": "dumped the rest at entry .50",
+  "label": "EXIT",
+  "contract": "QQQ260508P00708000",
+  "price": 0.5
+ },
+ {
+  "i": "1504502262440005762",
+  "text": "MU 5/15 850c @ 4.25 SL @ 3.00 (edited) | Thursday, May 14, 2026 at 10:16 AM",
+  "label": "ENTRY",
+  "contract": "MU260515C00850000",
+  "price": 4.25
+ },
+ {
+  "i": "1504502354861363451",
+  "text": "watching this asc triangle closely. May keep stop tighter if it loses it",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1504527137074315284",
+  "text": "Took a few off at 5.00",
+  "label": "EXIT",
+  "contract": "MU260515C00850000",
+  "price": 5.0
+ },
+ {
+  "i": "1504566624139608105",
+  "text": "stop hit on the rest",
+  "label": "EXIT",
+  "contract": "MU260515C00850000",
+  "price": null
+ },
+ {
+  "i": "1506742673460171023",
+  "text": "SPY 5/22 735p @ 1.65 lotto lotto yolo, can use as a hedge if you like",
+  "label": "ENTRY",
+  "contract": "SPY260522P00735000",
+  "price": 1.65
+ },
+ {
+  "i": "1507012657147023512",
+  "text": "2.05 taking some here",
+  "label": "EXIT",
+  "contract": "SPY260522P00735000",
+  "price": 2.05
+ },
+ {
+  "i": "1507012667221606462",
+  "text": "stop at entry",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1507013122815164597",
+  "text": "2.30 taking more",
+  "label": "EXIT",
+  "contract": "SPY260522P00735000",
+  "price": 2.3
+ },
+ {
+  "i": "1507018935936094239",
+  "text": "stop hit @ entry",
+  "label": "EXIT",
+  "contract": "SPY260522P00735000",
+  "price": 1.65
+ },
+ {
+  "i": "1513579192095084614",
+  "text": "AAPL 6/10 310p @ 2.08 lets see if AAPL event is sell the news.. Usually is   | Adding now and will add more around 1 or after the event starts. lotto lotto",
+  "label": "ENTRY",
+  "contract": "AAPL260610P00310000",
+  "price": 2.08
+ },
+ {
+  "i": "1513581703946572076",
+  "text": "2.59 taking some ",
+  "label": "EXIT",
+  "contract": "AAPL260610P00310000",
+  "price": 2.59
+ },
+ {
+  "i": "1513591874844098610",
+  "text": "2.90 taking more profit",
+  "label": "EXIT",
+  "contract": "AAPL260610P00310000",
+  "price": 2.9
+ },
+ {
+  "i": "1513597079212134791",
+  "text": "SL hit on the rest @ 1.90",
+  "label": "EXIT",
+  "contract": "AAPL260610P00310000",
+  "price": 1.9
+ },
+ {
+  "i": "1516519618829881475",
+  "text": "INTC 6/18 125c @ 1.62",
+  "label": "ENTRY",
+  "contract": "INTC260618C00125000",
+  "price": 1.62
+ },
+ {
+  "i": "1516797177102598224",
+  "text": "2.22 taking most off",
+  "label": "EXIT",
+  "contract": "INTC260618C00125000",
+  "price": 2.22
+ },
+ {
+  "i": "1516797911680421889",
+  "text": "dumped the rest not letting mine go red",
+  "label": "EXIT",
+  "contract": "INTC260618C00125000",
+  "price": null
+ },
+ {
+  "i": "1524128040005800097",
+  "text": "META 7/17 580p @ 3.50 YOLO",
+  "label": "ENTRY",
+  "contract": "META260717P00580000",
+  "price": 3.5
+ },
+ {
+  "i": "1524132351716888618",
+  "text": "4.15 cha ching. Taking some. These could go massive..",
+  "label": "EXIT",
+  "contract": "META260717P00580000",
+  "price": 4.15
+ },
+ {
+  "i": "1524407988662833245",
+  "text": "5.20 taking more profit",
+  "label": "EXIT",
+  "contract": "META260717P00580000",
+  "price": 5.2
+ },
+ {
+  "i": "1524408575944950001",
+  "text": "6.03 half out",
+  "label": "EXIT",
+  "contract": "META260717P00580000",
+  "price": 6.03
+ },
+ {
+  "i": "1524486725710254180",
+  "text": "4.70 taking profit on the remainder",
+  "label": "EXIT",
+  "contract": "META260717P00580000",
+  "price": 4.7
+ },
+ {
+  "i": "1529567770839351387",
+  "text": "META 7/27 600p @ 3.04 0 or hero (edited) | Wednesday, July 22, 2026 at 2:16 PM",
+  "label": "ENTRY",
+  "contract": "META260727P00600000",
+  "price": 3.04
+ },
+ {
+  "i": "1529576286421516329",
+  "text": "3.50 let's take some. Partial",
+  "label": "EXIT",
+  "contract": "META260727P00600000",
+  "price": 3.5
+ },
+ {
+  "i": "1529843369998680145",
+  "text": "6.85 selling most here. Keeping some freebies",
+  "label": "EXIT",
+  "contract": "META260727P00600000",
+  "price": 6.85
+ },
+ {
+  "i": "1529869026602254548",
+  "text": "Cut another 2 at 9.50 holding 2 more",
+  "label": "EXIT",
+  "contract": "META260727P00600000",
+  "price": 9.5
+ },
+ {
+  "i": "1530302224343760990",
+  "text": "8.12 lol keeping one",
+  "label": "EXIT",
+  "contract": "META260727P00600000",
+  "price": 8.12
+ },
+ {
+  "i": "1538936583661559869",
+  "text": "BTO SPY 8/17 776c @ .23 risky lotto",
+  "label": "ENTRY",
+  "contract": "SPY260817C00776000",
+  "price": 0.23
+ },
+ {
+  "i": "1538944515480485958",
+  "text": ".31 partial",
+  "label": "EXIT",
+  "contract": "SPY260817C00776000",
+  "price": 0.31
+ },
+ {
+  "i": "1538947222304194572",
+  "text": "putting my stop @ .20 moving way too slow",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1538948608051773462",
+  "text": "dumped em at .20 keeping it a green trade",
+  "label": "EXIT",
+  "contract": "SPY260817C00776000",
+  "price": 0.2
+ },
+ {
+  "i": "1541449598600486976",
+  "text": "AMD  0dte 445p @ .76 grabbing a cheap lotto",
+  "label": "ENTRY",
+  "contract": "AMD260824P00445000",
+  "price": 0.76
+ },
+ {
+  "i": "1542578278638821476",
+  "text": "MU 8/28 965c @ 1.26 yolo time, 0 or hero (edited) | Thursday, August 27, 2026 at 11:56 AM",
+  "label": "ENTRY",
+  "contract": "MU260828C00965000",
+  "price": 1.26
+ },
+ {
+  "i": "1542611655974719511",
+  "text": "1.76 took some. Not bad",
+  "label": "EXIT",
+  "contract": "MU260828C00965000",
+  "price": 1.76
+ },
+ {
+  "i": "1542623602258743306",
+  "text": "2.93 LETS GOOOOOOO",
+  "label": "EXIT",
+  "contract": "MU260828C00965000",
+  "price": 2.93
+ },
+ {
+  "i": "1542623666255302746",
+  "text": "closing a bunch here. Leaving freebies ",
+  "label": "EXIT",
+  "contract": "MU260828C00965000",
+  "price": null
+ },
+ {
+  "i": "1542624175100010496",
+  "text": "3.95 BANGGGGGGGG  | Alright saving the rest for tomorrow ",
+  "label": "EXIT",
+  "contract": "MU260828C00965000",
+  "price": 3.95
+ },
+ {
+  "i": "1544426217011421184",
+  "text": "MU 9/9 1050c @ 1.90",
+  "label": "ENTRY",
+  "contract": "MU260909C01050000",
+  "price": 1.9
+ },
+ {
+  "i": "1544703731604529192",
+  "text": "2.50 lets take some profit just in case",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 2.5
+ },
+ {
+  "i": "1544704149562728468",
+  "text": "3.00 now",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 3.0
+ },
+ {
+  "i": "1544720421092589650",
+  "text": "cutting the rest @ entry here. Chop will eat these up",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 1.9
+ },
+ {
+  "i": "1545504517670314187",
+  "text": "MU 9/04 1015c @ .51 one more lotto for the road | 0 or hero",
+  "label": "ENTRY",
+  "contract": "MU260904C01015000",
+  "price": 0.51
+ },
+ {
+  "i": "1545514310095081493",
+  "text": "rolled these to 1010.. cheaper @ .44  | 0 or hero still",
+  "label": "ROLL",
+  "contract": "MU260904C01010000",
+  "price": 0.44
+ },
+ {
+  "i": "1545517283001106573",
+  "text": "1.05 over 100%  took some",
+  "label": "EXIT",
+  "contract": "MU260904C01010000",
+  "price": 1.05
+ },
+ {
+  "i": "1545517770379104367",
+  "text": "1.80 BANGGGGGGGGGGG half out",
+  "label": "EXIT",
+  "contract": "MU260904C01010000",
+  "price": 1.8
+ },
+ {
+  "i": "1545522343747649587",
+  "text": "3.20 mostly out",
+  "label": "EXIT",
+  "contract": "MU260904C01010000",
+  "price": 3.2
+ },
+ {
+  "i": "1545522767963758664",
+  "text": "4.55 ALL OUT",
+  "label": "EXIT",
+  "contract": "MU260904C01010000",
+  "price": 4.55
+ },
+ {
+  "i": "1546895523271680123",
+  "text": "MU 9/09 1050c @ 5.38 RISKY",
+  "label": "ENTRY",
+  "contract": "MU260909C01050000",
+  "price": 5.38
+ },
+ {
+  "i": "1546901614621626438",
+  "text": "6.30 taking some easy money just in case.  | Would like to see it over 1030",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 6.3
+ },
+ {
+  "i": "1546902061365592074",
+  "text": "6.86 taking some more but holding most.. Big potential here",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 6.86
+ },
+ {
+  "i": "1546903134750642227",
+  "text": "7.80 half out now. Lets see what the second half can do...  | SL @ B/E",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 7.8
+ },
+ {
+  "i": "1546923344379514940",
+  "text": "stop hit on the remainder",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": null
+ },
+ {
+  "i": "1546956640090193982",
+  "text": "MU 9/09 1050c @ 3.30 trying this again",
+  "label": "ENTRY",
+  "contract": "MU260909C01050000",
+  "price": 3.3
+ },
+ {
+  "i": "1546956666577354762",
+  "text": "30m wedge",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1546972156817182820",
+  "text": "Stop hit @ 2.00 im out",
+  "label": "EXIT",
+  "contract": "MU260909C01050000",
+  "price": 2.0
+ },
+ {
+  "i": "1554165353322516613",
+  "text": "BTO SNDK 10/09 2000c @ 12.90 lotto lotto",
+  "label": "ENTRY",
+  "contract": "SNDK261009C02000000",
+  "price": 12.9
+ },
+ {
+  "i": "1554168118971080707",
+  "text": "15.70 taking some EZ money",
+  "label": "EXIT",
+  "contract": "SNDK261009C02000000",
+  "price": 15.7
+ },
+ {
+  "i": "1554498314366484491",
+  "text": "filled some at 17.00",
+  "label": "EXIT",
+  "contract": "SNDK261009C02000000",
+  "price": 17.0
+ },
+ {
+  "i": "1554514044399124501",
+  "text": "13.50 cut the last",
+  "label": "EXIT",
+  "contract": "SNDK261009C02000000",
+  "price": 13.5
+ },
+ {
+  "i": "1556710361946783919",
+  "text": "SNDK 10/16 2000c @ 6.90 do not take this if you can't afford to lose it",
+  "label": "ENTRY",
+  "contract": "SNDK261016C02000000",
+  "price": 6.9
+ },
+ {
+  "i": "1557096363517288568",
+  "text": "dumping these at 4.50. Sector is too weak and its testing this big support over and over. It's going to dump hard if it breaks down here",
+  "label": "EXIT",
+  "contract": "SNDK261016C02000000",
+  "price": 4.5
+ },
+ {
+  "i": "1562138330643169465",
+  "text": "BTO MU 10/21 875p @ 2.35 risky lotto",
+  "label": "ENTRY",
+  "contract": "MU261021P00875000",
+  "price": 2.35
+ },
+ {
+  "i": "1562138524885590117",
+  "text": "im 0 or hero on this",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1562139083353104505",
+  "text": "Will add more before close if  trade is not green and setup is still holding (edited) | Tuesday, October 20, 2026 at 11:23 AM",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1562174880596893757",
+  "text": "3.22 taking some profits here",
+  "label": "EXIT",
+  "contract": "MU261021P00875000",
+  "price": 3.22
+ },
+ {
+  "i": "1562175260118356119",
+  "text": "Potential is there for 1000% banger if this plays out,  | 850 is in play or potentially lower.  | Could always add it back if we bounce before close",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ },
+ {
+  "i": "1562192746503217233",
+  "text": "3.50 taking some more profit here",
+  "label": "EXIT",
+  "contract": "MU261021P00875000",
+  "price": 3.5
+ },
+ {
+  "i": "1562193523011354645",
+  "text": "was hoping for 100% today but will take it.. I am swinging a couple for 0 or hero ",
+  "label": "NONE",
+  "contract": null,
+  "price": null
+ }
+]

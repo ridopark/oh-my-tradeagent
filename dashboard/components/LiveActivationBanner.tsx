@@ -86,7 +86,7 @@ function detail(p: LivePromotion): string {
       // Explicitly NOT reassuring: an all-clear we cannot verify is worse than a known problem.
       return "The activation state could not be read, so we cannot confirm this tenant can trade. Treat as unverified rather than healthy.";
     default:
-      return "Renew it with Activate live before it lapses — once it does, entries are refused silently.";
+      return "Renew it with Renew live on the Admin page before it lapses — once it does, entries are refused silently.";
   }
 }
 
