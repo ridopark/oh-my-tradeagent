@@ -183,6 +183,7 @@ class LottoPoller:
         self._author = author
         self._strategy_id = strategy_id
         self._targets: list[tuple[str, str]] = []
+        self._zero_target_polls = 0  # consecutive polls seen with no targets; drives the throttle
         self.update_targets(list(targets))
         self._lookback = timedelta(days=lookback_days)
         self._emit_max_age = timedelta(seconds=emit_max_age_secs)
@@ -209,6 +210,14 @@ class LottoPoller:
                 foreign,
             )
         self._targets = list(dict.fromkeys(t for t in targets if t[1] == self._strategy_id))
+        if self._targets and self._zero_target_polls:
+            self._log.info(
+                "fan-out targets known again for %s after %d zero-target polls: %s",
+                self._strategy_id,
+                self._zero_target_polls,
+                self._targets,
+            )
+            self._zero_target_polls = 0
 
     def _late_expiry_day_entry(self, sig: LottoSignal, posted_at: datetime) -> bool:
         if sig.action != "BTO":
@@ -234,12 +243,19 @@ class LottoPoller:
         return True
 
     def _warn_if_no_targets(self, phase: str) -> None:
-        if not self._targets:
-            self._log.warning(
-                "no fan-out targets known for %s at %s: updating the book, emitting nothing",
-                self._strategy_id,
-                phase,
-            )
+        if self._targets:
+            return
+        msg = "no fan-out targets known for %s at %s: updating the book, emitting nothing"
+        if phase == "boot":  # once per boot, never throttled
+            self._log.warning(msg, self._strategy_id, phase)
+            return
+        # Nobody-enabled-it is a steady state that would otherwise log every poll (12/min);
+        # throttle like BffMessagesClient._failure. update_targets resets the count when targets
+        # arrive, so the next transition into zero targets logs on its first poll again.
+        self._zero_target_polls += 1
+        n = self._zero_target_polls
+        if n in (1, 3) or n % 60 == 0:
+            self._log.warning(msg + " (consecutive=%d)", self._strategy_id, phase, n)
 
     async def poll_once(self) -> list[CopytradeSignalPayload]:
         self._warn_if_no_targets("poll")
