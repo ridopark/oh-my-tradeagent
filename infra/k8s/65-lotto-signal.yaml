@@ -9,11 +9,11 @@
 # PVC and can roll with the default RollingUpdate (a surge pod is harmless — Temporal's
 # REJECT_DUPLICATE workflow-id policy de-duplicates any overlap).
 #
-# DARK BY DEFAULT. LOTTO_DRY_RUN=true makes it log `dry-run would-emit` lines and start NO
-# workflows. The go-live flip (plan P0-6, AFTER the PREREG is committed and tagged) is:
-#     kubectl -n copytrade set env deploy/lotto-signal LOTTO_DRY_RUN=false
-# A later manifest re-apply (deploy.yml rolls this file on change) re-asserts the dark value, so
-# once live, change the value HERE as well.
+# LIVE since 2026-10-27 02:30Z (plan P0-6: PREREG tagged copytrade-lotto-forward-v1, strategy enabled
+# on staging_paper). LOTTO_DRY_RUN=true would make it log `dry-run would-emit` lines and start NO
+# workflows; the value here must match the running Deployment because deploy.yml re-applies this
+# file on change. To darken it again: set the value to "true" here AND
+#     kubectl -n copytrade set env deploy/lotto-signal LOTTO_DRY_RUN=true
 #
 # Same image as the sidecar and the mirrors; deploy.yml rolls it with every
 # services/signal-source-discord/* change.
@@ -56,7 +56,7 @@ spec:
           env:
             # Dark switch — see the header. "true" = log would-emit, start nothing.
             - name: LOTTO_DRY_RUN
-              value: "true"
+              value: "false"
             # #lotto-alerts. Must also be in the BFF allow-list (options-chat.channel-ids) or the
             # internal read is a 400.
             - name: LOTTO_CHANNEL_ID
