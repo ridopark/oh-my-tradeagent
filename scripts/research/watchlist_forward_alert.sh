@@ -2,15 +2,19 @@
 # watchlist_forward_alert.sh — dead-man alert for the watchlist forward test
 # (docs/plans/PREREG-2026-10-23-watchlist-forward-v1.md). Read-only.
 #
-# Runs the frozen scorer's `check` (every past trading day must have a raw folder) and verifies
-# today's capture files exist. On any problem, posts ONE Discord alert per distinct problem set per
-# ET day to the staging_paper per-tenant webhook (research, not the real-money pager).
+# Runs the frozen scorer's `check` (every past trading day must have a raw folder), verifies today's
+# capture files exist, and that the ML forward scorer (15:50 CT) wrote today's rows with TabPFN
+# probabilities. On any problem, posts ONE Discord alert per distinct problem set per ET day to the
+# staging_paper per-tenant webhook (research, not the real-money pager).
 # A market holiday still produces (empty) capture files, so it does not alert.
+# explained_gaps.json silences past-day folder gaps only; the ML checks re-alert every run until the
+# scorer is fixed (deliberate: a known ML outage is still a missed forward day).
 #
 # Cron (homelab, CT): 0 16 * * 1-5 ~/scripts/watchlist_forward_alert.sh >> ~/scripts/watchlist-forward.log 2>&1
 # Env: WF_SCRIPTS (~/scripts), WF_OUT (~/data/watchlist-forward), WF_ENV (~/scripts/option-collector.env),
 #      WF_STATE_DIR (/var/tmp/watchlist_forward_alert), DRY_RUN=1 (log only), TEST=1 (prefix the post
-#      with [TEST] to verify delivery), KUBECTL, NS (copytrade).
+#      with [TEST] to verify delivery), KUBECTL, NS (copytrade), WF_TODAY / WF_DOW (test-only overrides
+#      of the ET date / weekday; tests/test_watchlist_forward_alert.sh).
 set -uo pipefail
 
 SCRIPTS="${WF_SCRIPTS:-$HOME/scripts}"
@@ -22,8 +26,8 @@ NS="${NS:-copytrade}"
 mkdir -p "$STATE_DIR"
 log() { echo "$(date -Is) $*"; }
 
-today=$(TZ=America/New_York date +%F)
-dow=$(TZ=America/New_York date +%u)
+today="${WF_TODAY:-$(TZ=America/New_York date +%F)}"   # WF_TODAY/WF_DOW: test overrides only
+dow="${WF_DOW:-$(TZ=America/New_York date +%u)}"
 problems=()
 
 check_out=$(cd "$SCRIPTS" && python3 -B watchlist_forward.py --out "$OUT" --env "$ENV_FILE" check 2>&1)
@@ -43,6 +47,37 @@ fi
 explained=$(python3 -c 'import json,sys
 try: print(" ".join(json.load(open(sys.argv[1]))))
 except FileNotFoundError: pass' "$OUT/explained_gaps.json" 2>/dev/null)
+# ML forward test (PREREG-2026-10-24-watchlist-forward-ml-v1): on a weekday where v1 captured >= 1 leg,
+# the 15:50 CT scorer must have written today's rows; a scored leg without a TabPFN probability means
+# the model fell back. Both python probes FAIL CLOSED: a non-integer result (traceback) is a problem,
+# never "healthy" — a dead-man alert that swallows its own errors is no alert at all.
+is_int() { [ "$1" -ge 0 ] 2>/dev/null; }
+if [ "$dow" -le 5 ] && [ -f "$OUT/raw/$today/legs.json" ]; then
+  nlegs=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["legs"]))' \
+            "$OUT/raw/$today/legs.json" 2>&1)
+  if ! is_int "$nlegs"; then
+    problems+=("today's legs.json is unreadable ($today): ${nlegs##*$'\n'}")
+  elif [ "$nlegs" -gt 0 ]; then
+    # grep -c prints 0 AND exits 1 on no match, so no `|| echo 0`; a missing file prints nothing.
+    mlrows=$(grep -c "^$today," "$OUT/ml_scores.csv" 2>/dev/null); mlrows=${mlrows:-0}
+    if [ "$mlrows" -eq 0 ]; then
+      problems+=("ML forward scorer wrote no rows for $today ($nlegs legs captured)"\
+" — see ~/scripts/watchlist-forward-ml.log")
+    else
+      # pandas writes `scored` as 1 or 1.0 depending on whether any row in the file is NaN — compare numerically.
+      unscored=$(python3 -c 'import csv,sys
+rows=[x for x in csv.DictReader(open(sys.argv[1])) if x["d"]==sys.argv[2]]
+print(sum(1 for x in rows if float(x.get("scored") or 0)==1.0 and not x.get("p_tabpfn24")))' \
+            "$OUT/ml_scores.csv" "$today" 2>&1)
+      if ! is_int "$unscored"; then
+        problems+=("ML score check errored for $today: ${unscored##*$'\n'}")
+      elif [ "$unscored" -gt 0 ]; then
+        problems+=("ML scorer: $unscored scored leg(s) have no TabPFN probability today (model fell back)"\
+" — check the token/venv")
+      fi
+    fi
+  fi
+fi
 for d in "$OUT"/raw/*/; do
   day=$(basename "$d")
   [ "$day" = "$today" ] && continue
@@ -55,7 +90,7 @@ if [ "${#problems[@]}" -eq 0 ]; then
   exit 0
 fi
 
-msg="${TEST:+[TEST] }watchlist-forward-v1 dead-man ($today ET) — ${#problems[@]} problem(s):"
+msg="${TEST:+[TEST] }watchlist-forward (v1 + ml-v1) dead-man ($today ET) — ${#problems[@]} problem(s):"
 for p in "${problems[@]}"; do msg+=$'\n• '"$p"; done
 msg+=$'\n'"A missed trading day must be explained in $OUT/explained_gaps.json or it counts against the >5% completeness rule."
 log "ALERT: $msg"
