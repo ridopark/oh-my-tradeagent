@@ -166,6 +166,45 @@ class OiMainTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
         self.assertEqual(sorted(files), ["NVDA"])
 
+    def _raw(self, tmp):
+        day = oi.datetime.now(oi.ET).date()
+        return {u: (pathlib.Path(tmp) / "out" / u / f"{day}.ndjson.gz").read_bytes() for u in ("AMD", "NVDA")}
+
+    def test_oi_main_zero_rows_keeps_file_and_exits_1(self):
+        """A transient empty /v2/options/contracts response must not replace a good day's snapshot (#998)."""
+        import io, tempfile, contextlib
+        one = lambda u, headers, today, days: [{"symbol": f"{u}1", "open_interest": "7"}]
+        empty = lambda u, headers, today, days: []
+        with tempfile.TemporaryDirectory() as tmp:
+            self._main(tmp, one)
+            before = self._raw(tmp)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                self._main(tmp, empty)
+            after = self._raw(tmp)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(after, before)
+        self.assertIn("0 contracts", err.getvalue()); self.assertIn("keeping", err.getvalue())
+
+    def test_oi_tmp_removed_on_write_error(self):
+        import io, os, tempfile, contextlib, types
+        one = lambda u, headers, today, days: [{"symbol": f"{u}1"}]
+
+        def boom(_r):
+            raise OSError("disk full")
+
+        orig_json = oi.json
+        oi.json = types.SimpleNamespace(dumps=boom)  # fails after the .tmp is created
+        try:
+            with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    self._main(tmp, one)
+                leftovers = [p for u in ("AMD", "NVDA") for p in os.listdir(os.path.join(tmp, "out", u))]
+        finally:
+            oi.json = orig_json
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(leftovers, [])
+
 
 class WatchlistTickersTest(unittest.TestCase):
     def test_parses_psql_output(self):
