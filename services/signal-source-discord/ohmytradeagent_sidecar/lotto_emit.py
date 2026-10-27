@@ -1,0 +1,390 @@
+"""Turn mirrored #lotto-alerts rows into ``CopytradeSignalWorkflow`` starts (phase 4).
+
+``LottoPoller`` owns the cursor and the ``LottoBook``. It reads rows through a ``since`` source
+(``lotto_main.BffMessagesClient``), feeds every row by the configured author to the book, and emits
+the resulting ``LottoSignal``s through the same ``Emitter`` Protocol the Discord watcher uses, so
+the orchestrator sees payloads shaped exactly like ``watcher.py``'s.
+
+Fan-out: ``copytrade-lotto-v1`` is a strategy row any tenant can enable, so each signal becomes one
+payload per known ``(tenant_id, strategy_id)`` target — workflow id
+``t-<tenant>/s-copytrade-lotto-v1/sig/<msg>:<k>`` — and ``update_targets`` rebinds the set
+atomically from the fan-out registry (or env). A target whose strategy is not this poller's is
+refused: the registry's ``?strategy_id=`` filter is new, and a copytrade-v1 row must never receive
+lotto signals. The book, the age gate and the expiry-day cutoff are per signal; emits, their
+failures and their retries are per target. With no known targets the poller warns (at boot and on
+every poll) and emits nothing.
+
+Three gates decide whether a signal reaches the emitter:
+
+* **Age.** Only signals whose ``posted_at`` is at most ``emit_max_age_secs`` old are emitted.
+  Older rows update the book only. That holds on boot too: the book is rebuilt from the lookback
+  window so exits can be attributed to entries posted before this process started, and the few
+  rows still inside the age window ARE emitted — an EXIT posted during a pod-restart window must
+  still close the position, and a missed close is the costlier direction. Temporal's
+  ``REJECT_DUPLICATE`` on the deterministic workflow id dedupes anything the previous process
+  already started.
+* **Expiry-day entry cutoff.** A BTO on a contract expiring on the posted ET date is not emitted
+  at or after ``expiry_day_entry_cutoff_et`` (default 15:25 ET, five minutes before the 15:30
+  flatten covers the paper pending TTL): a lot that fills after the expiry flatten gets no
+  flatten timer in PositionWorkflowImpl and is marked worthless while the broker position stays
+  open. The book still records the entry so later exit posts attribute
+  to it (and become orchestrator no-ops) instead of landing on an older contract. Exits are never
+  cut off.
+
+Every EXIT is emitted, repeats included: the orchestrator turns an exit on a flat contract into an
+audited no-op, and a second post retries a close whose first order failed.
+
+Rows are first-scrape snapshots. The mirror never updates a stored row, so ``deleted`` is never
+true and an edit never changes ``content``; there is deliberately no deleted/edited handling here.
+
+Failure isolation: a row the parser or the payload model rejects (an impossible date, a zero
+strike) is logged with its message id and skipped — the cursor still moves past it, so one poison
+row can never wedge the feed. A failed workflow start (Temporal RPC error) keeps the payload in a
+pending list that the next poll retries first, bounded by the age window; the cursor is NOT held
+back, because re-applying the row to the book would read a BTO as an entry on an already-open
+contract and drop it. There is no cursor persistence: a restart re-reads the lookback window.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from ohmytradeagent_contract.models.copytrade_signal_payload import (
+    Action,
+    CopytradeSignalPayload,
+    Right,
+)
+
+from .emitter import Emitter
+from .lotto_parser import LottoBook, LottoSignal
+
+DISCORD_EPOCH_MS = 1420070400000
+_ET = ZoneInfo("America/New_York")
+DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET = time(15, 25)
+
+
+def parse_cutoff_et(raw: str) -> time:
+    """``HH:MM`` wall-clock ET → ``time``; the orchestrator's expiry flatten is 15:30."""
+    hh, mm = raw.strip().split(":")
+    return time(int(hh), int(mm))
+
+
+def snowflake_at(dt: datetime) -> int:
+    """The smallest Discord snowflake minted at or after ``dt`` (worker/sequence bits zero)."""
+    ms = int(dt.astimezone(timezone.utc).timestamp() * 1000) - DISCORD_EPOCH_MS
+    return max(ms, 0) << 22
+
+
+def parse_posted_at(raw: str) -> datetime:
+    """ISO-8601 (``...Z`` or offset) → aware UTC. A naive timestamp is a contract violation."""
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        raise ValueError(f"posted_at must be timezone-aware: {raw!r}")
+    return dt.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class ChatRow:
+    """One mirrored message, as the BFF's ``GET /internal/options-chat/messages`` returns it."""
+
+    message_id: str
+    author_name: str
+    posted_at: datetime  # aware UTC
+    content: str
+    reply_to_id: str | None
+    # The BFF row could not be decoded (contract violation). Kept so the poller can advance the
+    # cursor past it; never fed to the book.
+    malformed: bool = False
+
+    @staticmethod
+    def snowflake_time(message_id: str) -> datetime:
+        ms = (int(message_id) >> 22) + DISCORD_EPOCH_MS
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+
+    @classmethod
+    def from_json(cls, item: dict) -> "ChatRow":
+        message_id = str(item["message_id"])
+        raw = item.get("posted_at")
+        posted_at = parse_posted_at(raw) if raw else cls.snowflake_time(message_id)
+        reply_to = item.get("reply_to_id")
+        return cls(
+            message_id=message_id,
+            author_name=item.get("author_name") or "",
+            posted_at=posted_at,
+            content=item.get("content") or "",
+            reply_to_id=str(reply_to) if reply_to else None,
+        )
+
+
+class RowSource(Protocol):
+    async def since(
+        self, channel_id: str, after_id: int, limit: int = ...
+    ) -> list[ChatRow] | None: ...
+
+
+def to_payload(
+    sig: LottoSignal,
+    *,
+    message_id: str,
+    posted_at: datetime,
+    tenant_id: str,
+    strategy_id: str,
+    author: str,
+) -> CopytradeSignalPayload:
+    """Mirror of ``watcher.py``'s ``_build_payload``. ``price`` is the signal's ``ref_price``: the
+    posted price, or for a priceless exit the author's last posted price for that contract
+    (plan fork F2). ``tail`` and ``raw_line`` both carry the whole message text."""
+    return CopytradeSignalPayload(
+        schema_version=1,
+        tenant_id=tenant_id,
+        strategy_id=strategy_id,
+        signal_id=sig.signal_id,
+        message_id=message_id,
+        author=author,
+        posted_at=posted_at,
+        action=Action(sig.action),
+        ticker=sig.ticker,
+        expiry=sig.expiry,
+        strike=sig.strike,
+        right=Right(sig.right),
+        price=sig.ref_price,
+        tail=sig.text,
+        raw_line=sig.text,
+    )
+
+
+class LottoPoller:
+    def __init__(
+        self,
+        *,
+        source: RowSource,
+        emitter: Emitter,
+        book: LottoBook,
+        channel_id: str,
+        author: str,
+        strategy_id: str,
+        targets: Sequence[tuple[str, str]] = (),
+        lookback_days: float,
+        emit_max_age_secs: float,
+        dry_run: bool,
+        log: logging.Logger,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        expiry_day_entry_cutoff_et: time = DEFAULT_EXPIRY_DAY_ENTRY_CUTOFF_ET,
+    ) -> None:
+        self._source = source
+        self._emitter = emitter
+        self._book = book
+        self._channel_id = channel_id
+        self._author = author
+        self._strategy_id = strategy_id
+        self._targets: list[tuple[str, str]] = []
+        self.update_targets(list(targets))
+        self._lookback = timedelta(days=lookback_days)
+        self._emit_max_age = timedelta(seconds=emit_max_age_secs)
+        self._dry_run = dry_run
+        self._log = log
+        self._clock = clock
+        self._entry_cutoff_et = expiry_day_entry_cutoff_et
+        self.cursor: int = 0
+        self._pending: list[CopytradeSignalPayload] = []  # starts that failed, retried next poll
+
+    @property
+    def targets(self) -> list[tuple[str, str]]:
+        return self._targets
+
+    def update_targets(self, targets: list[tuple[str, str]]) -> None:
+        """Atomically rebind the fan-out set (order-stable dedupe). Targets for another strategy
+        are refused, never silently routed: lotto signals into a copytrade-v1 workflow would be
+        a real-money mis-route."""
+        foreign = [t for t in targets if t[1] != self._strategy_id]
+        if foreign:
+            self._log.warning(
+                "fan-out targets for another strategy refused (want %s): %s",
+                self._strategy_id,
+                foreign,
+            )
+        self._targets = list(dict.fromkeys(t for t in targets if t[1] == self._strategy_id))
+
+    def _late_expiry_day_entry(self, sig: LottoSignal, posted_at: datetime) -> bool:
+        if sig.action != "BTO":
+            return False
+        posted_et = posted_at.astimezone(_ET)
+        return sig.expiry == posted_et.date() and posted_et.time() >= self._entry_cutoff_et
+
+    async def boot(self) -> bool:
+        """Rebuild the book from the lookback window; only rows still inside the age window emit.
+        False when the BFF did not answer, so the caller can retry; the cursor is left at the
+        lookback snowflake."""
+        self.cursor = snowflake_at(self._clock() - self._lookback)
+        rows = await self._source.since(self._channel_id, self.cursor)
+        if rows is None:
+            return False
+        # A gateway outage at startup would otherwise consume the boot window's fresh signals
+        # silently; make it visible next to the boot summary.
+        self._warn_if_no_targets("boot")
+        try:
+            await self._process(rows, boot=True)
+        except Exception:  # noqa: BLE001 - per-row guards make this unreachable; belt and braces
+            self._log.exception("lotto boot: processing aborted at cursor=%s", self.cursor)
+        return True
+
+    def _warn_if_no_targets(self, phase: str) -> None:
+        if not self._targets:
+            self._log.warning(
+                "no fan-out targets known for %s at %s: updating the book, emitting nothing",
+                self._strategy_id,
+                phase,
+            )
+
+    async def poll_once(self) -> list[CopytradeSignalPayload]:
+        self._warn_if_no_targets("poll")
+        emitted = await self._retry_pending()
+        rows = await self._source.since(self._channel_id, self.cursor)
+        if rows is None:
+            return emitted
+        return emitted + await self._process(rows)
+
+    async def _retry_pending(self) -> list[CopytradeSignalPayload]:
+        pending, self._pending = self._pending, []
+        emitted: list[CopytradeSignalPayload] = []
+        for payload in pending:
+            if self._clock() - payload.posted_at > self._emit_max_age:
+                self._log.warning(
+                    "gave up retrying %s (%s %s): now older than the %ss emit window",
+                    payload.signal_id,
+                    payload.action.value,
+                    payload.ticker,
+                    self._emit_max_age.total_seconds(),
+                )
+                continue
+            if await self._emit_one(payload):
+                emitted.append(payload)
+        return emitted
+
+    async def replay(self, since: datetime) -> list[CopytradeSignalPayload] | None:
+        """Fresh book from ``since``; every signal counts as fresh. For the ``--replay`` CLI.
+        None when the BFF did not answer, so the CLI can fail instead of reporting zero."""
+        self._book = LottoBook(author=self._author)
+        self.cursor = snowflake_at(since)
+        rows = await self._source.since(self._channel_id, self.cursor)
+        if rows is None:
+            return None
+        return await self._process(rows, age_gated=False)
+
+    async def _process(
+        self, rows: list[ChatRow], *, age_gated: bool = True, boot: bool = False
+    ) -> list[CopytradeSignalPayload]:
+        emitted: list[CopytradeSignalPayload] = []
+        stale = 0
+        for row in rows:
+            self.cursor = max(self.cursor, int(row.message_id))
+            if row.malformed or row.author_name != self._author:
+                continue
+            # Snapshot so a concurrent registry refresh (an atomic rebind) cannot tear this row.
+            targets = self._targets
+            try:
+                signals = self._book.apply(
+                    row.message_id, row.author_name, row.posted_at, row.content, row.reply_to_id
+                )
+                fanned = [
+                    (
+                        sig,
+                        [
+                            to_payload(
+                                sig,
+                                message_id=row.message_id,
+                                posted_at=row.posted_at,
+                                tenant_id=tenant_id,
+                                strategy_id=strategy_id,
+                                author=self._author,
+                            )
+                            for tenant_id, strategy_id in targets
+                        ],
+                    )
+                    for sig in signals
+                ]
+            except Exception:  # noqa: BLE001 - one poison row must not wedge the feed
+                self._log.exception(
+                    "lotto row %s rejected by the parser/payload model, skipped: %r",
+                    row.message_id,
+                    row.content,
+                )
+                continue
+            fresh = not age_gated or self._clock() - row.posted_at <= self._emit_max_age
+            for sig, payloads in fanned:
+                if not fresh:
+                    stale += 1
+                    # At boot, stale rows are the expected lookback history (one INFO summary
+                    # below). In steady state a stale row means mirror lag exceeded the emit
+                    # window, i.e. a real signal was missed.
+                    self._log.log(
+                        logging.DEBUG if boot else logging.WARNING,
+                        "stale signal %s (%s %s posted %s) updated state only, not emitted",
+                        sig.signal_id,
+                        sig.action,
+                        sig.ticker,
+                        row.posted_at.isoformat(),
+                    )
+                    continue
+                if self._late_expiry_day_entry(sig, row.posted_at):
+                    self._log.warning(
+                        "skipped_late_expiry_day_entry %s (%s %s %s expires today, posted %s ET "
+                        ">= cutoff %s) book updated, not emitted",
+                        sig.signal_id,
+                        sig.ticker,
+                        sig.strike,
+                        sig.right,
+                        row.posted_at.astimezone(_ET).strftime("%H:%M"),
+                        self._entry_cutoff_et.strftime("%H:%M"),
+                    )
+                    continue
+                for payload in payloads:
+                    if await self._emit_one(payload):
+                        emitted.append(payload)
+        if boot:
+            self._log.info(
+                "lotto boot: %d rows, %d stale skipped, %d emitted, cursor=%s",
+                len(rows),
+                stale,
+                len(emitted),
+                self.cursor,
+            )
+        return emitted
+
+    async def _emit_one(self, payload: CopytradeSignalPayload) -> bool:
+        """True when the start went out (or was deduped). A failure parks the payload for the
+        next poll's retry."""
+        try:
+            result = await self._emitter.emit(payload)
+        except Exception:  # noqa: BLE001 - Temporal RPC errors are transient; retry next poll
+            self._log.exception(
+                "lotto emit failed for %s (%s %s tenant=%s), will retry next poll",
+                payload.signal_id,
+                payload.action.value,
+                payload.ticker,
+                payload.tenant_id,
+            )
+            self._pending.append(payload)
+            return False
+        if result.deduped:
+            self._log.info("deduped %s (workflow_id=%s)", payload.signal_id, result.workflow_id)
+            return True
+        self._log.info(
+            "%s %s %s %s %s%s @ %s signal_id=%s workflow_id=%s text=%r",
+            "dry-run would-emit" if self._dry_run else "emitted",
+            payload.action.value,
+            payload.ticker,
+            payload.expiry,
+            payload.strike,
+            payload.right.value,
+            payload.price,
+            payload.signal_id,
+            result.workflow_id,
+            payload.raw_line,
+        )
+        return True

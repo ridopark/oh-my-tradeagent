@@ -293,6 +293,24 @@ Tag commit precedes the first `EntryFilled` for `paper_lotto`.
 - F4/F5: as recommended (26 BTOs incl. the rolled 1015c; replay dry-run + forward dry-run period instead of a live replay).
 - Blocker acknowledged: PR #986 (lotto mirror) must be merged before Phases 3 and 5 can go in.
 
+## Tenant model — operator decision 2026-10-26 (supersedes "own paper tenant" below)
+`copytrade-lotto-v1` is a strategy row that ANY tenant can enable (first: **staging_paper**), exactly like
+copytrade-v1. Consequences:
+- **Phase 3b (api-gateway):** `GET /internal/copytrade-fanout-targets` accepts an optional `strategy_id` query
+  parameter (default unchanged = copytrade-v1).
+- **Phase 4 (poller):** fans out via `FanoutRegistryClient`/`FanoutRefresher` with `strategy_id=copytrade-lotto-v1`
+  (`LOTTO_FANOUT_SOURCE=registry`, gateway creds bundle as 55-*.yaml); one workflow per enabled tenant, per-target
+  failure isolation. `TENANT_ID` is only a replay/env-mode fallback (`LOTTO_TENANT_IDS`).
+- **Phase 5 (manifest):** carries the fan-out env instead of a tenant id.
+- **Phase 7 (dashboard):** a `copytrade-lotto-v1` onboarding template with NO `partial_fractions` key, so the
+  strategy can be added to a tenant from the admin UI like copytrade-v1.
+- **P0 becomes:** (1) measure mirror lag; (2) add the strategy to staging_paper via the UI template (or the raw
+  `/admin/tenants/staging_paper/strategies/copytrade-lotto-v1` POST with the phase-2 blob) and enable it — no new
+  account, no new tenant, no credential step; (3) verify the stored row's invariants (P0-4, daily); (4) accept that the
+  strategy shares staging_paper's account cap / kill switch with its copytrade mirror and the condor (the coupling
+  that starved the condor test) — M2 in the PREREG is scored from the strategy's own audit fills, not account equity;
+  (5) P0-5b manual first apply; (6) PREREG tag, then the `LOTTO_DRY_RUN=false` flip.
+
 ## Amendments from the phase-2 goal review (2026-10-26, before any P0 step)
 - **P0-3 order is creds row → create → enable.** `CreateTenantController.java:103-107` DISCARDS the caller's
   `broker_account_id` and FORCES `enabled=false`; the id binds only from `VerifiedAccountGuard`, which needs the
