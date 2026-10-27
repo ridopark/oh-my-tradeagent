@@ -22,6 +22,11 @@ Usage: option_quote_collector.py --out /data/option-quotes [--underlyings SPY,QQ
        <out>/<U>/<date>.trades.ndjson.gz, each stamped with the cycle-end NBBO of its contract so the side
        (at ask = bought, at bid = sold) can be inferred later. Volume itself is backfillable from bars; the
        quote at the print is not. ~1-2 extra calls per ticker per cycle. 0 (default) = off.
+       CAVEATS (best-effort tape): the stamp is the quote at the END of the cycle, up to --interval seconds
+       AFTER the print (qts - ts = the staleness; a large print can itself move the quote, so side inference
+       is noisy for prints far from qts). Alpaca treats start and end as inclusive and the window edges are
+       whole seconds, so a print timestamped exactly on a cycle boundary can appear in two cycles; prints
+       the SIP reports after the window closed are lost. Per ticker the window restarts each ET day.
 Deploy (operator): homelab crontab @reboot or k8s Deployment; session crons die with the session
 (see reference_prod_real_monitoring). Files: <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz
 """
@@ -103,7 +108,8 @@ def snapshot_rows(u, headers, now_iso, params=None):
 
 def tape_rows(trades_by_sym, quotes, min_size):
     """Prints of min_size+ contracts with the cycle-end NBBO of their contract stamped on (trades carry no side).
-    trades_by_sym: the 'trades' map of /v1beta1/options/trades; quotes: {sym: this cycle's snapshot row}."""
+    trades_by_sym: the 'trades' map of /v1beta1/options/trades; quotes: {sym: this cycle's snapshot row}.
+    The stamp postdates the print by up to one interval (row['qts'] - row['ts']); it is not the quote AT the print."""
     rows = []
     for sym, trades in (trades_by_sym or {}).items():
         q = quotes.get(sym) or {}
@@ -155,12 +161,14 @@ def main():
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     tickers, refreshed, refreshed_day = [], 0.0, None
-    tape_since = {}  # ticker -> end of the last trade window pulled
+    tape_since, tape_day = {}, None  # ticker -> end of the last trade window pulled; reset on a new ET day
     universe = read_universe(a.universe_file)
     while True:
         now = datetime.now(ET)
         if a.once or in_session(now):
             now_iso = now.isoformat(timespec="seconds"); cycle_t0 = time.time()
+            if tape_day != now.date():
+                tape_since, tape_day = {}, now.date()
             # refresh every 10 min, on a new ET date, and every cycle while the list is still empty
             if a.watchlist and (not tickers or refreshed_day != now.date() or time.time() - refreshed > 600):
                 try:
@@ -193,7 +201,7 @@ def main():
                         with gzip.open(os.path.join(day_dir, f"{now.date()}.trades.ndjson.gz"), "at") as f:
                             for r in tape:
                                 f.write(json.dumps(r) + "\n")
-                    print(f"{now_iso} {u}: {len(rows)} rows" + (f", {len(tape)} prints" if a.tape_min_size else ""), flush=True)
+                    print(f"{now_iso} {u}: {len(rows)} rows" + (f", {len(tape)} prints" if a.watchlist and a.tape_min_size else ""), flush=True)
                 except Exception as e:
                     print(f"{now_iso} {u}: ERROR {e}", file=sys.stderr, flush=True)
             if a.watchlist and time.time() - cycle_t0 > a.interval:

@@ -6,6 +6,8 @@ and append one row per contract to <out>/<UNDERLYING>/<YYYY-MM-DD>.ndjson.gz:
 {d, sym, oi, oi_date, strike, expiry, type, close, close_date}. With the trade tape from
 option_quote_collector.py --tape-min-size, day-over-day OI change says whether large prints opened or
 closed positions. Read-only; one paginated call per underlying (~60 calls/day).
+A re-run on the same day REPLACES that day's file per underlying (written to a temp file, then renamed), so a
+manual or duplicate cron run never doubles the rows. Exits 1 if any underlying failed, so cron sees the failure.
 
 Usage: option_oi_collector.py --out /data/option-oi --universe-file names.txt [--expiry-days 60]
 """
@@ -52,17 +54,23 @@ def main():
     key, sec = env_creds(a.env)
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
     today = datetime.now(ET).date()
+    failed = 0
     for u in read_universe(a.universe_file):
         try:
             rows = oi_rows(contracts(u, headers, today, a.expiry_days), today.isoformat())
             day_dir = os.path.join(a.out, u)
             os.makedirs(day_dir, exist_ok=True)
-            with gzip.open(os.path.join(day_dir, f"{today}.ndjson.gz"), "at") as f:
+            path = os.path.join(day_dir, f"{today}.ndjson.gz")
+            with gzip.open(path + ".tmp", "wt") as f:
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
+            os.replace(path + ".tmp", path)  # whole-day snapshot: a re-run replaces, never appends
             print(f"{today} {u}: {len(rows)} contracts", flush=True)
         except Exception as e:
+            failed += 1
             print(f"{today} {u}: ERROR {e}", file=sys.stderr, flush=True)
+    if failed:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
