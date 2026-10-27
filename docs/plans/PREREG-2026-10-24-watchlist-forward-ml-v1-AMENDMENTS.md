@@ -82,11 +82,12 @@ probabilities.
 
 ## A6 — 2026-10-26: monitoring
 
-`watchlist_forward_alert.sh` (v1's dead-man, 16:00 CT, after the 15:50 ML cron) also checks, for
-today: `ml_scores.csv` has rows for today, one per leg in `legs.json` (A1), and no scored leg lacks
-`p_tabpfn24`. The frozen scorer reports a TabPFN failure only as a stderr warning; the leg then counts
-for M2 but not M1. This rides on the operator redeploy that v1's A3 already waits for. Monitoring
-only, never data.
+PR #983 (`ops/watchlist-forward-alert-ml`, deployed on the homelab 2026-10-24) extends v1's dead-man
+alert (`watchlist_forward_alert.sh`, 16:00 CT, after the 15:50 ML cron) with two checks for today:
+`ml_scores.csv` has rows for today when legs were captured, and no scored leg lacks `p_tabpfn24`.
+The frozen scorer reports a TabPFN failure only as a stderr warning; the leg then counts for M2 but
+not M1. Follow-up to #983, not part of this PR: alert when today's row count differs from the leg
+count in `legs.json` (the A1 cross-join). Monitoring only, never data.
 
 ## A7 — 2026-10-26: the decision rule, made mechanical
 
