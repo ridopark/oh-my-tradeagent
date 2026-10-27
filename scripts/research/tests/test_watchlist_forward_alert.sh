@@ -53,13 +53,27 @@ $TODAY,MSFT,BELOW,2.0,not_fired,,,,,"
 run "scored=1.0 without TabPFN -> alert" 1 "1 scored leg(s) have no TabPFN"
 
 setup "$LEGS" "$HDR
-$TODAY,AAPL,ABOVE,1.0,fired,5,0.1,1,,0.5"
+$TODAY,AAPL,ABOVE,1.0,fired,5,0.1,1,,0.5
+$TODAY,MSFT,BELOW,2.0,fired,7,0.2,1,0.4,0.5"
 run "scored=1 (int format, all-fired file) without TabPFN -> alert" 1 "1 scored leg(s) have no TabPFN"
 
 setup "$LEGS" "$HDR
 $TODAY,AAPL,ABOVE,1.0,fired,5,0.1,1,0.6,0.5
 $TODAY,MSFT,BELOW,2.0,fired,7,0.2,1,0.4,0.5"
 run "healthy -> OK" 0 "OK"
+
+LEGS3='{"legs":[{"s":"AAPL"},{"s":"MSFT"},{"s":"NVDA"}]}'
+# a partial scoring day: the scorer wrote fewer rows than legs (every leg, scored or not, gets one row)
+setup "$LEGS3" "$HDR
+$TODAY,AAPL,ABOVE,1.0,fired,5,0.1,1,0.6,0.5
+$TODAY,MSFT,BELOW,2.0,not_fired,,,,,"
+run "3 legs but only 2 ML rows -> alert names both counts" 1 "wrote 2 rows for $TODAY but 3 legs were captured"
+
+setup "$LEGS3" "$HDR
+$TODAY,AAPL,ABOVE,1.0,fired,5,0.1,1,0.6,0.5
+$TODAY,MSFT,BELOW,2.0,not_fired,,,,,
+$TODAY,NVDA,ABOVE,3.0,armed_after_open,,,,,"
+run "3 legs / 3 rows (one unscored, one armed after open) -> OK" 0 "OK" "rows for $TODAY"
 
 setup '{"legs":[]}' ""
 run "holiday (no legs, no rows) -> OK" 0 "OK"
@@ -71,7 +85,8 @@ setup '{"legs": [' ""
 run "corrupt legs.json -> alert" 1 "legs.json is unreadable"
 
 setup "$LEGS" "day,s,scored,p_tabpfn24
-$TODAY,AAPL,1,"
+$TODAY,AAPL,1,
+$TODAY,MSFT,1,0.4"
 run "ml_scores.csv missing the d column -> alert (check errored, fail closed)" 1 \
     "ML score check errored for $TODAY: KeyError: 'd'"
 

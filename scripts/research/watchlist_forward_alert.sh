@@ -64,6 +64,14 @@ if [ "$dow" -le 5 ] && [ -f "$OUT/raw/$today/legs.json" ]; then
       problems+=("ML forward scorer wrote no rows for $today ($nlegs legs captured)"\
 " — see ~/scripts/watchlist-forward-ml.log")
     else
+      # score_day appends exactly one row per leg in legs.json — fired-and-scored, fired-before-minute-5
+      # (scored=0), not_fired, armed_after_open and no_bars alike — so a day's row count must equal its leg
+      # count; fewer means the scorer died part-way. (Only known over-count: two scored legs sharing
+      # ticker+direction fan out in the scorer's merge; 0 of the 219 frozen context legs did.)
+      if [ "$mlrows" -ne "$nlegs" ]; then
+        problems+=("ML forward scorer wrote $mlrows rows for $today but $nlegs legs were captured"\
+" — see ~/scripts/watchlist-forward-ml.log")
+      fi
       # pandas writes `scored` as 1 or 1.0 depending on whether any row in the file is NaN — compare numerically.
       unscored=$(python3 -c 'import csv,sys
 rows=[x for x in csv.DictReader(open(sys.argv[1])) if x["d"]==sys.argv[2]]
