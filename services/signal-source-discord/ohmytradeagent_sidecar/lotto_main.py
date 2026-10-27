@@ -1,0 +1,487 @@
+"""Entrypoint for the copytrade-lotto-v1 poller (PLAN-2026-10-26-copytrade-lotto-v1, phase 4).
+
+Runs as its own Deployment (``lotto-signal``) from the SAME image as the trading sidecar via a
+``command:`` override. No Discord session, no Playwright: it reads the rows the lotto mirror
+(PR #986) already stored, through the BFF's ingest-token-gated read endpoint (phase 3), and starts
+``CopytradeSignalWorkflow`` through ``TemporalEmitter`` exactly as ``main.py`` does.
+
+Fan-out: ``copytrade-lotto-v1`` is a strategy row any tenant can enable, so the poller emits one
+workflow per enabled ``(tenant_id, copytrade-lotto-v1)`` pair. ``LOTTO_FANOUT_SOURCE=registry``
+(default) reads them from api-gateway's ``/internal/copytrade-fanout-targets?strategy_id=…`` with
+``API_GATEWAY_BASE_URL`` / ``API_GATEWAY_SHARED_TOKEN`` and refreshes every
+``SIGNAL_FANOUT_REFRESH_SECS`` (fail-safe: a failed poll retains the last good set; an EMPTY set
+is applied, because nobody-enabled-it is a legitimate state for a strategy with no primary row).
+``LOTTO_FANOUT_SOURCE=env`` takes the comma-separated ``LOTTO_TENANT_IDS`` (``TENANT_ID`` is the
+single-value fallback, also used by ``--replay``).
+
+Temporal is reached through ``TEMPORAL_TARGET`` / ``TEMPORAL_NAMESPACE``, which the
+``65-lotto-signal.yaml`` manifest sets (as ``55-signal-source-discord.yaml`` does); the in-code
+defaults below exist for local runs only. ``TEMPORAL_TASK_QUEUE`` is unset there and defaults to
+``orchestrator-core`` exactly as ``main.py`` does.
+
+Dry-run (the default, ``LOTTO_DRY_RUN`` anything but ``false``) swaps in the bounded
+``DryRunEmitter`` and logs each would-emit payload; flipping that env is the go-live. Note that
+the boot rebuild emits rows still inside ``LOTTO_EMIT_MAX_AGE_SECS`` (default 120s), so the
+restart that flips dry-run off emits the prior 120s of posts for real. There is no cursor
+persistence; every start re-reads the lookback window. ``--replay --since <iso>`` runs the
+boot path over stored rows in dry-run and prints the would-emit list.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import logging
+import os
+import pathlib
+import sys
+from collections import deque
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from dotenv import load_dotenv
+from ohmytradeagent_contract.models.copytrade_signal_payload import CopytradeSignalPayload
+
+from . import healthz
+from .emitter import Emitter, EmitResult, TemporalEmitter, workflow_id_for
+from .fanout_registry import FanoutRefresher, FanoutRegistryClient
+from .lotto_emit import ChatRow, LottoPoller, parse_cutoff_et
+from .lotto_parser import AUTHOR, LottoBook
+from .runtime import required, setup_logging
+
+MESSAGES_PATH = "/internal/options-chat/messages"
+# Mirrors the BFF's limit ceiling; the client pages while count == limit.
+PAGE_LIMIT = 200
+DEFAULT_CHANNEL_ID = "880503518878892143"
+DEFAULT_STRATEGY_ID = "copytrade-lotto-v1"
+
+
+class BffMessagesClient:
+    """``GET /internal/options-chat/messages?channel=&after=&limit=`` with the ingest token.
+
+    ``since`` never raises. ``None`` means the first page could not be read (transport error, 5xx,
+    404 dark, 401/403 token, 400 channel) so the caller keeps its cursor and retries next poll; a
+    failure on a LATER page returns the rows read so far, and the caller's per-row cursor picks the
+    rest up next poll. Steady-state failures are throttled the way ``options_chat_ingest`` does, so
+    a dark route or a wrong token does not flood the log every 5s.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        log: logging.Logger,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._token = token
+        self._log = log
+        self._owns_client = client is None
+        self._consecutive_failures = 0
+        self._last_failure: str | None = None
+        self._client = client or httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            timeout=httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0),
+        )
+
+    async def since(
+        self, channel_id: str, after_id: int, limit: int = PAGE_LIMIT
+    ) -> list[ChatRow] | None:
+        rows: list[ChatRow] = []
+        cursor = after_id
+        while True:
+            page = await self._fetch(channel_id, cursor, limit)
+            if page is None:
+                return rows if rows else None
+            items, count = page
+            rows.extend(items)
+            if count < limit or not items:
+                return rows
+            cursor = int(items[-1].message_id)
+
+    async def _fetch(
+        self, channel_id: str, after_id: int, limit: int
+    ) -> tuple[list[ChatRow], int] | None:
+        try:
+            resp = await self._client.get(
+                MESSAGES_PATH,
+                params={"channel": channel_id, "after": str(after_id), "limit": str(limit)},
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+        except Exception as exc:  # noqa: BLE001 - transport problems are transient
+            self._failure(logging.WARNING, "lotto messages read transport error: %r", exc)
+            return None
+        code = resp.status_code
+        if code == 200:
+            try:
+                body = resp.json()
+                raw_items = body["items"]
+                count = int(body.get("count", len(raw_items)))
+                if not isinstance(raw_items, list):
+                    raise TypeError("items is not a list")
+            except Exception as exc:  # noqa: BLE001 - a proxy page or a reshaped response
+                self._failure(
+                    logging.WARNING,
+                    "lotto messages read returned 200 with an unusable body: %r (%s)",
+                    exc,
+                    self._truncate(resp.text),
+                )
+                return None
+            self._consecutive_failures = 0
+            self._last_failure = None
+            items: list[ChatRow] = []
+            for item in raw_items:
+                try:
+                    items.append(ChatRow.from_json(item))
+                except (KeyError, TypeError, ValueError) as exc:
+                    # The BFF is ours, so this is a contract bug to fix, not a condition to
+                    # crash-loop or wedge on: keep the row flagged so the cursor moves past it.
+                    try:
+                        message_id = str(int(item["message_id"]))
+                    except Exception:  # noqa: BLE001 - no usable id: nothing to advance past
+                        self._failure(logging.ERROR, "lotto messages row malformed, dropped: %r", exc)
+                        continue
+                    self._failure(
+                        logging.ERROR, "lotto messages row %s malformed, skipped: %r", message_id, exc
+                    )
+                    items.append(
+                        ChatRow(
+                            message_id=message_id,
+                            author_name="",
+                            posted_at=ChatRow.snowflake_time(message_id),
+                            content="",
+                            reply_to_id=None,
+                            malformed=True,
+                        )
+                    )
+            return items, count
+        if code in (401, 403):
+            self._failure(
+                logging.ERROR,
+                "lotto messages read rejected the token (%d) — is OPTIONS_CHAT_INGEST_TOKEN equal "
+                "to the BFF's?",
+                code,
+            )
+        elif code == 400:
+            self._failure(
+                logging.ERROR,
+                "lotto messages read rejected the request (400): %s — is LOTTO_CHANNEL_ID in the "
+                "BFF's OPTIONS_CHAT_CHANNEL_IDS?",
+                self._truncate(resp.text),
+            )
+        elif code == 404:
+            self._failure(
+                logging.WARNING,
+                "lotto messages route is 404 — is OPTIONS_CHAT_ENABLED set on the BFF?",
+            )
+        else:
+            self._failure(
+                logging.WARNING,
+                "lotto messages read failed %d: %s",
+                code,
+                self._truncate(resp.text),
+            )
+        return None
+
+    def _failure(self, level: int, msg: str, *args) -> None:
+        # Throttle repeats of the SAME failure; a different one always logs on its first hit.
+        if msg != self._last_failure:
+            self._last_failure = msg
+            self._consecutive_failures = 0
+        self._consecutive_failures += 1
+        n = self._consecutive_failures
+        if n in (1, 3) or n % 60 == 0:
+            self._log.log(level, msg + " (consecutive=%d)", *args, n)
+
+    @staticmethod
+    def _truncate(text: str, limit: int = 400) -> str:
+        text = (text or "").replace("\n", " ").strip()
+        return text if len(text) <= limit else text[:limit] + "…"
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
+class DryRunEmitter:
+    """Production dry-run emitter: starts nothing, dedupes on a bounded window of workflow ids.
+
+    ``InMemoryEmitter`` keeps every payload for the life of the process, which is right for a test
+    and wrong for a pod that runs dark for weeks. This remembers only the last ``max_ids`` ids;
+    an evicted id would log as would-emit again, which is acceptable for a log-only mode.
+    """
+
+    def __init__(self, max_ids: int = 2000) -> None:
+        self._ids: deque[str] = deque(maxlen=max_ids)
+        self._seen: set[str] = set()
+
+    def __len__(self) -> int:
+        return len(self._seen)
+
+    async def emit(self, payload: CopytradeSignalPayload) -> EmitResult:
+        wf_id = workflow_id_for(payload)
+        if wf_id in self._seen:
+            return EmitResult(workflow_id=wf_id, deduped=True)
+        if len(self._ids) == self._ids.maxlen:
+            self._seen.discard(self._ids[0])
+        self._ids.append(wf_id)
+        self._seen.add(wf_id)
+        return EmitResult(workflow_id=wf_id, deduped=False)
+
+    async def close(self) -> None:
+        return None
+
+
+def parse_dry_run(raw: str | None) -> bool:
+    """Fail-safe: only the literal ``false`` goes live."""
+    return (raw or "").strip().lower() != "false"
+
+
+async def build_emitter(
+    *, dry_run: bool, target: str, namespace: str, task_queue: str, log: logging.Logger
+) -> Emitter:
+    if dry_run:
+        log.info("LOTTO_DRY_RUN is on: using DryRunEmitter, no Temporal workflow is started")
+        return DryRunEmitter()
+    log.info("dialing Temporal target=%s namespace=%s task_queue=%s", target, namespace, task_queue)
+    return await TemporalEmitter.connect(target=target, namespace=namespace, task_queue=task_queue)
+
+
+def _aware(raw: str) -> datetime:
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"--since must carry a timezone (got {raw!r})")
+    return dt.astimezone(timezone.utc)
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ohmytradeagent_sidecar.lotto_main")
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="rebuild the book from stored rows in dry-run, print the would-emit list, exit 0",
+    )
+    parser.add_argument(
+        "--since",
+        type=_aware,
+        default=None,
+        help="ISO-8601 start for --replay (default: now - LOTTO_LOOKBACK_DAYS)",
+    )
+    return parser.parse_args(argv)
+
+
+def strategy_id_from_env() -> str:
+    return os.getenv("STRATEGY_ID", DEFAULT_STRATEGY_ID).strip() or DEFAULT_STRATEGY_ID
+
+
+def targets_from_env() -> list[tuple[str, str]]:
+    """``LOTTO_TENANT_IDS`` (comma-separated), else the single ``TENANT_ID``; each paired with
+    ``STRATEGY_ID``. Fails fast when neither is set."""
+    strategy_id = strategy_id_from_env()
+    raw = os.getenv("LOTTO_TENANT_IDS", "").strip() or os.getenv("TENANT_ID", "").strip()
+    tenants = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tenants:
+        raise SystemExit("LOTTO_TENANT_IDS (or TENANT_ID) is required when the fan-out source is env")
+    return list(dict.fromkeys((t, strategy_id) for t in tenants))
+
+
+def _build_poller(
+    *,
+    emitter: Emitter,
+    dry_run: bool,
+    log: logging.Logger,
+    targets: list[tuple[str, str]],
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[LottoPoller, BffMessagesClient]:
+    bff_url = required("BFF_INTERNAL_URL")
+    token = required("OPTIONS_CHAT_INGEST_TOKEN")
+    author = os.getenv("LOTTO_AUTHOR", AUTHOR).strip() or AUTHOR
+    client = BffMessagesClient(
+        base_url=bff_url,
+        token=token,
+        log=log,
+        client=httpx.AsyncClient(transport=transport, base_url=bff_url.rstrip("/"))
+        if transport is not None
+        else None,
+    )
+    poller = LottoPoller(
+        source=client,
+        emitter=emitter,
+        book=LottoBook(author=author),
+        channel_id=os.getenv("LOTTO_CHANNEL_ID", DEFAULT_CHANNEL_ID).strip() or DEFAULT_CHANNEL_ID,
+        author=author,
+        strategy_id=strategy_id_from_env(),
+        targets=targets,
+        lookback_days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14")),
+        emit_max_age_secs=float(os.getenv("LOTTO_EMIT_MAX_AGE_SECS", "120")),
+        expiry_day_entry_cutoff_et=parse_cutoff_et(
+            os.getenv("LOTTO_EXPIRY_DAY_ENTRY_CUTOFF_ET", "15:25")
+        ),
+        dry_run=dry_run,
+        log=log,
+    )
+    return poller, client
+
+
+async def replay_main(since: datetime | None, transport: httpx.BaseTransport | None = None) -> int:
+    load_dotenv()
+    log = setup_logging(os.getenv("LOG_LEVEL", "WARNING"), "lotto_replay")
+    emitter = DryRunEmitter()
+    poller, client = _build_poller(
+        emitter=emitter, dry_run=True, log=log, targets=targets_from_env(), transport=transport
+    )
+    if since is None:
+        since = datetime.now(timezone.utc) - timedelta(
+            days=float(os.getenv("LOTTO_LOOKBACK_DAYS", "14"))
+        )
+    try:
+        payloads = await poller.replay(since)
+    finally:
+        await client.aclose()
+    if payloads is None:
+        print(f"replay since {since.isoformat()}: the BFF read failed, nothing replayed")
+        return 2
+    for p in payloads:
+        print(
+            f"{p.action.value} {p.ticker} {p.expiry} {p.strike}{p.right.value} @ {p.price} "
+            f"posted_at={p.posted_at.isoformat()} tenant={p.tenant_id} signal_id={p.signal_id} "
+            f"text={p.raw_line!r}"
+        )
+    print(f"replay since {since.isoformat()}: would-emit {len(payloads)} signal(s)")
+    return 0
+
+
+async def _run() -> int:
+    load_dotenv()
+    log = setup_logging(os.getenv("LOG_LEVEL", "INFO"), "lotto_signal")
+    dry_run = parse_dry_run(os.getenv("LOTTO_DRY_RUN", "true"))
+    poll_interval = float(os.getenv("POLL_INTERVAL_SECS", "5"))
+
+    # Writable: owns the heartbeat the liveness probe reads (same shape as chat_main).
+    state_dir = pathlib.Path(os.getenv("STATE_DIR", "/app/state"))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    heartbeat_path = state_dir / "heartbeat"
+    healthz.start_from_env(heartbeat_path, log)
+
+    # Fan-out config is validated BEFORE dialing Temporal so a missing var fails fast without
+    # leaving a connected emitter unclosed (main.py's discipline).
+    fanout_source = os.getenv("LOTTO_FANOUT_SOURCE", "registry").strip().lower()
+    if fanout_source not in ("env", "registry"):
+        raise SystemExit("LOTTO_FANOUT_SOURCE must be 'env' or 'registry'")
+    targets: list[tuple[str, str]] = []
+    refresher: FanoutRefresher | None = None
+    if fanout_source == "env":
+        targets = targets_from_env()
+    else:
+        gw_base_url = required("API_GATEWAY_BASE_URL")
+        gw_token = required("API_GATEWAY_SHARED_TOKEN")
+
+    emitter = await build_emitter(
+        dry_run=dry_run,
+        target=os.getenv("TEMPORAL_TARGET", "localhost:7233"),
+        namespace=os.getenv("TEMPORAL_NAMESPACE", "default"),
+        task_queue=os.getenv("TEMPORAL_TASK_QUEUE", "orchestrator-core"),
+        log=log,
+    )
+    try:
+        poller, client = _build_poller(emitter=emitter, dry_run=dry_run, log=log, targets=targets)
+    except SystemExit:
+        await emitter.close()
+        raise
+    if fanout_source == "registry":
+        refresh_secs = float(os.getenv("SIGNAL_FANOUT_REFRESH_SECS", "60"))
+        refresher = FanoutRefresher(
+            client=FanoutRegistryClient(
+                base_url=gw_base_url, token=gw_token, strategy_id=strategy_id_from_env()
+            ),
+            apply_targets=poller.update_targets,
+            log=log,
+            refresh_secs=refresh_secs,
+            # Lotto has no primary row, so an empty registry set is a legitimate state (nobody
+            # enabled it, or the last tenant turned it off) and must be APPLIED — otherwise the
+            # last tenant could never be removed. Failed polls (5xx, bad token) still retain.
+            allow_empty=True,
+        )
+        log.info(
+            "fan-out source=registry (endpoint=%s strategy=%s refresh=%ss)",
+            gw_base_url,
+            strategy_id_from_env(),
+            refresh_secs,
+        )
+    else:
+        log.info("fan-out source=env targets=%s", targets)
+    log.info(
+        "lotto poller starting (dry_run=%s poll=%ss cursor_lookback=%s)",
+        dry_run,
+        poll_interval,
+        os.getenv("LOTTO_LOOKBACK_DAYS", "14"),
+    )
+    try:
+        await run_loop(poller, heartbeat_path, poll_interval, log=log, refresher=refresher)
+    finally:
+        await client.aclose()
+        await emitter.close()
+    return 1
+
+
+async def run_loop(
+    poller: LottoPoller,
+    heartbeat_path: pathlib.Path,
+    poll_interval: float,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    log: logging.Logger = logging.getLogger("lotto_signal"),
+    refresher: FanoutRefresher | None = None,
+) -> None:
+    """Boot, then poll forever. The liveness probe reads ``heartbeat_path``'s mtime (stale after
+    120s, ~150s from container start), so it is touched BEFORE the lookback rebuild — several BFF
+    reads — and after every iteration whatever the BFF answered: a dark or erroring BFF must log
+    its cause, not kill-loop the pod.
+
+    With a ``refresher``, the fan-out targets are fetched once BEFORE boot (so boot's in-window
+    emits already know their tenants) and then refreshed on an isolated sibling task whose
+    failure is logged, never propagated — the same shape ``main.py`` gives its refresher."""
+    heartbeat_path.touch()
+    if refresher is not None:
+        await refresher.refresh_once()
+        heartbeat_path.touch()
+    # Boot must see the lookback window before polling starts; until the BFF answers, keep the
+    # probe alive and retry rather than start from an empty book.
+    while not await poller.boot():
+        heartbeat_path.touch()
+        await sleep(poll_interval)
+    heartbeat_path.touch()
+    refresh_task: asyncio.Task[None] | None = None
+    if refresher is not None:
+        refresh_task = asyncio.create_task(refresher.run(), name="lotto-fanout-refresher")
+        refresh_task.add_done_callback(
+            lambda t: log.error("fan-out refresher exited: %r", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    try:
+        while True:
+            try:
+                await poller.poll_once()
+            except Exception:  # noqa: BLE001 - same discipline as watcher.py's tick loop
+                log.exception("lotto poll error")
+            heartbeat_path.touch()
+            await sleep(poll_interval)
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.replay:
+        sys.exit(asyncio.run(replay_main(args.since)))
+    sys.exit(asyncio.run(_run()))
+
+
+if __name__ == "__main__":
+    main()
