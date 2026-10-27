@@ -1060,6 +1060,50 @@ async def test_zero_targets_emits_nothing_and_warns(caplog):
     assert [(p.action.value, p.ticker) for p in await poller.poll_once()] == [("STC", "MU")]
 
 
+def _zero_target_warnings(caplog) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "no fan-out targets" in r.message and "at poll" in r.message
+    ]
+
+
+async def test_zero_target_warning_is_throttled(caplog):
+    """Nobody enabled the strategy: one WARNING per poll (12/min on the homelab) is noise. Mirror
+    the BFF-failure throttle: 1st, 3rd, then every 60th consecutive zero-target poll."""
+    bff = FakeBff()
+    poller, _ = make_poller(bff, Clock(T0), targets=[])
+    await poller.boot()
+    with caplog.at_level("WARNING", logger="test.lotto"):
+        for _ in range(60):
+            await poller.poll_once()
+    warned = _zero_target_warnings(caplog)
+    assert [r.message.rsplit("=", 1)[1].rstrip(")") for r in warned] == ["1", "3", "60"]
+
+
+async def test_zero_target_transition_logs_again(caplog):
+    """The last tenant disabling the strategy is a fresh event: the WARNING fires again on the first
+    poll after targets empty out, and targets coming back logs one INFO line."""
+    bff = FakeBff()
+    poller, _ = make_poller(bff, Clock(T0), targets=[])
+    await poller.boot()
+    with caplog.at_level("INFO", logger="test.lotto"):
+        for _ in range(5):
+            await poller.poll_once()
+        assert len(_zero_target_warnings(caplog)) == 2  # polls 1 and 3
+        poller.update_targets([("paper_lotto", STRATEGY)])
+        poller.update_targets([("paper_lotto", STRATEGY)])  # the refresher re-applies every tick
+        await poller.poll_once()
+        known_again = [r for r in caplog.records if "fan-out targets known again" in r.message]
+        assert len(known_again) == 1 and known_again[0].levelno == logging.INFO
+        assert len(_zero_target_warnings(caplog)) == 2
+        poller.update_targets([])
+        await poller.poll_once()
+    warned = _zero_target_warnings(caplog)
+    assert [r.message.rsplit("=", 1)[1].rstrip(")") for r in warned] == ["1", "3", "1"]
+    assert len([r for r in caplog.records if "fan-out targets known again" in r.message]) == 1
+
+
 def test_env_mode_targets(monkeypatch):
     monkeypatch.delenv("LOTTO_TENANT_IDS", raising=False)
     monkeypatch.delenv("TENANT_ID", raising=False)
