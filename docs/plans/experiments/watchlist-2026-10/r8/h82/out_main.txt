@@ -1,0 +1,79 @@
+A1 keep_0701 = False | late-armed rows: [['2026-07-01', 'TSLA'], ['2026-07-01', 'TWLO'], ['2026-07-01', 'MSFT'], ['2026-07-01', 'AMZN'], ['2026-07-01', 'NOW']]
+
+Per-half n (unique listed pairs / days / sign counts):
+FIT 255 44 {1.0: 133, 0.0: 77, -1.0: 45} etf pairs 72
+TEST 222 36 {1.0: 115, 0.0: 88, -1.0: 19} etf pairs 66
+
+FIT (pointwise 95% day-clustered; simultaneous via max-t)
+  h   metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp  crit  slo_bp  shi_bp  p_adj
+oc   signed 255    44  -14.21  16.62 -0.86  -46.78  18.36  2.88  -61.99   33.57   0.94
+oc unsigned 255    44  -14.03  13.28 -1.06  -40.05  11.99  2.88  -52.20   24.14   0.85
+cn   signed 255    44  -22.75  13.94 -1.63  -50.08   4.58  2.88  -62.84   17.34   0.48
+cn unsigned 255    44    2.56  10.73  0.24  -18.47  23.60  2.88  -28.29   33.42   1.00
+c5   signed 255    44  -16.53  48.53 -0.34 -111.64  78.58  2.88 -156.06  123.00   1.00
+c5 unsigned 255    44   29.46  40.08  0.74  -49.09 108.01  2.88  -85.77  144.69   0.97
+
+TEST (pointwise + studentized max-t simultaneous 95%)
+  h   metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp  crit  slo_bp  shi_bp  p_adj
+oc   signed 222    36    9.27  15.16  0.61  -20.44  38.98  2.85  -33.98   52.53   0.99
+oc unsigned 222    36    5.62  12.25  0.46  -18.39  29.62  2.85  -29.33   40.57   1.00
+cn   signed 216    35   16.03  11.57  1.39   -6.65  38.71  2.85  -16.98   49.04   0.67
+cn unsigned 216    35    7.09   8.61  0.82   -9.77  23.96  2.85  -17.46   31.65   0.95
+c5   signed 194    31  -23.52  56.30 -0.42 -133.86  86.83  2.85 -184.15  137.12   1.00
+c5 unsigned 194    31   -9.00  39.59 -0.23  -86.60  68.60  2.85 -121.96  103.97   1.00
+
+PASS RULE
+  h   metric  same_sign  fit_ci_excl0  test_maxt_ci_excl0  test_pointwise_excl0  PASS
+oc   signed      False         False               False                 False False
+oc unsigned      False         False               False                 False False
+cn   signed      False         False               False                 False False
+cn unsigned       True         False               False                 False False
+c5   signed       True         False               False                 False False
+c5 unsigned      False         False               False                 False False
+
+Sensitivity: signed metrics on sign!=0 pairs only
+FIT  h metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp
+oc signed 178    44  -20.36  23.75 -0.86  -66.91  26.19
+cn signed 178    44  -32.59  20.04 -1.63  -71.86   6.68
+c5 signed 178    44  -23.68  69.40 -0.34 -159.70 112.34
+TEST  h metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp
+oc signed 134    36   15.36  25.11  0.61  -33.86  64.58
+cn signed 130    35   26.64  19.34  1.38  -11.27  64.54
+c5 signed 122    31  -37.39  88.91 -0.42 -211.65 136.86
+
+Sensitivity: ISO-week clusters
+FIT  h   metric   n  days  est_bp  se_bp     t  lo_bp  hi_bp
+oc   signed 255    11  -14.21  15.25 -0.93 -44.11  15.68
+oc unsigned 255    11  -14.03  15.36 -0.91 -44.13  16.07
+cn   signed 255    11  -22.75  10.61 -2.14 -43.54  -1.96
+cn unsigned 255    11    2.56   8.30  0.31 -13.70  18.82
+c5   signed 255    11  -16.53  34.65 -0.48 -84.44  51.38
+c5 unsigned 255    11   29.46  61.95  0.48 -91.95 150.87
+TEST  h   metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp
+oc   signed 222     8    9.27  14.10  0.66  -18.36  36.91
+oc unsigned 222     8    5.62  13.73  0.41  -21.29  32.53
+cn   signed 216     8   16.03  14.76  1.09  -12.90  44.97
+cn unsigned 216     8    7.09  13.82  0.51  -19.98  34.17
+c5   signed 194     7  -23.52  72.90 -0.32 -166.41 119.38
+c5 unsigned 194     7   -9.00  36.08 -0.25  -79.71  61.71
+
+Within-ticker control (raw returns; ticker's own non-listed days in same half, >=5 off days)
+FIT  h   metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp
+oc   signed 255    44  -13.90  17.46 -0.80  -48.13  20.32
+oc unsigned 255    44   -9.24  12.73 -0.73  -34.19  15.71
+cn   signed 255    44  -33.28  15.74 -2.11  -64.14  -2.42
+cn unsigned 255    44  -14.44  14.74 -0.98  -43.32  14.45
+c5   signed 255    44  -41.10  52.62 -0.78 -144.24  62.04
+c5 unsigned 255    44   20.50  46.05  0.45  -69.76 110.76
+TEST  h   metric   n  days  est_bp  se_bp     t   lo_bp  hi_bp
+oc   signed 190    36    5.90  20.05  0.29  -33.40  45.20
+oc unsigned 190    36   15.84  12.64  1.25   -8.93  40.61
+cn   signed 185    35   24.05  16.52  1.46   -8.33  56.44
+cn unsigned 185    35   -6.18  12.71 -0.49  -31.10  18.74
+c5   signed 167    31  -34.55  67.42 -0.51 -166.70  97.60
+c5 unsigned 167    31  -34.24  47.49 -0.72 -127.33  58.84
+
+Net of costs, signed metrics (listed leg 3bp single/1bp ETF RT + 3bp control-basket RT), TEST:
+oc net 9.4bp  CI [-39.8,58.6] n=134 days=36
+cn net 20.7bp  CI [-17.2,58.6] n=130 days=35
+c5 net -43.3bp  CI [-217.6,130.9] n=122 days=31

@@ -1,0 +1,20 @@
+H9.3 decisions, logged 2026-10-23T04:47:39Z BEFORE any r60/rclose was read or computed (only tickers/dates/halves seen).
+D1 ETFs (SPY, QQQ, IWM, GLD): PRIMARY = tagged SILENT (literal prereg: no earnings within +-3 trading days).
+   SENSITIVITY (reported, not used for verdict) = stock-only SILENT (ETF legs dropped from both arms).
+D2 Earnings source: Nasdaq calendar API (public, no creds), one file per weekday 2026-06-08..2026-10-30 (raw/nasdaq_*.json).
+   Nasdaq 'time' is time-not-supplied for every past report, so timing comes from the FIRST Benzinga-format results
+   headline in Alpaca news (window D-1 12:00 ET .. D+1 12:00 ET; regex 'Qn [Adj./GAAP] EPS|Sales|Revenue', 'Sees Qn',
+   'Preliminary Qn'; previews/transcripts excluded). Future scheduled rows (10-27..10-30) use Nasdaq time.
+   Effective session E = first trading session whose 09:30 ET open is after the report timestamp.
+   Report at 16:00 ET or later -> after close; before 09:30 -> pre-open; 09:30-16:00 -> intraday (none expected).
+D3 AGREE: E == d AND the report was before d's open or after the previous session's close (i.e. not intraday).
+D4 SILENT: no earnings row (Nasdaq date D, or E) within +-3 trading days of d. Anything else -> EXCLUDED.
+D5 Trading calendar: SPY sessions in rth_1m.parquet, extended with NYSE sessions 10-23,10-26..10-30 for the window.
+D6 Base: kind=real, fired=1, gap=0 (prereg). Halves from events.half (FIT 06-22..08-31, TEST 09-01..10-22).
+   Placebo: kind=placebo, fired=1, gap=0, tagged with its own (s, d); same rules.
+D7 Inference: mean r60 (primary), rclose (secondary). AGREE-SILENT diff; 95% percentile CI from a day-cluster
+   bootstrap (resample trading days within half with replacement, B=10000, seed 93); resamples with 0 AGREE legs are
+   dropped and counted. Also CR1 day-clustered t (diff via regression on AGREE dummy) for the max-t handoff.
+D8 PASS (H9.3, DISAGREE n/a): AGREE-SILENT r60 > 0 with CI excluding 0 in BOTH FIT and TEST (primary D1 only).
+   Placebo comparison (real AGREE minus placebo AGREE; placebo AGREE-SILENT) is reported, not gating.
+D9 Tiny-n guard: none added to the rule (not in prereg); n per cell reported explicitly.

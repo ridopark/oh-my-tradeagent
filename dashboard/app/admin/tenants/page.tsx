@@ -490,10 +490,7 @@ export default async function AdminTenantsPage({
                       {group.rows.map((item) => {
                         const b =
                           item.mode === "live" ? activationBadge(item) : null;
-                        const intent =
-                          item.activation_state === "VALID"
-                            ? "deactivate"
-                            : "activate";
+                        const valid = item.activation_state === "VALID";
                         return (
                           <tr
                             key={`${item.tenant_id}:${item.strategy_id}`}
@@ -546,13 +543,28 @@ export default async function AdminTenantsPage({
                             </td>
                             <td className="px-3 py-2 text-right">
                               {item.mode === "live" && (
-                                <ActivateButton
-                                  tenantId={item.tenant_id}
-                                  strategyId={item.strategy_id}
-                                  intent={intent}
-                                  action={activationAction}
-                                  writeEnabled={ACTIVATION_ENABLED}
-                                />
+                                <div className="flex justify-end gap-2">
+                                  {/* A VALID row can be renewed any time: re-running activation
+                                      writes a fresh 30-day approval, so an expiry can be pushed
+                                      out before it lapses rather than only after. */}
+                                  <ActivateButton
+                                    tenantId={item.tenant_id}
+                                    strategyId={item.strategy_id}
+                                    intent="activate"
+                                    renew={valid}
+                                    action={activationAction}
+                                    writeEnabled={ACTIVATION_ENABLED}
+                                  />
+                                  {valid && (
+                                    <ActivateButton
+                                      tenantId={item.tenant_id}
+                                      strategyId={item.strategy_id}
+                                      intent="deactivate"
+                                      action={activationAction}
+                                      writeEnabled={ACTIVATION_ENABLED}
+                                    />
+                                  )}
+                                </div>
                               )}
                             </td>
                           </tr>

@@ -1381,4 +1381,114 @@ class AlpacaMarketDataTest {
         .setHeader("Content-Type", "application/json")
         .setBody(body);
   }
+
+  // --- Stock socket silence watchdog (2026-10-20: socket silent 4h in RTH, nothing reconnected)
+  // ---
+
+  // A Tuesday at 14:35 ET (in RTH) and the same day at 17:00 ET (after the close).
+  private static final java.time.ZonedDateTime RTH =
+      java.time.ZonedDateTime.of(
+          2026, 10, 20, 14, 35, 0, 0, com.ohmytradeagent.marketdata.MarketHours.ET);
+  private static final java.time.ZonedDateTime AFTER_CLOSE = RTH.withHour(17);
+
+  private static java.net.http.WebSocket fakeSocket() {
+    java.net.http.WebSocket ws = org.mockito.Mockito.mock(java.net.http.WebSocket.class);
+    org.mockito.Mockito.when(
+            ws.sendText(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean()))
+        .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(ws));
+    return ws;
+  }
+
+  /** A provider whose stock connects hand out {@code sockets} in order instead of dialing. */
+  private AlpacaMarketData silenceProvider(
+      com.ohmytradeagent.marketdata.health.FeedHealth fh,
+      java.util.List<java.net.http.WebSocket> connects,
+      java.net.http.WebSocket... sockets) {
+    AlpacaMarketDataProperties props = propsWithFeed("iex");
+    RestClient client = RestClient.builder().baseUrl(props.dataBaseUrl()).build();
+    java.util.Iterator<java.net.http.WebSocket> next = java.util.List.of(sockets).iterator();
+    return new AlpacaMarketData(client, mapper, props, HttpClient.newHttpClient(), scheduler, fh) {
+      @Override
+      java.net.http.WebSocket connectStockBlocking() {
+        java.net.http.WebSocket ws = next.next();
+        connects.add(ws);
+        return ws;
+      }
+    };
+  }
+
+  private static com.ohmytradeagent.marketdata.health.FeedHealth feedHealth() {
+    return new com.ohmytradeagent.marketdata.health.FeedHealth(
+        new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+  }
+
+  private static long silentFor(java.time.Duration d) {
+    return System.currentTimeMillis() + d.toMillis();
+  }
+
+  @Test
+  void silentStockSocket_inRth_withSubscribers_isReplacedAndResubscribed() {
+    java.net.http.WebSocket dead = fakeSocket();
+    java.net.http.WebSocket fresh = fakeSocket();
+    var fh = feedHealth();
+    java.util.List<java.net.http.WebSocket> connects = new CopyOnWriteArrayList<>();
+    AlpacaMarketData eq = silenceProvider(fh, connects, dead, fresh);
+    eq.subscribeEquity("SPY", t -> {});
+    eq.dispatchStockWsMessage("[{\"T\":\"success\",\"msg\":\"authenticated\"}]");
+
+    eq.checkStockSilence(silentFor(AlpacaMarketData.STOCK_SILENCE_RECONNECT.plusSeconds(1)), RTH);
+
+    org.mockito.Mockito.verify(dead).abort();
+    assertThat(connects).containsExactly(dead, fresh);
+    assertThat(fh.connected(com.ohmytradeagent.marketdata.health.FeedHealth.Feed.EQUITY)).isFalse();
+    // The new socket authenticates, then every registered ticker is subscribed on it.
+    org.mockito.Mockito.verify(fresh)
+        .sendText(
+            org.mockito.ArgumentMatchers.contains("\"auth\""),
+            org.mockito.ArgumentMatchers.eq(true));
+    eq.dispatchStockWsMessage("[{\"T\":\"success\",\"msg\":\"authenticated\"}]");
+    org.mockito.Mockito.verify(fresh)
+        .sendText(
+            org.mockito.ArgumentMatchers.argThat(
+                (String m) -> m.contains("\"subscribe\"") && m.contains("SPY")),
+            org.mockito.ArgumentMatchers.eq(true));
+  }
+
+  @Test
+  void stockSocket_notReplaced_withinWindow_outsideRth_orWithoutSubscribers() {
+    java.net.http.WebSocket ws = fakeSocket();
+    java.util.List<java.net.http.WebSocket> connects = new CopyOnWriteArrayList<>();
+    AlpacaMarketData eq = silenceProvider(feedHealth(), connects, ws);
+    Subscription sub = eq.subscribeEquity("SPY", t -> {});
+    long pastWindow = silentFor(AlpacaMarketData.STOCK_SILENCE_RECONNECT.plusSeconds(1));
+
+    eq.checkStockSilence(silentFor(AlpacaMarketData.STOCK_SILENCE_RECONNECT.minusSeconds(5)), RTH);
+    eq.checkStockSilence(pastWindow, AFTER_CLOSE);
+    sub.close();
+    eq.checkStockSilence(pastWindow, RTH);
+
+    org.mockito.Mockito.verify(ws, org.mockito.Mockito.never()).abort();
+    assertThat(connects).containsExactly(ws);
+  }
+
+  @Test
+  void stockFrame_restartsTheSilenceWindow() throws Exception {
+    java.net.http.WebSocket ws = fakeSocket();
+    java.util.List<java.net.http.WebSocket> connects = new CopyOnWriteArrayList<>();
+    AlpacaMarketData eq = silenceProvider(feedHealth(), connects, ws);
+    eq.subscribeEquity("SPY", t -> {});
+    Thread.sleep(20);
+    long checkAt =
+        System.currentTimeMillis() + AlpacaMarketData.STOCK_SILENCE_RECONNECT.toMillis() - 1;
+
+    // Without the frame, checkAt is past the window measured from the connect, 20ms earlier.
+    eq.dispatchStockWsMessage(
+        "[{\"T\":\"t\",\"S\":\"SPY\",\"p\":771.00,\"t\":\"2026-10-20T18:35:00Z\"}]");
+    eq.checkStockSilence(checkAt, RTH);
+
+    org.mockito.Mockito.verify(ws, org.mockito.Mockito.never()).abort();
+    assertThat(connects).containsExactly(ws);
+  }
 }

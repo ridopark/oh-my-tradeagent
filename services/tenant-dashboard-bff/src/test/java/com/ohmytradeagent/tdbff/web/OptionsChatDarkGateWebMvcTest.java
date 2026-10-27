@@ -50,6 +50,16 @@ class OptionsChatDarkGateWebMvcTest {
                   .content("{\"channel_id\":\"786109983065505792\",\"messages\":[]}"))
           .andExpect(status().isNotFound());
     }
+
+    @Test
+    void pollerReadRouteIs404() throws Exception {
+      // The lotto poller's cursor read sits on the same controller, so it goes dark with it.
+      mvc.perform(
+              get("/internal/options-chat/messages")
+                  .param("channel", "786109983065505792")
+                  .param("after", "0"))
+          .andExpect(status().isNotFound());
+    }
   }
 
   /** The feature flag itself off. */
