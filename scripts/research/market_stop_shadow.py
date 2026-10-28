@@ -10,6 +10,10 @@ READ-ONLY: reads the exec journal (SELECT) and Alpaca market data; never places 
 
 Raw folders <out>/raw/<day>/ are append-only (capture refuses to overwrite). `check` reports counts only.
 `analyze` refuses to run before the single look date.
+
+Known conservative choice (documented, not changed): the trigger bar is identified by its START time t, and actual sells
+inside (t, t+1min) are treated as after the trigger. The shadow could not have known that bar's close until t+1min,
+so this biases the shadow arm by at most one minute against the actual arm.
 """
 import argparse, gzip, hashlib, json, math, os, random, shlex, subprocess, sys, time, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta
@@ -23,6 +27,10 @@ STOP = -0.005                          # direction × (close/reference − 1) �
 HS_FLOOR = 0.01                        # Roll half-spread floor, fraction of fill price
 MIN_ROLL_CLOSES = 4
 SEED = 28
+# NYSE calendar through the look date (capture skips holidays; check expects no folder on them and accepts a 13:00 ET close).
+HOLIDAYS = {date(2026, 11, 26), date(2026, 12, 25), date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15), date(2027, 3, 26)}
+EARLY_CLOSE = {date(2026, 11, 27), date(2026, 12, 24)}
+MIN_QQQ_BARS, MIN_QQQ_BARS_EARLY = 300, 180
 DEFAULT_PSQL = f"kubectl exec -i -n copytrade postgres-0 -- psql -U temporal -d {DB} -tA -F |"
 DATA = "https://data.alpaca.markets"
 
@@ -124,15 +132,19 @@ def all_fills(out):
 def open_contracts(fills, day):
     """contracts with remaining long quantity at any time on `day` (FIFO per symbol, population fills only)."""
     qty = {}
-    for f in sorted(fills, key=lambda x: x["filled_at"]):
+    for f in sorted(fills, key=lambda x: parse_ts(x["filled_at"]).timestamp()):
         if parse_ts(f["filled_at"]).date() > day: break
         q = qty.get(f["option_symbol"], 0)
         qty[f["option_symbol"]] = q + f["filled_qty"] if f["side"] == "BUY" else max(0, q - f["filled_qty"])
     today = {f["option_symbol"] for f in fills if parse_ts(f["filled_at"]).date() == day}
     return sorted({s for s, q in qty.items() if q > 0} | today)
 
+def is_session(day):
+    return day.weekday() < 5 and day not in HOLIDAYS
+
 def capture(day, out, headers, psql_cmd):
     final = os.path.join(out, "raw", day.isoformat())
+    if not is_session(day): return {"day": day.isoformat(), "skipped": "not a trading session"}
     if os.path.exists(final): raise SystemExit(f"refusing to overwrite {final} (append-only)")
     folder = final + ".tmp"                      # atomic: everything lands in .tmp, renamed to the final folder only after the manifest
     if os.path.exists(folder): import shutil; shutil.rmtree(folder)
@@ -189,7 +201,7 @@ def build_lots(fills):
     """FIFO lots per option symbol from population fills (filled_at >= START 09:30 ET)."""
     start_t = datetime.combine(START, datetime.strptime("09:30", "%H:%M").time(), ET)
     lots, open_by_sym = [], {}
-    for f in sorted(fills, key=lambda x: (x["filled_at"], x["intent_key"])):
+    for f in sorted(fills, key=lambda x: (parse_ts(x["filled_at"]).timestamp(), x["intent_key"])):   # UTC instant: ISO strings AND same-zone aware datetimes mis-order in the DST fall-back hour (Python ignores fold intra-zone)
         t = parse_ts(f["filled_at"])
         if t < start_t: continue
         s = f["option_symbol"]
@@ -239,6 +251,7 @@ def arm_pnl(lot, bars, und, qqq, today, shadow):
         if c["expiry"] <= today:
             uc = und.get((c["root"], c["expiry"].isoformat())); iv = intrinsic(c, uc)
             if iv is not None: events.append((c["expiry"], (iv - lot["entry_px"]) * rem * 100)); rem = 0
+            else: info["expiry_close_missing"] = True          # expired but no underlying close captured: marked at last option close below, FLAGGED
         if rem > 0:   # still open at the analysis date (or no expiry close captured): mark at last captured option close
             last = ob[-1] if ob else None
             if last: events.append((last["t"].date(), (last["c"] - lot["entry_px"]) * rem * 100)); info["marked_open"] = True
@@ -282,7 +295,8 @@ def analyze(out, today):
         act_events += a; sh_events += s
         cost = lot["entry_px"] * lot["qty"] * 100
         per_lot.append({"id": lot["id"], "sym": lot["sym"], "cost": cost, "actual": sum(v for _, v in a), "shadow": sum(v for _, v in s), "trigger": info.get("trigger") is not None,
-                        "marked_open": info.get("marked_open", False), "unpriced": info.get("unpriced", 0), "no_exit_bar": info.get("no_exit_bar", False)})
+                        "marked_open": info.get("marked_open", False), "unpriced": info.get("unpriced", 0), "no_exit_bar": info.get("no_exit_bar", False),
+                        "expiry_close_missing": info.get("expiry_close_missing", False)})
     def daily(ev):
         by = {}
         for d, v in ev: by[d] = by.get(d, 0) + v
@@ -300,7 +314,7 @@ def analyze(out, today):
            "verdict": verdict, "mean_per_lot_diff_over_cost": (sum(diffs) / len(diffs)) if diffs else None, "ci95": ci,
            "winners_cut": sum(1 for l in trig if l["actual"] > 0 and l["shadow"] < l["actual"]), "losers_saved": sum(1 for l in trig if l["actual"] < 0 and l["shadow"] > l["actual"]),
            "marked_open": sum(1 for l in per_lot if l["marked_open"]), "unpriced_lots": sum(1 for l in per_lot if l["unpriced"]),
-           "triggered_without_exit_bar": sum(1 for l in per_lot if l["no_exit_bar"])}
+           "triggered_without_exit_bar": sum(1 for l in per_lot if l["no_exit_bar"]), "expiry_close_missing": sum(1 for l in per_lot if l["expiry_close_missing"])}
     json.dump({"result": res, "lots": per_lot}, open(os.path.join(out, f"analysis_{today.isoformat()}.json"), "w"), indent=1, default=str)
     return res
 
@@ -317,8 +331,10 @@ def check(out, today):
             for f, h in m.items():
                 fp = os.path.join(p, f)
                 if os.path.exists(fp) and hashlib.sha256(open(fp, "rb").read()).hexdigest() != h: problems.append(f"{d}: {f} hash mismatch (raw folders are append-only)")
-        if os.path.exists(os.path.join(p, "qqq_1m.ndjson.gz")) and len(read_gz(os.path.join(p, "qqq_1m.ndjson.gz"))) < 300: problems.append(f"{d}: QQQ has fewer than 300 RTH bars")
-    if today.weekday() < 5 and today >= START and today.isoformat() not in days: problems.append(f"{today}: no capture folder")
+        if os.path.exists(os.path.join(p, "qqq_1m.ndjson.gz")):
+            floor = MIN_QQQ_BARS_EARLY if date.fromisoformat(d) in EARLY_CLOSE else MIN_QQQ_BARS
+            if len(read_gz(os.path.join(p, "qqq_1m.ndjson.gz"))) < floor: problems.append(f"{d}: QQQ has fewer than {floor} RTH bars")
+    if is_session(today) and today >= START and today.isoformat() not in days: problems.append(f"{today}: no capture folder")
     fills = all_fills(out); lots = build_lots(fills)
     return {"days": len(days), "fills": len(fills), "lots": len(lots), "open_contracts": len(open_contracts(fills, today)), "problems": problems}
 

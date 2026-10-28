@@ -176,5 +176,37 @@ class ReviewFixes(unittest.TestCase):
         self.assertIn("'2026-11-03T00:00:00-05:00'", seen["q"]); self.assertIn("'2026-11-04T00:00:00-05:00'", seen["q"])
 
 
+class ReviewFixes2(unittest.TestCase):
+    def _folder(self, d, day, nbars):
+        p = os.path.join(d, "raw", day.isoformat()); os.makedirs(p); json.dump([], open(os.path.join(p, "fills.json"), "w"))
+        m.write_gz(os.path.join(p, "qqq_1m.ndjson.gz"), [{"s": "QQQ", "t": (t("09:30", day) + timedelta(minutes=i)).isoformat(), "o": 1, "h": 1, "l": 1, "c": 1, "v": 1} for i in range(nbars)])
+        for f in ("opt_1m", "und_1d"): m.write_gz(os.path.join(p, f + ".ndjson.gz"), [])
+        m.manifest(p)
+    def test_check_accepts_holidays_and_early_closes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._folder(d, date(2026, 11, 27), 210)                       # day after Thanksgiving: 13:00 close, ~210 bars
+            self.assertEqual(m.check(d, date(2026, 11, 26))["problems"], [])   # Thanksgiving: no folder expected
+            self.assertEqual(m.check(d, date(2026, 11, 27))["problems"], [])   # early close accepted
+            self.assertEqual(m.check(d, date(2026, 12, 25))["problems"], [])   # Christmas (Friday)
+        with tempfile.TemporaryDirectory() as d:
+            self._folder(d, date(2026, 11, 30), 210)                       # a normal Monday with only 210 bars IS a problem
+            self.assertTrue(any("fewer than 300" in x for x in m.check(d, date(2026, 11, 30))["problems"]))
+    def test_capture_skips_non_sessions_without_a_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = m.capture(date(2026, 11, 26), d, {}, "false"); self.assertIn("skipped", r)
+            r = m.capture(date(2026, 11, 28), d, {}, "false"); self.assertIn("skipped", r)   # Saturday
+            self.assertFalse(os.path.exists(os.path.join(d, "raw")))
+    def test_fill_order_in_dst_fallback_hour_uses_parsed_time(self):
+        # 2026-11-01 01:45 EDT (05:45Z) is EARLIER than 01:15 EST (06:15Z), but the ISO strings sort EST first
+        a = fill("BUY", 1, 1.0, datetime.fromisoformat("2026-11-01T01:45:00-04:00"), "edt")
+        b = fill("SELL", 1, 2.0, datetime.fromisoformat("2026-11-01T01:15:00-05:00"), "est")
+        lots = m.build_lots([b, a]); self.assertEqual(len(lots), 1); self.assertEqual(lots[0]["sells"][0]["qty"], 1)
+    def test_missing_expiry_close_is_flagged(self):
+        exp = date(2026, 11, 6); q = qqq_series(100, [0], d=D - timedelta(days=3), start="15:59") + qqq_series(100, [0] * 100)
+        bars = opt_bars(CALL, [2.0] * 100); lot = m.build_lots([fill("BUY", 1, 2.0, t("09:30"))])[0]
+        s, info = m.arm_pnl(lot, bars, {}, q, exp + timedelta(days=1), shadow=False)
+        self.assertTrue(info.get("expiry_close_missing")); self.assertTrue(info.get("marked_open"))
+
+
 if __name__ == "__main__":
     unittest.main()

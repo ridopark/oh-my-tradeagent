@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# market-stop-shadow-v1 dead-man alert: posts `check` problems (passed as $1) to the staging_paper Discord webhook,
-# deduped per day. Same webhook resolution as watchlist_forward_alert.sh / prod_real_watchdog.sh; the URL is never printed.
+# market-stop-shadow-v1 check alert: posts `check` problems (passed as $1) to the staging_paper Discord webhook,
+# deduped per day. It fires only when `check` runs and finds a problem — if cron itself stops, nothing here alerts;
+# the weekly operator glance at ~/scripts/market-stop-shadow.log (or the watchlist dead-man, which shares the host) is
+# the backstop for that. Same webhook resolution as watchlist_forward_alert.sh; the URL is never printed.
 # Env: NS (copytrade), STATE_DIR (~/scripts/.market-stop-shadow), DRY_RUN=1 (log only), TEST=1 (no dedupe).
 set -uo pipefail
 NS=${NS:-copytrade}; KUBECTL=$(command -v kubectl || echo /usr/local/bin/kubectl)
