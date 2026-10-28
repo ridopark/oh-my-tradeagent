@@ -1,4 +1,4 @@
-"""Unit tests for market_stop_shadow.py (pure rule functions + check/analyze gates). Run: python3 -m pytest scripts/research/tests/test_market_stop_shadow.py"""
+"""Unit tests for market_stop_shadow.py (pure rule functions + check/analyze gates). Run: python3 -B -m unittest scripts/research/tests/test_market_stop_shadow.py (not in CI)"""
 import json, gzip, os, sys, tempfile, unittest
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -105,8 +105,6 @@ class Gates(unittest.TestCase):
             self.assertTrue(any("hash mismatch" in x for x in r["problems"])); self.assertTrue(any("fewer than 300" in x for x in r["problems"]))
             self.assertTrue(any("no capture folder" in x for x in r["problems"]))
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class EndToEnd(unittest.TestCase):
@@ -133,3 +131,50 @@ class EndToEnd(unittest.TestCase):
             self.assertAlmostEqual(r["shadow_total"], (1.5 * 0.99 - 2.0) * 2 * 100, places=6)
             self.assertEqual(r["verdict"], "PASS")   # shadow −103 vs actual −140: better total and smaller drawdown
             self.assertTrue(os.path.exists(os.path.join(d, f"analysis_{m.LOOK}.json")))
+
+
+class ReviewFixes(unittest.TestCase):
+    def test_analyze_with_no_lots_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "raw", "2026-11-02"); os.makedirs(p); json.dump([], open(os.path.join(p, "fills.json"), "w"))
+            for f in ("qqq_1m", "opt_1m", "und_1d"): m.write_gz(os.path.join(p, f + ".ndjson.gz"), [])
+            m.manifest(p); r = m.analyze(d, m.LOOK)
+            self.assertEqual((r["lots"], r["triggers"], r["verdict"], r["ci95"]), (0, 0, "NOT_SHOWN", (None, None)))
+    def test_trigger_without_option_bar_is_flagged_not_silently_held(self):
+        q = qqq_series(100, [0], d=D - timedelta(days=3), start="15:59") + qqq_series(100, [0, 0, -0.01] + [-0.01] * 60)
+        bars = opt_bars(CALL, [2.0, 2.0, 2.0])                      # prints stop at 09:32; trigger bar 09:32 -> no print after it
+        lot = m.build_lots([fill("BUY", 1, 2.0, t("09:30"))])[0]
+        s, info = m.arm_pnl(lot, bars, {}, q, D, shadow=True)
+        self.assertIsNotNone(info["trigger"]); self.assertTrue(info.get("no_exit_bar")); self.assertTrue(info.get("marked_open"))
+    def test_multi_day_lot_trigger_day_n_exit_day_n_plus_1(self):
+        d2 = D + timedelta(days=1)
+        q = qqq_series(100, [0], d=D - timedelta(days=3), start="15:59") + qqq_series(100, [0] * 390) + qqq_series(100, [0, -0.006] + [-0.006] * 60, d=d2)
+        bars = {m.occ(CALL)["compact"]: opt_bars(CALL, [2.0] * 390)[m.occ(CALL)["compact"]] + opt_bars(CALL, [1.5] * 62, d=d2)[m.occ(CALL)["compact"]]}
+        lot = m.build_lots([fill("BUY", 1, 2.0, t("10:00"))])[0]
+        s, info = m.arm_pnl(lot, bars, {}, q, d2, shadow=True)
+        self.assertEqual(info["trigger"]["t"], t("09:31", d2).isoformat()); self.assertEqual(info["shadow_exit"]["t"], t("09:32", d2).isoformat())
+        self.assertEqual(s, [(d2, (1.5 * (1 - m.HS_FLOOR) - 2.0) * 100)])
+    def test_capture_is_atomic_on_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(Exception): m.capture(date(2026, 11, 2), d, {}, "false")   # psql command fails -> no folder, no .tmp left
+            self.assertFalse(os.path.exists(os.path.join(d, "raw", "2026-11-02"))); self.assertFalse(os.path.exists(os.path.join(d, "raw", "2026-11-02.tmp")))
+    def test_capture_success_renames_tmp_to_final_with_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            orig_sql, orig_paged = m.sql, m.paged
+            m.sql = lambda cmd, q: []; m.paged = lambda path, params, headers, key: {}
+            try: r = m.capture(date(2026, 11, 2), d, {}, "x")
+            finally: m.sql, m.paged = orig_sql, orig_paged
+            final = os.path.join(d, "raw", "2026-11-02")
+            self.assertTrue(os.path.exists(os.path.join(final, "manifest.json"))); self.assertFalse(os.path.exists(final + ".tmp"))
+            self.assertEqual(r["fills"], 0)
+    def test_fills_window_is_dst_correct(self):
+        seen = {}
+        def fake_sql(cmd, q): seen["q"] = q; return []
+        orig = m.sql; m.sql = fake_sql
+        try: m.fills_for_day(date(2026, 11, 3), "x")
+        finally: m.sql = orig
+        self.assertIn("'2026-11-03T00:00:00-05:00'", seen["q"]); self.assertIn("'2026-11-04T00:00:00-05:00'", seen["q"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -56,8 +56,9 @@ def paged(path, params, headers, key):
         if not tok: return out
 
 def sql(psql_cmd, query):
-    r = subprocess.run(shlex.split(psql_cmd), input=query, capture_output=True, text=True, check=True)
-    return [l.split("|") for l in r.stdout.splitlines() if l.strip()]
+    # READ-ONLY enforced at the session level, not just by convention: any write in this session is rejected by Postgres.
+    r = subprocess.run(shlex.split(psql_cmd), input="SET default_transaction_read_only = on;\n" + query, capture_output=True, text=True, check=True)
+    return [l.split("|") for l in r.stdout.splitlines() if l.strip() and l.strip() != "SET"]
 
 def utc(d, hhmm):
     return datetime.combine(d, datetime.strptime(hhmm, "%H:%M").time(), ET).astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -99,9 +100,10 @@ def occ(sym):
 # ---------- capture ----------
 
 def fills_for_day(day, psql_cmd):
+    lo = datetime.combine(day, datetime.min.time(), ET).isoformat(); hi = datetime.combine(day + timedelta(days=1), datetime.min.time(), ET).isoformat()   # DST-correct ET midnight bounds
     q = (f"SELECT intent_key, option_symbol, side, filled_qty, avg_fill_price, filled_at, detected_via, qty, limit_price "
          f"FROM order_intent_journal WHERE tenant_id='{TENANT}' AND strategy_id='{STRATEGY}' AND state='FILLED' "
-         f"AND filled_at >= '{day}T00:00:00-04:00'::timestamptz AND filled_at < '{day + timedelta(days=1)}T00:00:00-04:00'::timestamptz "
+         f"AND filled_at >= '{lo}'::timestamptz AND filled_at < '{hi}'::timestamptz "
          f"ORDER BY filled_at, intent_key;")
     rows = []
     for r in sql(psql_cmd, q):
@@ -130,8 +132,18 @@ def open_contracts(fills, day):
     return sorted({s for s, q in qty.items() if q > 0} | today)
 
 def capture(day, out, headers, psql_cmd):
-    folder = os.path.join(out, "raw", day.isoformat())
-    if os.path.exists(folder): raise SystemExit(f"refusing to overwrite {folder} (append-only)")
+    final = os.path.join(out, "raw", day.isoformat())
+    if os.path.exists(final): raise SystemExit(f"refusing to overwrite {final} (append-only)")
+    folder = final + ".tmp"                      # atomic: everything lands in .tmp, renamed to the final folder only after the manifest
+    if os.path.exists(folder): import shutil; shutil.rmtree(folder)
+    try:
+        r = _capture_into(day, out, folder, headers, psql_cmd)
+    except BaseException:
+        import shutil; shutil.rmtree(folder, ignore_errors=True); raise
+    os.rename(folder, final)
+    return r
+
+def _capture_into(day, out, folder, headers, psql_cmd):
     os.makedirs(folder)
     fills = fills_for_day(day, psql_cmd)
     json.dump(fills, open(os.path.join(folder, "fills.json"), "w"), indent=1)
@@ -215,11 +227,14 @@ def arm_pnl(lot, bars, und, qqq, today, shadow):
         if cutoff is not None and s["t"] > cutoff: continue
         events.append((s["t"].date(), (s["px"] - lot["entry_px"]) * s["qty"] * 100)); rem -= s["qty"]
     if rem > 0 and cutoff is not None:
-        nxt = [b for b in ob if b["t"] > cutoff and b["t"].date() < c["expiry"] or (b["t"] > cutoff and b["t"].date() == c["expiry"] and b["t"].time() < datetime.strptime("16:00", "%H:%M").time())]
+        exp_end = datetime.combine(c["expiry"], datetime.strptime("16:00", "%H:%M").time(), ET)
+        nxt = [b for b in ob if cutoff < b["t"] < exp_end]          # first option bar after the trigger bar, before expiry close
         if nxt:
             xb = nxt[0]; same = [b["c"] for b in ob if b["t"].date() == xb["t"].date() and b["t"] < xb["t"]]
             hs = roll_hs(same, xb["o"]); px = xb["o"] * (1 - hs)
             events.append((xb["t"].date(), (px - lot["entry_px"]) * rem * 100)); info["shadow_exit"] = {"t": xb["t"].isoformat(), "open": xb["o"], "hs": hs}; rem = 0
+        else:
+            info["no_exit_bar"] = True                              # triggered but no option print before expiry: falls through to intrinsic/mark (= hold), flagged
     if rem > 0:
         if c["expiry"] <= today:
             uc = und.get((c["root"], c["expiry"].isoformat())); iv = intrinsic(c, uc)
@@ -267,7 +282,7 @@ def analyze(out, today):
         act_events += a; sh_events += s
         cost = lot["entry_px"] * lot["qty"] * 100
         per_lot.append({"id": lot["id"], "sym": lot["sym"], "cost": cost, "actual": sum(v for _, v in a), "shadow": sum(v for _, v in s), "trigger": info.get("trigger") is not None,
-                        "marked_open": info.get("marked_open", False), "unpriced": info.get("unpriced", 0)})
+                        "marked_open": info.get("marked_open", False), "unpriced": info.get("unpriced", 0), "no_exit_bar": info.get("no_exit_bar", False)})
     def daily(ev):
         by = {}
         for d, v in ev: by[d] = by.get(d, 0) + v
@@ -277,14 +292,15 @@ def analyze(out, today):
     verdict = decide(at, st_, add, sdd)
     diffs = [(l["shadow"] - l["actual"]) / l["cost"] for l in per_lot if l["cost"] > 0]
     random.seed(SEED); boots = []
-    for _ in range(10000):
+    for _ in range(10000 if diffs else 0):          # no lots -> no bootstrap, CI reported as None
         smp = [random.choice(diffs) for _ in diffs]; boots.append(sum(smp) / len(smp))
     boots.sort(); ci = (boots[int(0.025 * len(boots))], boots[int(0.975 * len(boots))]) if boots else (None, None)
     trig = [l for l in per_lot if l["trigger"]]
     res = {"look": today.isoformat(), "lots": len(lots), "triggers": len(trig), "actual_total": at, "shadow_total": st_, "actual_max_dd": add, "shadow_max_dd": sdd,
            "verdict": verdict, "mean_per_lot_diff_over_cost": (sum(diffs) / len(diffs)) if diffs else None, "ci95": ci,
            "winners_cut": sum(1 for l in trig if l["actual"] > 0 and l["shadow"] < l["actual"]), "losers_saved": sum(1 for l in trig if l["actual"] < 0 and l["shadow"] > l["actual"]),
-           "marked_open": sum(1 for l in per_lot if l["marked_open"]), "unpriced_lots": sum(1 for l in per_lot if l["unpriced"])}
+           "marked_open": sum(1 for l in per_lot if l["marked_open"]), "unpriced_lots": sum(1 for l in per_lot if l["unpriced"]),
+           "triggered_without_exit_bar": sum(1 for l in per_lot if l["no_exit_bar"])}
     json.dump({"result": res, "lots": per_lot}, open(os.path.join(out, f"analysis_{today.isoformat()}.json"), "w"), indent=1, default=str)
     return res
 
