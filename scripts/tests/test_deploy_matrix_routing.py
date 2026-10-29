@@ -36,7 +36,7 @@ ALL_JAVA = {
     "orchestrator", "exec-alpaca-paper", "market-data",
     "api-gateway", "tenant-dashboard-bff",
 }
-SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror", "discord-lotto-mirror", "lotto-signal"}
+SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror", "discord-lotto-mirror", "lotto-signal", "darkpool-collector"}
 SERVICES = " ".join(sorted(ALL_JAVA | SIDECAR | {"stc-intent-service", "dashboard"}))
 
 
@@ -146,6 +146,81 @@ class DeployRoutingTest(unittest.TestCase):
     def test_editing_deploy_yml_rolls_nothing(self):
         """Which is why the routing fix itself is safe to merge during market hours."""
         self.assertEqual(rolls([".github/workflows/deploy.yml"]), set())
+
+
+def _bootstrap_guard_step() -> str:
+    d = yaml.safe_load(WORKFLOW.read_text())
+    steps = [
+        s["run"]
+        for j in d["jobs"].values()
+        for s in (j.get("steps") or [])
+        if isinstance(s, dict) and s.get("id") == "bootstrap"
+    ]
+    if len(steps) != 1:
+        raise AssertionError(
+            f"expected exactly one step with id: bootstrap in {WORKFLOW}, found {len(steps)}. "
+            "If it moved or was renamed, update this extractor — do NOT delete this suite."
+        )
+    return steps[0]
+
+
+def bootstrap_guard(service: str, deployment_exists: bool) -> tuple:
+    """Run the workflow's own bootstrap-guard script for `service` against a fake kubectl that
+    answers `get deployment/<name>` with `deployment_exists`. Returns (exit code, skip output,
+    stdout)."""
+    script = _bootstrap_guard_step().replace("${{ matrix.service }}", service)
+    with tempfile.TemporaryDirectory() as tmp:
+        kubectl = pathlib.Path(tmp) / "kubectl"
+        kubectl.write_text(
+            "#!/bin/sh\n"
+            f"echo \"kubectl $*\" >> \"{tmp}/calls\"\n"
+            + ("exit 0\n" if deployment_exists else "exit 1\n")
+        )
+        kubectl.chmod(0o755)
+        out = pathlib.Path(tmp) / "github_output"
+        out.touch()
+        r = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True,
+            env={
+                **os.environ,
+                "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
+                "NAMESPACE": "copytrade",
+                "GITHUB_OUTPUT": str(out),
+            },
+        )
+        skip = dict(
+            line.split("=", 1) for line in out.read_text().splitlines() if "=" in line
+        ).get("skip")
+        calls = (pathlib.Path(tmp) / "calls").read_text() if (pathlib.Path(tmp) / "calls").exists() else ""
+    return r.returncode, skip, r.stdout + r.stderr, calls
+
+
+class DeployBootstrapGuardTest(unittest.TestCase):
+    """infra/k8s/66-darkpool-collector.yaml: deploy.yml cannot create a Deployment, so until the
+    operator hand-applies that manifest the darkpool-collector roll must SKIP, not fail — and
+    the exemption must not leak to any other service."""
+
+    def test_missing_darkpool_collector_skips_with_a_notice(self):
+        code, skip, out, _ = bootstrap_guard("darkpool-collector", deployment_exists=False)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(skip, "true")
+        self.assertIn("::notice::", out)
+        self.assertIn("infra/k8s/66-darkpool-collector.yaml", out)
+
+    def test_existing_darkpool_collector_rolls_normally(self):
+        code, skip, out, calls = bootstrap_guard("darkpool-collector", deployment_exists=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(skip, "false")
+        self.assertIn("get deployment/darkpool-collector", calls)
+
+    def test_other_services_are_never_exempted(self):
+        """A missing lotto-signal (or any other) Deployment is still the verify step's error:
+        the guard does not even look."""
+        for service in ("lotto-signal", "market-data", "orchestrator"):
+            code, skip, out, calls = bootstrap_guard(service, deployment_exists=False)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(skip, "false", service)
+            self.assertEqual(calls, "", service)
 
 
 def baseline_candidates(api_response: dict) -> list:
