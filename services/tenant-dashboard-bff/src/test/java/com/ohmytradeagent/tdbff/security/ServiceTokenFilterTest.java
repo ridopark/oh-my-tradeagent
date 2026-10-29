@@ -150,6 +150,85 @@ class ServiceTokenFilterTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // darkpool ingest: the SECOND prefix on the SAME ingest token. The collector pod is a sibling of
+  // the chat-mirror pod (same image, same secret), so it holds the ingest token and must get
+  // exactly
+  // what that token already gives — never the shared token's tenant reads.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void darkpoolIngestRoute_withTheIngestToken_passesThrough() throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/darkpool/ingest");
+    req.addHeader("Authorization", "Bearer " + INGEST_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
+  void darkpoolIngestRoute_withTheSharedToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/darkpool/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus())
+        .as("holding BFF_SHARED_TOKEN must NOT open the darkpool ingest")
+        .isEqualTo(401);
+  }
+
+  @Test
+  void darkpoolIngestRoute_withoutBearer_is401() throws Exception {
+    assertThat(run("/internal/darkpool/ingest", null).getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void aPrefixThatMerelyStartsLikeAnIngestPrefix_isNotOne() throws Exception {
+    // The match is on the full segment with its trailing slash: "/internal/darkpoolx/..." and
+    // "/internal/darkpool" (no slash) are NOT ingest routes, so the ingest token must not open
+    // them.
+    assertThat(run("/internal/darkpoolx/ingest", "Bearer " + INGEST_TOKEN).getStatus())
+        .isEqualTo(401);
+    assertThat(run("/internal/darkpool", "Bearer " + INGEST_TOKEN).getStatus()).isEqualTo(401);
+    assertThat(run("/internal/options-chatx/ingest", "Bearer " + INGEST_TOKEN).getStatus())
+        .isEqualTo(401);
+    assertThat(run("/internal/options-chat", "Bearer " + INGEST_TOKEN).getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void darkpoolPrefixWithEncodedDots_cannotSmuggleTheIngestTokenIntoATenantRead() throws Exception {
+    MockHttpServletResponse res =
+        run("/internal/darkpool/%2e%2e/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void darkpoolPathParameterTraversal_cannotSmuggleTheIngestTokenIntoATenantRead()
+      throws Exception {
+    MockHttpServletResponse res =
+        run("/internal/darkpool/..;a/..;b/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void doubledSlashes_cannotSlipTheSharedTokenIntoTheDarkpoolIngest() throws Exception {
+    MockHttpServletResponse res = run("/internal//darkpool/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
+    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", new MockEnvironment());
+    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/darkpool/ingest");
+    req.addHeader("Authorization", "Bearer ");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+
+    unprovisioned.doFilter(req, res, new MockFilterChain());
+
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Path-traversal guard. getRequestURI() is the RAW request line; Spring dispatches on the DECODED
   // and NORMALIZED path. Without this guard the two disagree and every path-based decision this
   // filter makes can be aimed at a different handler than the one it authorized.

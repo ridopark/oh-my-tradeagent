@@ -120,6 +120,16 @@ options-chat:
   # which is unrecoverable. Failing to delete is the safe direction; deleting everything is not.
   retention-days: ${OPTIONS_CHAT_RETENTION_DAYS:30}
 
+# Dark gate for the /dark-pool data product (V15 store, the collector's ingest, the page's reads,
+# and the nightly retention). Default OFF: every bean behind it is absent (a two-name
+# @ConditionalOnProperty requiring BOTH this flag AND dashboard.writer.enabled, because all of it
+# goes through the dashboard_writer DSL), so the routes 404 until a deployment sets BOTH
+# DARKPOOL_ENABLED=true and DASHBOARD_WRITER_ENABLED=true. The ingest (POST /internal/darkpool/
+# ingest) is gated on the SAME options-chat.ingest-token: the collector is a sibling of the mirror
+# pod and holds exactly that credential, never the shared token.
+darkpool:
+  enabled: ${DARKPOOL_ENABLED:false}
+
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:

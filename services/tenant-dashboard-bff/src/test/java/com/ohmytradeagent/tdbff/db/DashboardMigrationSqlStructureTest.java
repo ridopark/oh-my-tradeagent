@@ -376,4 +376,85 @@ class DashboardMigrationSqlStructureTest {
         .doesNotContain("dashboard_readonly")
         .doesNotContain("dashboard_writer");
   }
+
+  // --- V15: darkpool prints + 5-minute bars (PLAN-2026-10-29-darkpool-prints, Phase 1) ---
+
+  @Test
+  void v15CreatesTheTwoDarkpoolTablesWithIdempotentKeysAndNamedIndexes() throws IOException {
+    String sql = executableSql("/db/dashboard/V15__darkpool.sql");
+
+    assertThat(sql).contains("CREATE TABLE darkpool_print");
+    assertThat(sql).contains("CREATE TABLE darkpool_bar_5m");
+
+    // The ingest is idempotent ONLY through these keys: the collector re-posts whatever it still
+    // holds after a restart, and prints dedupe on the SIP trade id, bars upsert on their bucket.
+    assertThat(sql)
+        .as("prints dedupe on the SIP trade identity")
+        .containsPattern(Pattern.compile("UNIQUE \\(symbol, ts, trade_id\\)"));
+    assertThat(sql)
+        .as("bars upsert on their 5-minute bucket")
+        .containsPattern(Pattern.compile("PRIMARY KEY \\(symbol, bucket\\)"));
+    assertThat(sql)
+        .as("side is a closed enum, mirrored by the ingest validator")
+        .containsPattern(
+            Pattern.compile("CHECK \\(side IN \\('buy', 'sell', 'mid', 'unknown'\\)\\)"));
+
+    // IDENTITY, not BIGSERIAL — the V9 rule: a non-owner INSERT into a BIGSERIAL column also needs
+    // USAGE on the backing sequence, which fails only at runtime as dashboard_writer.
+    assertThat(sql).doesNotContainIgnoringCase("BIGSERIAL");
+    assertThat(sql)
+        .containsPattern(Pattern.compile("id\\s+BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"));
+
+    // Named, matching the two read shapes (per-symbol newest-first, and all-symbols newest-first)
+    // and the retention sweeps' filter+order.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX darkpool_print_symbol_ts_idx\\s+ON darkpool_print \\(symbol, ts DESC\\)",
+                Pattern.DOTALL));
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX darkpool_print_ts_idx\\s+ON darkpool_print \\(ts DESC\\)",
+                Pattern.DOTALL));
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX darkpool_bar_5m_bucket_idx\\s+ON darkpool_bar_5m \\(bucket\\)",
+                Pattern.DOTALL));
+  }
+
+  @Test
+  void v15GrantsWriterExactlyWhatTheRepositoryIssues_andReadonlySelectOnly() throws IOException {
+    String sql = executableSql("/db/dashboard/V15__darkpool.sql");
+
+    // Prints: INSERT ... ON CONFLICT DO NOTHING (needs SELECT on the arbiter columns — PG16), the
+    // page reads, and the 90-day retention DELETE. Never UPDATE: a print is immutable.
+    assertThat(privilegesGrantedOn(sql, "darkpool_print")).isEqualTo("SELECT, INSERT, DELETE");
+    // Bars: the same plus UPDATE, because a bar is re-aggregated and upserted as its bucket fills.
+    assertThat(privilegesGrantedOn(sql, "darkpool_bar_5m"))
+        .isEqualTo("SELECT, INSERT, UPDATE, DELETE");
+    assertThat(sql)
+        .as("the writer never gets UPDATE on prints")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*UPDATE[A-Z, ]*\\s+ON\\s+darkpool_print\\b",
+                Pattern.CASE_INSENSITIVE));
+
+    // dashboard_readonly (the Next.js pg pool) may READ the data product and nothing else.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s+ON\\s+darkpool_print\\s*,\\s*darkpool_bar_5m"
+                    + "\\s+TO\\s+dashboard_readonly"));
+    assertThat(sql)
+        .as("readonly never gets a write privilege")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*(INSERT|UPDATE|DELETE|ALL)[^;]*dashboard_readonly",
+                Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V15 must not touch the recorder role")
+        .doesNotContain("trade_context_writer");
+  }
 }

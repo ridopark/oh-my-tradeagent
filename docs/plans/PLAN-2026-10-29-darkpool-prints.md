@@ -33,6 +33,10 @@ consumes it in this plan.
    `APCA_API_KEY_ID_DATA`/`APCA_API_SECRET_KEY_DATA` copied from the market-data pod's secret (read-only data keys).
 2. First `kubectl apply -f infra/k8s/66-darkpool-collector.yaml` by hand (deploy.yml cannot bootstrap a Deployment).
 3. Flip `DARKPOOL_DRY_RUN=false` on the Deployment (and in the manifest) after one dry-run session shows sane counts.
+4. **Enable the BFF side by hand:** `kubectl -n copytrade set env deploy/tenant-dashboard-bff DARKPOOL_ENABLED=true`.
+   The live BFF Deployment env is operator-patched (58-tenant-dashboard-bff.yaml is drifted from live and deploy.yml
+   lists the BFF under RESTART_ONLY), so no manifest edit will ever set this flag; with it off the ingest controller
+   bean is absent and the collector's POST 404s. Flyway runs V15 at the next BFF restart regardless of the flag.
 
 ## Phase 1 — BFF: schema, ingest, read (services/tenant-dashboard-bff) — java-architect
 **Goal:** the dashboard DB can store prints and 5-minute aggregates; a token-gated POST stores them idempotently; two
@@ -56,7 +60,15 @@ GETs serve the page. Dark: gated on `darkpool.enabled` (default false in `applic
   (default 200, max 1000, newest first) and `GET /api/darkpool/summary?date=` → per symbol for that session:
   dp_volume, total_volume, dp_share, buy_volume, sell_volume, buy_ratio, late_buy_ratio (14:00–15:30 ET buckets),
   large_count, large_volume, top 3 price levels by large-print notional (price rounded to 0.1% buckets).
-**Tests (TDD):** `DashboardMigrationSqlStructureTest` picks up V13 (structure + idempotent unique keys);
+**Wire contract (binding for Phase 2):** the ingest body uses snake_case names identical to the DB columns and the GET
+responses (`trade_id, symbol, ts, price, size, notional, exchange, conditions, tape, bid, ask, quote_ts, side` /
+`symbol, bucket, dp_volume, dp_trades, total_volume, total_trades, buy_volume, sell_volume, large_count, large_volume,
+dp_vwap`); `ts`/`bucket`/`quote_ts` are RFC-3339 with any fractional precision; `trade_id` is an int64 number in the
+body and a string in GET responses. Batches ≤ 5000 prints / 5000 bars; the repository writes multi-row statements
+(not one statement per row) because the writer pool has 2 connections shared with /status and /live. The late window
+is half-open: buckets starting in [14:00, 15:30) ET. Large-print threshold for levels = $200,000 notional (the
+collector's `large_count`/`large_volume` must use the same number).
+**Tests (TDD):** `DashboardMigrationSqlStructureTest` picks up V15 (not V13 — V13/V14 exist) (structure + idempotent unique keys);
 `DarkpoolMigrationIT` (RUN_DB_ITS): insert duplicate print → 1 row; bar upsert updates; summary SQL on a fixture
 session returns dp_share/buy_ratio/late_buy_ratio/levels as computed by hand; `DarkpoolIngestControllerTest`
 (MockMvc): no token → 401, wrong prefix traversal `/internal/darkpool/%2e%2e/api/positions` → 401/404, valid batch →
@@ -82,7 +94,8 @@ the print, builds 5-minute aggregates, and posts both to the BFF; dry-run by def
   `POST {BFF_INTERNAL_URL}/internal/darkpool/ingest` with the ingest token. Budget: ≤ 59 symbols × (1 + pages) + kept
   prints per minute ≪ 10,000/min; log the request count per cycle. Heartbeat file + per-symbol error isolation (one
   bad symbol never stops the others). `DARKPOOL_DRY_RUN` (default true) logs the batch instead of posting.
-- `infra/k8s/66-darkpool-collector.yaml` — Deployment on the sidecar image, env: `DARKPOOL_DRY_RUN=true`,
+- `infra/k8s/66-darkpool-collector.yaml` — Deployment on the sidecar image PLUS an additive NetworkPolicy allowing
+  it to reach the BFF on 8083 (copy the `tenant-dashboard-bff-allow-lotto-signal` policy in 65-lotto-signal.yaml), env: `DARKPOOL_DRY_RUN=true`,
   `DARKPOOL_POLL_SECS=60`, `DARKPOOL_MIN_NOTIONAL=200000`, `DARKPOOL_MIN_SIZE=10000`, `DARKPOOL_UNIVERSE_FILE` via a
   ConfigMap built from `scripts/watchlist-universe.txt` + SPY/QQQ, `BFF_INTERNAL_URL`, `OPTIONS_CHAT_INGEST_TOKEN`
   (secret), `APCA_API_KEY_ID_DATA`/`APCA_API_SECRET_KEY_DATA` from the new `darkpool-collector` Secret; resources
