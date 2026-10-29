@@ -388,17 +388,95 @@ async def test_request_cap_skips_the_rest_of_the_cycle_and_resumes_next_cycle():
     assert [r.url.params["symbols"] for r in alpaca.requests[11:16]] == syms
 
 
-async def test_budget_hit_mid_symbol_leaves_that_symbol_untouched():
-    """Trades were fetched but the NBBO lookup was refused: nothing of that symbol is kept,
-    aggregated or cursor-advanced, so the next cycle sees the same trades again."""
+async def test_budget_hit_mid_symbol_commits_the_prefix_and_resumes_from_it():
+    """Trades were fetched but the NBBO lookup of the D print was refused: the time-ordered
+    prefix BEFORE that print (the lit trade) is committed and the cursor stops there, so the
+    next cycle re-fetches from the print on and completes the symbol. Nothing is lost, nothing
+    is double-counted, and a symbol that alone exceeds one cycle's budget still advances."""
     alpaca, bff = FakeAlpaca(), FakeBff()
     seed_kept_print(alpaca)  # 1 trades request + 1 quote request
     collector = make_collector(alpaca, bff, ["QQQ"], max_requests=1)
     stats = await collector.cycle()
-    assert (stats.skipped, stats.kept_prints, stats.bars) == (1, 0, 0)
-    assert bff.requests == []
-    assert collector.accumulators == {}
-    assert collector.cursors["QQQ"] == Cursor.start(NOW - timedelta(minutes=10))
+    assert (stats.skipped, stats.kept_prints, stats.bars) == (1, 0, 1)
+    assert bff.bodies()[0]["bars"][0]["total_volume"] == 100  # the lit trade only
+    assert collector.cursors["QQQ"] == Cursor(
+        last_t=parse_ts("2026-10-29T13:38:00Z"), last_ids=frozenset({1})
+    )
+    # Next cycle: trades from 13:38:00 (the lit trade is dropped by id), the print's NBBO fits.
+    alpaca.requests.clear()
+    collector._data.max_requests = 2
+    stats = await collector.cycle()
+    assert (stats.skipped, stats.kept_prints, stats.bars) == (0, 1, 1)
+    assert [r.url.path for r in alpaca.requests] == ["/v2/stocks/trades", "/v2/stocks/quotes"]
+    bar = bff.bodies()[1]["bars"][0]
+    assert (bar["total_volume"], bar["dp_volume"]) == (500, 400)  # cumulative, not doubled
+    assert bff.bodies()[1]["prints"][0]["trade_id"] == 2
+
+
+async def test_zero_progress_cycle_rotates_past_the_offending_symbol(caplog):
+    """Review of PR #1008: a symbol whose trades pages alone exceed the budget could never
+    commit; every cycle restarted at it, hit the cap again and starved the whole universe."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    for s in ("AAA", "BBB", "CCC"):
+        alpaca.trades[s] = [raw("2026-10-29T13:38:00Z", 1)]
+    collector = make_collector(alpaca, bff, ["AAA", "BBB", "CCC"], max_requests=0)
+    with caplog.at_level(logging.ERROR, logger=LOG.name):
+        stats = await collector.cycle()
+    assert stats.skipped == 3 and bff.requests == []
+    assert "NO progress" in caplog.text and "AAA" in caplog.text
+    # the next cycle starts at BBB (with a budget again, it serves BBB, CCC, then AAA)
+    collector._data.max_requests = 3
+    assert (await collector.cycle()).skipped == 0
+    assert [r.url.params["symbols"] for r in alpaca.requests] == ["BBB", "CCC", "AAA"]
+    # budget hit on a LATER symbol keeps the old behaviour: resume at that symbol
+    alpaca.requests.clear()
+    for s in ("AAA", "BBB", "CCC"):
+        alpaca.trades[s].append(raw("2026-10-29T13:39:00Z", 2))
+    collector._data.max_requests = 2
+    assert (await collector.cycle()).skipped == 1
+    assert collector._next_start == 2  # CCC
+    assert "NO progress" in caplog.text  # still only the one error from the first cycle
+    assert caplog.text.count("NO progress") == 1
+
+
+async def test_refused_prints_are_resent_with_the_next_batch():
+    """Review of PR #1008: the cursor advanced before post(), so a BFF roll (5xx window) lost
+    kept prints for good. They now wait in a bounded buffer; the BFF dedupes on
+    (symbol, ts, trade_id), so re-sending is idempotent."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca, "AAA")
+    bff.fail_next = [503, 503, 503]  # every retry of the first post
+    collector = make_collector(alpaca, bff, ["AAA"])
+    stats = await collector.cycle()
+    assert stats.posted is False
+    assert [p["trade_id"] for p in collector.unposted] == [2]
+    # a later cycle with a NEW print posts both; the buffer empties on success
+    alpaca.trades["AAA"].append(raw("2026-10-29T13:39:00Z", 3, p=500.0, s=400, x="D"))
+    stats = await collector.cycle()
+    assert stats.posted is True and collector.unposted == []
+    assert [p["trade_id"] for p in bff.bodies()[-1]["prints"]] == [2, 3]
+    # a cycle with nothing new still flushes a non-empty buffer
+    bff.fail_next = [503, 503, 503]
+    alpaca.trades["AAA"].append(raw("2026-10-29T13:40:00Z", 4, p=500.0, s=400, x="D"))
+    await collector.cycle()
+    assert [p["trade_id"] for p in collector.unposted] == [4]
+    n = len(bff.requests)
+    stats = await collector.cycle()
+    assert stats.kept_prints == 0 and stats.posted is True and collector.unposted == []
+    assert [p["trade_id"] for p in bff.bodies()[n]["prints"]] == [4]
+
+
+async def test_unposted_buffer_is_bounded_and_keeps_the_newest(monkeypatch):
+    monkeypatch.setattr(darkpool_main, "UNPOSTED_MAX", 2)
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["AAA"] = [
+        raw(f"2026-10-29T13:38:0{i}Z", i, p=500.0, s=400, x="D") for i in (1, 2, 3)
+    ]
+    alpaca.quotes["AAA"] = [{"t": "2026-10-29T13:38:00Z", "bp": 499.98, "ap": 500.00}]
+    bff.fail_next = [503, 503, 503]
+    collector = make_collector(alpaca, bff, ["AAA"])
+    await collector.cycle()
+    assert [p["trade_id"] for p in collector.unposted] == [2, 3]
 
 
 async def test_429_ends_the_cycle_and_the_next_cycle_resumes_at_that_symbol():

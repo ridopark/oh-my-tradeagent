@@ -26,10 +26,20 @@ Trades are fetched up to ``now - 5 s``: TRF prints are indexed with a lag, and a
 
 Per-symbol isolation: a symbol whose fetch fails (any HTTP or transport error, a malformed row)
 is logged and skipped for this cycle with its cursor untouched; the others proceed. A symbol is
-committed (aggregated, cursor advanced, prints queued) only once ALL of its requests — trades
-pages and NBBO lookups — succeeded, so a budget stop mid-symbol loses nothing. When the cap
-stops a cycle, the NEXT cycle starts at the first symbol that was skipped (round-robin), so a
-fixed universe order cannot starve its tail.
+committed (aggregated, cursor advanced, prints queued) only from requests that succeeded: when
+the budget runs out during its NBBO lookups, the time-ordered PREFIX of its trades whose lookups
+completed is committed and the cursor stops there, so a budget stop mid-symbol loses nothing and
+a symbol that alone needs more than one cycle's budget still advances every cycle instead of
+restarting from the same cursor forever. When the cap stops a cycle, the NEXT cycle starts at
+the symbol that was cut (round-robin), so a fixed universe order cannot starve its tail; a cycle
+that made NO progress at all (the very first symbol's trades pages already exceeded the budget)
+logs an error and rotates past that symbol so it cannot pin the whole universe.
+
+Cursors persist across the poll window: Monday's first cycle fetches from Friday's ~19:59 cursor,
+which is a small, cheap read (the tape between is empty); the floor only matters right after a
+restart. Prints that the BFF refused (5xx after retries, transport error) are kept in a bounded
+buffer and re-sent with the next batch — the BFF inserts prints ON CONFLICT DO NOTHING, so a
+re-send is idempotent — because a BFF roll is exactly when coverage would otherwise be lost.
 """
 
 from __future__ import annotations
@@ -70,6 +80,9 @@ WINDOW_OPEN_ET = time(4, 0)
 WINDOW_CLOSE_ET = time(20, 0)
 # Late-indexed TRF prints: fetch up to now - this, so a print with t <= cursor is not missed.
 SETTLE_LAG = timedelta(seconds=5)
+# Kept prints the BFF refused wait here for the next post; beyond this the OLDEST are dropped
+# (~150 bytes each; a whole busy session of kept prints is a few thousand).
+UNPOSTED_MAX = 20_000
 
 
 def parse_dry_run(raw: str | None) -> bool:
@@ -224,6 +237,8 @@ class DarkpoolCollector:
         self.floors: dict[str, datetime] = {}
         self.accumulators: dict[BarKey, BarAccumulator] = {}
         self._next_start = 0
+        # Prints the BFF refused, re-sent with the next batch (bounded, see UNPOSTED_MAX).
+        self.unposted: list[dict] = []
 
     async def cycle(self) -> CycleStats:
         stats = CycleStats(symbols=len(self._universe))
@@ -238,14 +253,31 @@ class DarkpoolCollector:
                 self.floors[symbol] = bucket5m(now - self._lookback)
                 self.cursors[symbol] = Cursor.start(self.floors[symbol])
             cursor = self.cursors[symbol]
+            exhausted: BudgetExhausted | None = None
             try:
-                fresh, sides, quotes = await self._fetch(symbol, cursor, now - SETTLE_LAG)
-            except BudgetExhausted as exc:
-                stats.skipped = len(order) - n
-                self._next_start = self._universe.index(symbol)
-                self._log.warning(
-                    "darkpool request budget hit (%s); skipping %d symbols", exc, stats.skipped
+                fresh, sides, quotes, exhausted = await self._fetch(
+                    symbol, cursor, now - SETTLE_LAG
                 )
+            except BudgetExhausted as exc:
+                # Nothing of this symbol could be committed (its trades pages alone used up the
+                # budget). Resume here next cycle — unless this was the cycle's FIRST symbol, in
+                # which case the cycle made zero progress and the symbol would pin the universe
+                # forever: rotate past it and say so loudly.
+                stats.skipped = len(order) - n
+                if n == 0:
+                    self._next_start = (self._universe.index(symbol) + 1) % len(self._universe)
+                    self._log.error(
+                        "darkpool cycle made NO progress: %s alone exceeded the request budget "
+                        "(%s); rotating past it — raise DARKPOOL_MAX_REQUESTS or shrink the "
+                        "universe",
+                        symbol,
+                        exc,
+                    )
+                else:
+                    self._next_start = self._universe.index(symbol)
+                    self._log.warning(
+                        "darkpool request budget hit (%s); skipping %d symbols", exc, stats.skipped
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 - one bad symbol never stops the others
                 stats.errors += 1
@@ -253,7 +285,8 @@ class DarkpoolCollector:
                 continue
             finally:
                 self._heartbeat()
-            # Commit only after every request for the symbol succeeded.
+            # Commit what succeeded: everything, or the time-ordered prefix before the budget ran
+            # out (then the cycle stops and the next one resumes this symbol from the new cursor).
             touched |= aggregate(
                 fresh,
                 sides,
@@ -265,6 +298,18 @@ class DarkpoolCollector:
             for t in fresh:
                 if t.trade_id in sides:
                     prints.append(print_to_wire(t, quotes[t.trade_id], sides[t.trade_id]))
+            if exhausted is not None:
+                stats.skipped = len(order) - n
+                self._next_start = self._universe.index(symbol)
+                self._log.warning(
+                    "darkpool request budget hit (%s) during %s; committed %d of its trades, "
+                    "skipping %d symbols",
+                    exhausted,
+                    symbol,
+                    len(fresh),
+                    stats.skipped,
+                )
+                break
         bars = [self.accumulators[k].to_wire() for k in sorted(touched)]
         prune_accumulators(self.accumulators)
         stats.requests = self._data.requests_this_cycle
@@ -272,11 +317,14 @@ class DarkpoolCollector:
         stats.bars = len(bars)
         if self._dry_run:
             stats.posted = False
-        elif prints or bars:
-            stats.posted = await self._ingest.post(prints, bars)
+        elif prints or bars or self.unposted:
+            to_post = self.unposted + prints
+            stats.posted = await self._ingest.post(to_post, bars)
+            # A partial failure re-sends the stored chunks too: ON CONFLICT DO NOTHING on the BFF.
+            self.unposted = [] if stats.posted else to_post[-UNPOSTED_MAX:]
         self._log.info(
             "darkpool cycle: symbols=%d requests=%d kept_prints=%d bars=%d dry_run=%s "
-            "errors=%d skipped=%d posted=%s",
+            "errors=%d skipped=%d posted=%s unposted=%d",
             stats.symbols,
             stats.requests,
             stats.kept_prints,
@@ -285,26 +333,40 @@ class DarkpoolCollector:
             stats.errors,
             stats.skipped,
             stats.posted,
+            len(self.unposted),
         )
         return stats
 
     async def _fetch(self, symbol: str, cursor: Cursor, end: datetime):
-        """Trades in (cursor, end] plus the NBBO side of every kept print. Raises on any failure.
-        Anything before the symbol's floor is dropped even if the API returns it."""
+        """Trades in (cursor, end] in time order plus the NBBO side of every kept print, and the
+        BudgetExhausted that cut the NBBO lookups short (then only the committable prefix of the
+        trades is returned), else None. Raises on any failure, and on a budget stop before any
+        trade could be committed. Anything before the symbol's floor is dropped even if the API
+        returns it. No trade-condition filter: the bars are consolidated volume (odd lots,
+        extended-hours prints included) in numerator and denominator alike, and the only
+        selection is exchange D, so the dark share is unbiased by conditions."""
         floor = self.floors[symbol]
-        fresh = [
-            t
-            for t in cursor.filter_new(await self._data.trades(symbol, cursor.last_t, end))
-            if t.ts >= floor
-        ]
+        fresh = sorted(
+            (
+                t
+                for t in cursor.filter_new(await self._data.trades(symbol, cursor.last_t, end))
+                if t.ts >= floor
+            ),
+            key=lambda t: t.ts,
+        )
         sides: dict[int, str] = {}
         quotes: dict = {}
-        for t in fresh:
+        for i, t in enumerate(fresh):
             if keep(t, min_notional=self._min_notional, min_size=self._min_size):
-                quote = await self._data.quote_before(symbol, t.ts)
+                try:
+                    quote = await self._data.quote_before(symbol, t.ts)
+                except BudgetExhausted as exc:
+                    if i == 0:
+                        raise
+                    return fresh[:i], sides, quotes, exc
                 quotes[t.trade_id] = quote
                 sides[t.trade_id] = side(t.price, quote, t.ts)
-        return fresh, sides, quotes
+        return fresh, sides, quotes, None
 
 
 async def run_loop(

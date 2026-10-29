@@ -164,17 +164,22 @@ def _bootstrap_guard_step() -> str:
     return steps[0]
 
 
-def bootstrap_guard(service: str, deployment_exists: bool) -> tuple:
+NOT_FOUND = 'Error from server (NotFound): deployments.apps "darkpool-collector" not found'
+
+
+def bootstrap_guard(service: str, deployment_exists: bool, kubectl_error: str | None = None) -> tuple:
     """Run the workflow's own bootstrap-guard script for `service` against a fake kubectl that
-    answers `get deployment/<name>` with `deployment_exists`. Returns (exit code, skip output,
-    stdout)."""
+    answers `get deployment/<name>` with `deployment_exists` (a missing Deployment fails with
+    kubectl's real NotFound message on stderr, or with `kubectl_error` instead when given).
+    Returns (exit code, skip output, stdout+stderr, calls)."""
     script = _bootstrap_guard_step().replace("${{ matrix.service }}", service)
     with tempfile.TemporaryDirectory() as tmp:
         kubectl = pathlib.Path(tmp) / "kubectl"
         kubectl.write_text(
             "#!/bin/sh\n"
             f"echo \"kubectl $*\" >> \"{tmp}/calls\"\n"
-            + ("exit 0\n" if deployment_exists else "exit 1\n")
+            + ("exit 0\n" if deployment_exists else
+               f"echo '{kubectl_error or NOT_FOUND}' >&2\nexit 1\n")
         )
         kubectl.chmod(0o755)
         out = pathlib.Path(tmp) / "github_output"
@@ -212,6 +217,21 @@ class DeployBootstrapGuardTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(skip, "false")
         self.assertIn("get deployment/darkpool-collector", calls)
+
+    def test_a_kubectl_failure_other_than_not_found_fails_the_job(self):
+        """Review of PR #1008: `! kubectl get` treated an expired kubeconfig, an API timeout or
+        an RBAC error as "not bootstrapped" and turned a real deploy failure into a green job
+        (and silently skipped rolls of an already-deployed collector during a blip)."""
+        for err in (
+            "Unable to connect to the server: dial tcp 192.168.10.123:6443: i/o timeout",
+            'Error from server (Forbidden): deployments.apps "darkpool-collector" is forbidden',
+            "error: You must be logged in to the server (Unauthorized)",
+        ):
+            code, skip, out, _ = bootstrap_guard("darkpool-collector", deployment_exists=False, kubectl_error=err)
+            self.assertNotEqual(code, 0, err)
+            self.assertNotEqual(skip, "true", err)
+            self.assertIn("::error::", out, err)
+            self.assertNotIn("::notice::", out, err)
 
     def test_other_services_are_never_exempted(self):
         """A missing lotto-signal (or any other) Deployment is still the verify step's error:

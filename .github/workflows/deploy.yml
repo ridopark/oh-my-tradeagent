@@ -435,10 +435,18 @@ jobs:
         run: |
           set -euo pipefail
           skip=false
-          if [ "${{ matrix.service }}" = "darkpool-collector" ] \
-             && ! kubectl -n "$NAMESPACE" get deployment/darkpool-collector >/dev/null 2>&1; then
-            echo "::notice::darkpool-collector is not bootstrapped yet — apply infra/k8s/66-darkpool-collector.yaml by hand once (kubectl -n $NAMESPACE apply -f infra/k8s/66-darkpool-collector.yaml); skipping this roll."
-            skip=true
+          if [ "${{ matrix.service }}" = "darkpool-collector" ]; then
+            # Skip ONLY on NotFound. Any other kubectl failure (expired kubeconfig, API timeout,
+            # RBAC) is a real deploy failure and must stay red, not a green "not bootstrapped".
+            if out=$(kubectl -n "$NAMESPACE" get deployment/darkpool-collector 2>&1 >/dev/null); then
+              :
+            elif grep -q 'NotFound' <<<"$out"; then
+              echo "::notice::darkpool-collector is not bootstrapped yet — apply infra/k8s/66-darkpool-collector.yaml by hand once (kubectl -n $NAMESPACE apply -f infra/k8s/66-darkpool-collector.yaml); skipping this roll."
+              skip=true
+            else
+              echo "::error::kubectl get deployment/darkpool-collector failed for a reason other than NotFound: $out"
+              exit 1
+            fi
           fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
