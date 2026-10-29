@@ -2,6 +2,7 @@ import "server-only";
 import { auth } from "@/auth";
 import { occFromParts } from "@/lib/occ";
 import type { WatchlistIdea } from "@/lib/watchlist";
+import type { DarkpoolPrintsPage, DarkpoolSummary } from "@/lib/darkpool";
 
 // Server-ONLY client for the off-ingress tenant-dashboard BFF. Never import this from a client
 // component. It reads the verified tenant_id from the session and injects it as X-Tenant-Id behind
@@ -1243,3 +1244,29 @@ export const fetchOptionsChatMedia = async (attachmentId: string): Promise<Respo
     signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
   });
 };
+
+// --- /dark-pool off-exchange prints (PLAN-2026-10-29-darkpool-prints) -------------------------
+//
+// TENANT-INDEPENDENT shared market data, like /options-chat: X-Tenant-Id is the authentication
+// assertion, not a scope. The wire shapes live in lib/darkpool.ts so the client islands can import
+// them without touching this server-only module.
+
+export type DarkpoolRead<T> =
+  | { kind: "ok"; body: T }
+  /** BFF 404: no /api/darkpool route — DARKPOOL_ENABLED is off, or the image predates it. */
+  | { kind: "disabled" }
+  /** BFF 400: a malformed symbol/date/min_notional reached it. */
+  | { kind: "invalid" };
+
+async function darkpoolGet<T>(path: string, qs: string): Promise<DarkpoolRead<T>> {
+  const { status, body } = await bffGetRaw(`/api/darkpool/${path}${qs ? `?${qs}` : ""}`);
+  if (status === 404) return { kind: "disabled" };
+  if (status === 400) return { kind: "invalid" };
+  if (status < 200 || status >= 300) {
+    throw new Error(`BFF darkpool/${path} -> ${status}`);
+  }
+  return { kind: "ok", body: body as T };
+}
+
+export const getDarkpoolPrints = (qs: string) => darkpoolGet<DarkpoolPrintsPage>("prints", qs);
+export const getDarkpoolSummary = (qs: string) => darkpoolGet<DarkpoolSummary>("summary", qs);
