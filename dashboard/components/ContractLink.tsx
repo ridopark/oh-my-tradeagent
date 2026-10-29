@@ -74,7 +74,7 @@ export function ContractChartLinks({ occ }: { occ: string }) {
   );
 }
 
-function ChartLink({
+export function ChartLink({
   symbol,
   title,
   children,

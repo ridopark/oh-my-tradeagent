@@ -10,6 +10,7 @@ const LINKS = [
   // Chat sits in the first 4, which means it lands in the MOBILE PRIMARY BAR — MobileBottomNav
   // keys its ICONS map by href, so this entry requires an icon there or it renders iconless.
   { href: "/options-chat", label: "Chat" },
+  { href: "/dark-pool", label: "Dark pool" },
   { href: "/trades", label: "Trades" },
   { href: "/orders", label: "Order History" },
   { href: "/config", label: "Config" },

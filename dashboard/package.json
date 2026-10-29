@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:lib": "node --experimental-strip-types --test lib/*.test.mjs"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.10",
