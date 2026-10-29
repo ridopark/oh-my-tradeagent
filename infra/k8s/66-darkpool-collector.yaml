@@ -1,0 +1,244 @@
+# Dark-pool (off-exchange) print collector (PLAN-2026-10-29-darkpool-prints, phase 2). Polls
+# Alpaca's REST stock-data API for the watchlist universe + SPY/QQQ, keeps the off-exchange
+# (SIP exchange `D`) prints with the NBBO at the print, builds 5-minute bars over all trades, and
+# POSTs both to the BFF's /internal/darkpool/ingest (phase 1). Read-only on markets; nothing here
+# is on a trading path. Feeds the /dark-pool page (phase 3).
+#
+# NEVER OPENS A WEBSOCKET. Alpaca allows ONE data socket per account on this plan and the
+# market-data pod holds it (equity feed -> watchlist triggers); a second socket evicts the live
+# feed. This pod is REST-only (GET /v2/stocks/trades, GET /v2/stocks/quotes). It runs weekdays
+# 04:00-20:00 ET and sleeps outside.
+#
+# REQUEST RATE, measured on the 2026-10-28 tape for this universe: ~600 req/min at the open,
+# ~900/min at the close, ~140/min midday — 91% of it NBBO lookups (one per kept print). The
+# account limit is 10,000/min SHARED with the market-data pod and the option quote collector.
+# Protection: a hard per-cycle cap (DARKPOOL_MAX_REQUESTS, default 1000), a stop when the
+# X-Ratelimit-Remaining header drops under 2000, and the first 429 ending the cycle after a
+# sleep capped at 5s. A restart burst (~2,500-3,500 requests at the open for the 10-minute
+# lookback) is therefore spread over several cycles: the cap stops the cycle and the next one
+# resumes round-robin at the first symbol that was not served, so no symbol starves.
+#
+# DARK BY DEFAULT: DARKPOOL_DRY_RUN=true logs one summary line per cycle and posts nothing. Flip
+# to "false" (P0-3) only after one dry-run session shows sane counts, and ALSO on the live
+# Deployment, because deploy.yml re-applies this file on change:
+#     kubectl -n copytrade set env deploy/darkpool-collector DARKPOOL_DRY_RUN=false
+# The BFF side is dark too (DARKPOOL_ENABLED on tenant-dashboard-bff, operator-patched, P0-4);
+# until it is set every POST is a 404, logged throttled.
+#
+# FIRST-TIME CREATE IS MANUAL. deploy.yml's "Verify :latest is current" step runs `kubectl get
+# deployment/<service>` BEFORE the apply step, so a Deployment that does not exist yet fails the
+# roll job and is never created by CI (65-lotto-signal.yaml was hand-applied the same way).
+# Operator, once, after the sidecar image carrying darkpool_main has been built:
+#   kubectl -n copytrade apply -f infra/k8s/66-darkpool-collector.yaml
+# Every later change rolls through deploy.yml normally; until that first apply, deploy.yml's
+# bootstrap guard SKIPS the darkpool-collector roll (notice, not failure) on every sidecar merge.
+#
+# Credentials: the EXISTING `alpaca-credentials-data` Secret (the market-data pod's read-only
+# DATA keys, see 53-market-data.yaml) is mounted with envFrom — it holds exactly
+# APCA_API_KEY_ID_DATA / APCA_API_SECRET_KEY_DATA. No new Secret is needed (plan P0-1 is moot).
+#
+# Same image as the sidecar and the mirrors; deploy.yml rolls it with every
+# services/signal-source-discord/* change.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: darkpool-universe
+  namespace: copytrade
+data:
+  # scripts/data/universes/watchlist-ever-listed-2026-10-25.txt (the 57 names that ever appeared
+  # on the TradingTheTrend watchlist 2026-06-22..10-22; deployed on the homelab as
+  # ~/scripts/watchlist-universe.txt for the option quote collector) + SPY/QQQ. One symbol per
+  # line, '#' comments allowed. Edit here AND in that file to keep the two in step.
+  universe.txt: |
+    SPY
+    QQQ
+    AAOI
+    AAPL
+    ADBE
+    AMD
+    AMZN
+    ARM
+    AVGO
+    CAT
+    COIN
+    COST
+    CRM
+    CRWD
+    CRWV
+    CVX
+    DELL
+    GLD
+    GOOGL
+    HOOD
+    IBM
+    INTC
+    IREN
+    IWM
+    LRCX
+    MA
+    MCD
+    META
+    MRNA
+    MRVL
+    MSFT
+    MU
+    NBIS
+    NET
+    NOC
+    NOW
+    NVDA
+    ON
+    ORCL
+    PANW
+    PLTR
+    QCOM
+    RDDT
+    RIOT
+    RKLB
+    SKHY
+    SMCI
+    SNDK
+    SNOW
+    SPCX
+    SPOT
+    STX
+    TGT
+    TSLA
+    TSM
+    TWLO
+    UNH
+    WDC
+    ZS
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: darkpool-collector
+  namespace: copytrade
+  labels:
+    app: darkpool-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: darkpool-collector
+  template:
+    metadata:
+      labels:
+        app: darkpool-collector
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          # MUST be `command:` — NEVER `args:`. The Dockerfile's ENTRYPOINT is exec-form with no
+          # CMD, so `args:` would APPEND rather than replace and start
+          # `... main -m ... darkpool_main` — i.e. a SECOND live trading signal watcher against
+          # the real Discord account. This is the highest-consequence line in the file.
+          command: ["python", "-m", "ohmytradeagent_sidecar.darkpool_main"]
+          # NO securityContext, deliberately — matching 55-signal-source-discord.yaml and the
+          # mirrors, which run this image with `{}` (its USER is the NAME `pwuser`, which
+          # `runAsNonRoot: true` cannot verify). Harden in its own PR, not here.
+          #
+          # READ-ONLY Alpaca DATA keys (APCA_API_KEY_ID_DATA / APCA_API_SECRET_KEY_DATA), the
+          # same Secret 53-market-data.yaml mounts. Not trading keys.
+          envFrom:
+            - secretRef:
+                name: alpaca-credentials-data
+          env:
+            # Dark switch — see the header. "true" = log the cycle summary, post nothing.
+            - name: DARKPOOL_DRY_RUN
+              value: "true"
+            - name: DARKPOOL_POLL_SECS
+              value: "60"
+            # A print is kept individually iff off-exchange AND (notional >= MIN_NOTIONAL OR
+            # size >= MIN_SIZE). The $200,000 large-print threshold used for the bars'
+            # large_count/large_volume is a code constant shared with the BFF, not this knob.
+            - name: DARKPOOL_MIN_NOTIONAL
+              value: "200000"
+            - name: DARKPOOL_MIN_SIZE
+              value: "10000"
+            # Restart lookback; no cursor is persisted. Keep >= one 5-minute bucket.
+            - name: DARKPOOL_LOOKBACK_MINUTES
+              value: "10"
+            # Hard per-cycle cap on Alpaca requests (trades pages + one NBBO lookup per kept
+            # print); see the header for the measured rates. A cycle the cap stops resumes
+            # round-robin next cycle.
+            - name: DARKPOOL_MAX_REQUESTS
+              value: "1000"
+            - name: DARKPOOL_UNIVERSE_FILE
+              value: /app/universe/universe.txt
+            - name: BFF_INTERNAL_URL
+              value: http://tenant-dashboard-bff:8083
+            # Route-scoped ingest credential — NOT BFF_SHARED_TOKEN. ServiceTokenFilter accepts
+            # only this token on /internal/options-chat/** and /internal/darkpool/** and rejects
+            # the shared token there, so this pod can never set X-Tenant-Id and read positions.
+            - name: OPTIONS_CHAT_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: OPTIONS_CHAT_INGEST_TOKEN
+            # Writable emptyDir — owns the heartbeat the liveness probe reads.
+            - name: STATE_DIR
+              value: /app/state
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+            - name: universe
+              mountPath: /app/universe
+              readOnly: true
+          # Heartbeat present and mtime within 180s. The file is touched per symbol and per cycle
+          # (and on every idle sleep outside 04:00-20:00 ET); the margin over lotto-signal's 120s
+          # covers a 60s poll plus a slow cycle of many NBBO lookups.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 180
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              # No Chromium, no Temporal client: httpx + per-symbol accumulators for two buckets.
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: universe
+          configMap:
+            name: darkpool-universe
+---
+# ADDITIVE ingress rule for the BFF, a sibling of lotto-signal's (65) and the mirrors' (62/63/64).
+# Kept as its OWN policy so that deleting this collector deletes exactly its own access.
+# NetworkPolicies selecting the same pod are UNIONed, not overridden, so this grants
+# darkpool-collector -> BFF:8083 WITHOUT touching `tenant-dashboard-bff-allow-dashboard-only` in
+# 58-tenant-dashboard-bff.yaml — which matters, because that manifest is drifted from live
+# (applying it yields a BFF that cannot boot). It lives in THIS file so CI applies the grant
+# with the pod that needs it.
+#
+# Egress to data.alpaca.markets needs no policy: there are no Egress policies in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-darkpool-collector
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: darkpool-collector
+      ports:
+        - protocol: TCP
+          port: 8083

@@ -109,6 +109,7 @@ on:
           - discord-signals-mirror
           - discord-lotto-mirror
           - lotto-signal
+          - darkpool-collector
           - tenant-dashboard-bff
           - dashboard
           - stc-intent-service
@@ -139,7 +140,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal tenant-dashboard-bff dashboard stc-intent-service"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector tenant-dashboard-bff dashboard stc-intent-service"
 
 jobs:
   preflight:
@@ -276,8 +277,8 @@ jobs:
             for s in $SERVICES; do want["$s"]=1; done
           fi
           add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
-          # ONE sidecar image, FIVE Deployments — see the services/signal-source-discord case below.
-          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal; do want["$s"]=1; done; }
+          # ONE sidecar image, SIX Deployments — see the services/signal-source-discord case below.
+          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector; do want["$s"]=1; done; }
           add_all() { for s in $SERVICES; do want["$s"]=1; done; }
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -296,7 +297,8 @@ jobs:
                                                         want[discord-chat-mirror]=1
                                                         want[discord-signals-mirror]=1
                                                         want[discord-lotto-mirror]=1
-                                                        want[lotto-signal]=1 ;;
+                                                        want[lotto-signal]=1
+                                                        want[darkpool-collector]=1 ;;
               services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
@@ -339,6 +341,7 @@ jobs:
               infra/k8s/63-discord-signals-mirror.yaml) want[discord-signals-mirror]=1 ;;
               infra/k8s/64-discord-lotto-mirror.yaml)   want[discord-lotto-mirror]=1 ;;
               infra/k8s/65-lotto-signal.yaml)           want[lotto-signal]=1 ;;
+              infra/k8s/66-darkpool-collector.yaml)     want[darkpool-collector]=1 ;;
               infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
@@ -421,7 +424,34 @@ jobs:
           chmod 600 "$RUNNER_TEMP/.kube/config"
           echo "KUBECONFIG=$RUNNER_TEMP/.kube/config" >> "$GITHUB_ENV"
 
+      - name: Bootstrap guard for ${{ matrix.service }}
+        id: bootstrap
+        # darkpool-collector ONLY (infra/k8s/66-darkpool-collector.yaml). This workflow cannot
+        # create a Deployment — the verify step below reads the live one and fails without it —
+        # so until the operator hand-applies that manifest once, every sidecar merge would turn
+        # this matrix job RED for darkpool-collector alone. Skip (notice, exit 0) instead of
+        # failing, for that service and no other: for every other service a missing Deployment
+        # is still the error it always was. The later steps are gated on `skip`.
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "${{ matrix.service }}" = "darkpool-collector" ]; then
+            # Skip ONLY on NotFound. Any other kubectl failure (expired kubeconfig, API timeout,
+            # RBAC) is a real deploy failure and must stay red, not a green "not bootstrapped".
+            if out=$(kubectl -n "$NAMESPACE" get deployment/darkpool-collector 2>&1 >/dev/null); then
+              :
+            elif grep -q 'NotFound' <<<"$out"; then
+              echo "::notice::darkpool-collector is not bootstrapped yet — apply infra/k8s/66-darkpool-collector.yaml by hand once (kubectl -n $NAMESPACE apply -f infra/k8s/66-darkpool-collector.yaml); skipping this roll."
+              skip=true
+            else
+              echo "::error::kubectl get deployment/darkpool-collector failed for a reason other than NotFound: $out"
+              exit 1
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
       - name: Verify :latest is current for ${{ matrix.service }}
+        if: steps.bootstrap.outputs.skip != 'true'
         # #951: `:latest` is whichever build pushed LAST, not the newest commit — re-running an old
         # build after a newer merge re-tags it backwards, and this roll would then deploy the
         # older code. Runs after approval, immediately before apply/restart, against the images
@@ -454,6 +484,7 @@ jobs:
           fi
 
       - name: Apply manifest for ${{ matrix.service }}
+        if: steps.bootstrap.outputs.skip != 'true'
         # Picks up env-var / resource / image-tag changes from git.
         # Prior to this step, deploy.yml only ran `kubectl rollout restart`,
         # which preserves whatever spec is live in etcd — so manifest edits
@@ -527,6 +558,7 @@ jobs:
           kubectl -n "$NAMESPACE" apply -f "${matches[0]}"
 
       - name: Rollout restart deployment/${{ matrix.service }}
+        if: steps.bootstrap.outputs.skip != 'true'
         # Still needed even after `apply`: when the manifest hasn't changed
         # but a new `:latest` image was pushed, this forces a pod restart so
         # `imagePullPolicy: Always` actually re-pulls (the policy only fires
@@ -535,6 +567,7 @@ jobs:
           kubectl -n "$NAMESPACE" rollout restart deployment/${{ matrix.service }}
 
       - name: Wait for rollout
+        if: steps.bootstrap.outputs.skip != 'true'
         # `kubectl rollout status` exits non-zero on timeout, so this step
         # IS the verification — if a new pod fails its probes (or fails to
         # pull :latest) the job fails here.
@@ -545,6 +578,7 @@ jobs:
           kubectl -n "$NAMESPACE" rollout status deployment/${{ matrix.service }} --timeout=$TIMEOUT
 
       - name: Show running pods + image digests
+        if: steps.bootstrap.outputs.skip != 'true'
         # Best-effort visibility into what's actually live now. Never blocks
         # the job — `|| true` so a label-scheme tweak elsewhere doesn't
         # break the deploy.
