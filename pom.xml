@@ -44,6 +44,16 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- Testcontainers BOM is imported BEFORE spring-boot-dependencies on purpose: the first BOM to manage an
+           artifact wins, and Spring Boot's BOM pins its own (older) Testcontainers. Keeping this import first is what
+           makes testcontainers.version take effect (Docker Engine 29 runners need >= 1.21.4). -->
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
       <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-dependencies</artifactId>
@@ -100,13 +110,6 @@
         <groupId>org.assertj</groupId>
         <artifactId>assertj-core</artifactId>
         <version>${assertj.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.testcontainers</groupId>
-        <artifactId>testcontainers-bom</artifactId>
-        <version>${testcontainers.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
       </dependency>
 
       <dependency>
