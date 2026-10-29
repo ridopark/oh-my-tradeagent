@@ -24,9 +24,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * token. Safe because the service is ClusterIP-only and NetworkPolicy-restricted, and the exposed
  * set (health, info, prometheus) carries no secrets.
  *
- * <p>ONE EXCEPTION TO THE SINGLE-TOKEN MODEL: {@code /internal/options-chat/**} is gated on a
- * separate {@code OPTIONS_CHAT_INGEST_TOKEN} and rejects the shared token outright, because its
- * caller renders an untrusted third-party Discord room and must not be able to spoof a tenant. Both
+ * <p>ONE EXCEPTION TO THE SINGLE-TOKEN MODEL: {@code /internal/options-chat/**} and {@code
+ * /internal/darkpool/**} are gated on a separate {@code OPTIONS_CHAT_INGEST_TOKEN} and reject the
+ * shared token outright, because their callers are sidecar pods (one renders an untrusted
+ * third-party Discord room, one polls market data) that must not be able to spoof a tenant. Both
  * directions of that isolation are pinned in {@code ServiceTokenFilterTest}; the rationale lives
  * with the config in {@code application.yml}. Fail-closed: a blank ingest token matches nothing.
  */
@@ -37,7 +38,12 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // The application.yml fallback used for local dev. Accepting it in production would mean a pod
   // started without BFF_SHARED_TOKEN silently trusts a value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
-  private static final String OPTIONS_CHAT_INGEST_PREFIX = "/internal/options-chat/";
+  // The routes gated on the INGEST token rather than the shared one. Both callers are sidecar pods
+  // (the Discord mirror and the dark-pool collector) that must never hold a tenant-reading
+  // credential. A new prefix here is a new holder of that token — keep the list short.
+  private static final String[] INGEST_PREFIXES = {
+    "/internal/options-chat/", "/internal/darkpool/"
+  };
   // Percent-encodings the container decodes into a dot, a separator, or a path parameter — each
   // would change which handler runs after this filter has already chosen a token. See
   // hasSuspiciousPath.
@@ -173,12 +179,16 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   }
 
   /**
-   * The one token accepted for this path. The options-chat ingest prefix accepts ONLY its own token
-   * — the shared token is rejected there too, so nothing about holding one implies the other.
+   * The one token accepted for this path. An ingest prefix accepts ONLY the ingest token — the
+   * shared token is rejected there too, so nothing about holding one implies the other.
    */
   private String expectedTokenFor(String path) {
-    if (path != null && path.startsWith(OPTIONS_CHAT_INGEST_PREFIX)) {
-      return optionsChatIngestToken;
+    if (path != null) {
+      for (String prefix : INGEST_PREFIXES) {
+        if (path.startsWith(prefix)) {
+          return optionsChatIngestToken;
+        }
+      }
     }
     return sharedToken;
   }

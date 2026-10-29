@@ -36,7 +36,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
       "DASHBOARD_WRITER_PASSWORD=test-not-used",
       // The two flags that gate the whole /options-chat write path, together — as on the cluster.
       "dashboard.writer.enabled=true",
-      "options-chat.enabled=true"
+      "options-chat.enabled=true",
+      // The dark-pool store (V15) sits behind the same writer DSL; its retention scheduler has the
+      // same two-constructor shape that bit OptionsChatRetention.
+      "darkpool.enabled=true"
     })
 class ApplicationContextWriterEnabledSmokeTest {
 
