@@ -66,6 +66,7 @@ from .flow_collector import (
     TapeArchiver,
     Trade,
     _fmt_ts,
+    _usable_quote,
     classify,
     parse_frame,
     trade_to_archive_row,
@@ -441,8 +442,6 @@ class FlowSession:
         trading_client: httpx.AsyncClient | None = None,
         universe_path: pathlib.Path | None = None,
         rest_bucket: _RestBucket | None = None,
-        # Legacy alias: rest_client = data_client (for test compatibility).
-        rest_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._key_id = key_id
         self._secret = secret
@@ -451,8 +450,8 @@ class FlowSession:
         self._log = log
         self._connect_fn = connect_fn or websockets.connect
         self._clock = clock or now_utc
-        self._data_client = data_client or rest_client  # rest_client is the legacy name
-        self._trading_client = trading_client or data_client or rest_client
+        self._data_client = data_client
+        self._trading_client = trading_client or data_client
         self._universe_path = universe_path
         self._bucket = rest_bucket or _RestBucket()
 
@@ -460,14 +459,23 @@ class FlowSession:
         self,
         state: SessionState,
         ws: Any,
+        stop_event: asyncio.Event | None = None,
     ) -> None:
         """Run one WebSocket session from greeting through trades until disconnection.
 
-        Returns normally when ``in_flow_window`` transitions to False (clean session end).
-        Raises ``_StreamError`` on any unexpected socket drop (ConnectionClosed / EOF /
-        OSError) so the outer ``run_loop`` can record the gap and reconnect.
+        Returns normally when ``in_flow_window`` transitions to False (clean session end)
+        or when ``stop_event`` is set (SIGTERM).  Raises ``_StreamError`` on any
+        unexpected socket drop (ConnectionClosed / EOF / OSError) so the outer
+        ``run_loop`` can record the gap and reconnect.
         """
         self._log.info("flow session started")
+
+        # Clear the quote set and cache so the new socket receives a full subscribe.
+        # Without this, a reconnect would send only the diff (new contracts) rather
+        # than the full chosen set, leaving the new socket without previously subscribed quotes.
+        state.quote_set.current = frozenset()
+        state.quote_cache.clear()
+
         # Greeting
         greeting = await ws.recv()
         records = parse_frame(greeting)
@@ -513,6 +521,12 @@ class FlowSession:
             self._heartbeat()
             now = self._clock()
 
+            # SIGTERM: stop_event set — exit cleanly so run_loop can end the session.
+            if stop_event is not None and stop_event.is_set():
+                if _rotation_task is not None and not _rotation_task.done():
+                    _rotation_task.cancel()
+                break
+
             if not in_flow_window(now):
                 # Clean session end: cancel any pending rotation task.
                 if _rotation_task is not None and not _rotation_task.done():
@@ -536,7 +550,7 @@ class FlowSession:
                         state.seen_contracts.add(rec.contract)
                         quote = state.quote_cache.get(rec.contract)
                         labels = classify(rec, quote, now)
-                        labels["_quote"] = quote
+                        labels["_quote"] = _usable_quote(quote, rec.ts)
                         closed = state.agg.feed(rec, labels)
                         for order in closed:
                             self._emit_order(state, order, time.monotonic())
@@ -619,7 +633,7 @@ class FlowSession:
         _, subscribe, unsubscribe = state.quote_set.choose(
             universe_contracts,
             rolling_map,
-            cap=FLOW_QUOTE_CAP,
+            cap=getattr(self, "_quote_cap", FLOW_QUOTE_CAP),
             universe_share=FLOW_QUOTE_UNIVERSE_SHARE,
         )
         return subscribe, unsubscribe
@@ -686,8 +700,8 @@ class FlowSession:
                             self._key_id,
                             self._secret,
                             self._bucket,
+                            metrics=state.metrics,  # counts per page
                         )
-                        state.metrics.add_rest_call()
                         filtered: list[tuple[str, str, float, int]] = []
                         for contract_sym, exp_str, strike in raw:
                             mon = abs(strike - spot) / spot
@@ -701,15 +715,16 @@ class FlowSession:
                             if dte_val < 0 or dte_val > FLOW_UNIVERSE_MAX_DTE:
                                 continue
                             filtered.append((contract_sym, ticker, mon, dte_val))
-                        state.options_cache[ticker] = filtered
+                        state.options_cache[ticker] = filtered  # cache only on success
                     except Exception as exc:
-                        self._bucket.consume()  # count failed calls too
                         self._log.warning(
                             "flow: options contracts fetch for %s failed: %s", ticker, exc
                         )
-                        state.options_cache[ticker] = []
-                else:
-                    state.options_cache[ticker] = []
+                        # Do not cache on failure: retry at the next rotation.
+                elif self._trading_client is None:
+                    # No client configured: will never work, skip silently.
+                    pass
+                # If rate-limited (bucket empty), do not cache: retry at the next rotation.
             universe_contracts.extend(state.options_cache.get(ticker, []))
 
         return universe_contracts
@@ -721,7 +736,9 @@ class FlowSession:
         quotes_s_mean = m._quotes_since_last_log / max(1.0, METRICS_INTERVAL_SECS)
         orders_per_min = m._orders_since_last_log / max(1.0, METRICS_INTERVAL_SECS) * 60.0
         rss = rss_mb()
-        archiver_gaps = state.archiver.gaps if state.archiver else []
+        # gaps= uses the archiver as the single source of truth when present (it records
+        # both reconnect gaps and disk gaps); fall back to metrics.gap_count otherwise.
+        gap_count = len(state.archiver.gaps) if state.archiver else m.gap_count
         self._log.info(
             "flow metrics: trades/s mean=%.1f peak=%d quotes/s mean=%.1f peak=%d "
             "loop_lag_max_ms=%.0f orders/min rate=%.1f total=%d >=25k=%d >=50k=%d >=100k=%d "
@@ -747,7 +764,7 @@ class FlowSession:
             len(state.seen_contracts),
             state.archiver.bytes_today if state.archiver else 0,
             m.gap_seconds,
-            m.gap_count + len(archiver_gaps),
+            gap_count,
             m.reconnects,
             m.rest_calls_min_peak,
         )
@@ -756,7 +773,7 @@ class FlowSession:
     def _log_session_summary(self, state: SessionState, now: datetime) -> None:
         """End-of-session summary including session maxima."""
         m = state.metrics
-        archiver_gaps = state.archiver.gaps if state.archiver else []
+        gap_count = len(state.archiver.gaps) if state.archiver else m.gap_count
         self._log.info(
             "flow session summary: trades=%d quotes=%d orders=%d >=25k=%d >=50k=%d >=100k=%d "
             "trades_1s_peak_session=%d quotes_1s_peak_session=%d loop_lag_max_ms_session=%.0f "
@@ -775,7 +792,7 @@ class FlowSession:
             m.rss_mb_peak,
             len(state.seen_contracts),
             state.archiver.bytes_today if state.archiver else 0,
-            m.gap_count + len(archiver_gaps),
+            gap_count,
             m.reconnects,
             m.gap_seconds,
         )
@@ -813,12 +830,16 @@ async def _fetch_option_contracts(
     key_id: str,
     secret: str,
     bucket: _RestBucket,
+    metrics: Metrics | None = None,
 ) -> list[tuple[str, str, float]]:
     """Fetch active option contracts for ``ticker`` from the TRADING API
     (``api.alpaca.markets``), paginating with ``page_token`` until exhausted.
 
     Adds ``limit=10000`` and near-money strike bounds (± ``FLOW_UNIVERSE_MONEYNESS_PCT``
     of spot) to reduce payload size and page count.
+
+    Each HTTP call (page) increments ``metrics.add_rest_call()`` when a metrics object
+    is provided; failures are counted once per failed page.
 
     Returns ``[(symbol, expiration_date, strike_price)]``.
     """
@@ -842,17 +863,16 @@ async def _fetch_option_contracts(
         if page_token:
             params["page_token"] = page_token
         bucket.consume()
-        try:
-            resp = await client.get(
-                OPTIONS_CONTRACTS_PATH,
-                params=params,
-                headers=headers,
-                timeout=10.0,
-            )
-            bucket.on_response(resp)
-            resp.raise_for_status()
-        except Exception:
-            raise
+        if metrics is not None:
+            metrics.add_rest_call()
+        resp = await client.get(
+            OPTIONS_CONTRACTS_PATH,
+            params=params,
+            headers=headers,
+            timeout=10.0,
+        )
+        bucket.on_response(resp)
+        resp.raise_for_status()
         body = resp.json()
         for row in body.get("option_contracts", []):
             sym = str(row.get("symbol", ""))
@@ -905,26 +925,29 @@ async def run_loop(
     connect_fn: Callable[..., Any] | None = None,
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
-    rest_client: httpx.AsyncClient | None = None,
     data_client: httpx.AsyncClient | None = None,
     trading_client: httpx.AsyncClient | None = None,
     universe_path: pathlib.Path | None = None,
     build: str = "",
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     """Poll forever: idle outside the 09:25–16:20 ET window, connect/stream inside.
 
     On disconnection, record the gap and reconnect with back-off.  A 406 backs off
     ``SLOT_HELD_BACKOFF_SECS`` (60 s) without counting as a reconnect (the previous
     pod is still alive).  A ``_StreamError`` reconnects with the same capped backoff.
+
+    When ``stop_event`` is set (SIGTERM), the loop ends the current session (manifest +
+    summary) and returns normally without calling ``loop.stop()``.
     """
     _clock = clock or now_utc
     _sleep = sleep or asyncio.sleep
-    # rest_client is the legacy single-client alias (test compatibility).
-    _data_client = data_client or rest_client
-    _trading_client = trading_client or data_client or rest_client
+    _data_client = data_client
+    _trading_client = trading_client or data_client
 
     cap_bytes = int(os.getenv("FLOW_ARCHIVE_CAP_BYTES", str(FLOW_ARCHIVE_CAP_BYTES)))
     free_floor_bytes = int(os.getenv("FLOW_ARCHIVE_FREE_FLOOR_BYTES", str(FLOW_ARCHIVE_FREE_FLOOR_BYTES)))
+    quote_cap = int(os.getenv("FLOW_QUOTE_CAP", str(FLOW_QUOTE_CAP)))
 
     bucket = _RestBucket()
 
@@ -941,6 +964,7 @@ async def run_loop(
         universe_path=universe_path,
         rest_bucket=bucket,
     )
+    session._quote_cap = quote_cap  # overridable via env (plan go/no-go)
 
     state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, build, log)
 
@@ -948,10 +972,30 @@ async def run_loop(
     last_disconnect_ts: str | None = None
 
     while True:
+        # SIGTERM: end any active session and return normally.
+        if stop_event is not None and stop_event.is_set():
+            if state.archiver is not None or state.metrics.trades_total > 0:
+                _end_session(session, state, _clock(), log, build)
+            return
+
         heartbeat_path.touch()
         now = _clock()
 
         if not in_flow_window(now):
+            # If a disconnect's back-off crossed the window close, end the session now.
+            if last_disconnect_ts is not None and (
+                state.archiver is not None or state.metrics.trades_total > 0
+            ):
+                # Record the open reconnect gap with to=null (session ended before reconnect).
+                if state.archiver:
+                    state.archiver.record_gap(last_disconnect_ts, None, "reconnect")
+                state.metrics.gap_count += 1
+                state.metrics.gap_seconds += (
+                    now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
+                ).total_seconds()
+                _end_session(session, state, now, log, build)
+                state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, build, log)
+                last_disconnect_ts = None
             await _sleep(1.0)
             continue
 
@@ -974,10 +1018,12 @@ async def run_loop(
                     if state.archiver:
                         state.archiver.record_gap(last_disconnect_ts, reconnect_ts, "reconnect")
                     last_disconnect_ts = None
-                await session.run(state, ws)
+                await session.run(state, ws, stop_event=stop_event)
 
-            # session.run() returned cleanly (window closed) — session end processing
+            # session.run() returned cleanly (window closed or SIGTERM) — session end
             _end_session(session, state, _clock(), log, build)
+            if stop_event is not None and stop_event.is_set():
+                return  # SIGTERM: do not reset state and continue
             # Reset state for the next day
             state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, build, log)
             reconnect_wait = RECONNECT_BASE_SECS
@@ -1055,18 +1101,14 @@ async def _run() -> int:
         build,
     )
 
-    # SIGTERM: write the session manifest before the pod is evicted.
-    _sigterm_state: list[Any] = []  # [session, state] set after connection
-
-    loop = asyncio.get_event_loop()
+    # SIGTERM: set an event; run_loop polls it and ends the session cleanly.
+    # No loop.stop() — that causes a RuntimeError when the event loop is already running.
+    stop_event = asyncio.Event()
 
     def _handle_sigterm() -> None:
-        if _sigterm_state:
-            ses, st = _sigterm_state
-            _end_session(ses, st, now_utc(), log, build)
-        loop.stop()
+        stop_event.set()
 
-    loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+    asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, _handle_sigterm)
 
     async with httpx.AsyncClient(base_url=DATA_BASE_URL, timeout=30.0) as data_cl:
         async with httpx.AsyncClient(base_url=TRADING_BASE_URL, timeout=30.0) as trading_cl:
@@ -1081,8 +1123,9 @@ async def _run() -> int:
                 trading_client=trading_cl,
                 universe_path=universe_path,
                 build=build,
+                stop_event=stop_event,
             )
-    return 1
+    return 0
 
 
 def main() -> None:

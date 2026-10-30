@@ -129,7 +129,7 @@ def make_session(
     dry_run: bool = True,
     clock: Any = None,
     archive_dir: pathlib.Path | None = None,
-    rest_client: httpx.AsyncClient | None = None,
+    data_client: httpx.AsyncClient | None = None,
     universe_path: pathlib.Path | None = None,
 ) -> tuple[FlowSession, SessionState, FakeWebSocket]:
     state = SessionState()
@@ -155,7 +155,7 @@ def make_session(
         log=LOG,
         connect_fn=None,
         clock=clock,
-        rest_client=rest_client,
+        data_client=data_client,
         universe_path=universe_path,
     )
     ws = FakeWebSocket(frames)
@@ -525,7 +525,7 @@ async def test_choose_quote_set_calls_rest_and_populates_set(tmp_path):
         dry_run=True,
         log=LOG,
         clock=lambda: NOW_IN,
-        rest_client=rest_client,
+        data_client=rest_client,
         universe_path=universe_file,
     )
     state = SessionState()
@@ -552,7 +552,7 @@ async def test_choose_quote_set_no_rest_client_returns_empty():
         dry_run=True,
         log=LOG,
         clock=lambda: NOW_IN,
-        rest_client=None,
+        data_client=None,
         universe_path=None,
     )
     state = SessionState()
@@ -594,7 +594,7 @@ async def test_choose_quote_set_caches_options_per_day(tmp_path):
         dry_run=True,
         log=LOG,
         clock=lambda: NOW_IN,
-        rest_client=rest_client,
+        data_client=rest_client,
         universe_path=universe_file,
     )
     state = SessionState()
@@ -851,7 +851,7 @@ async def test_rotate_quotes_prunes_quote_cache(tmp_path):
         dry_run=True,
         log=LOG,
         clock=lambda: NOW_IN,
-        rest_client=rest_client,
+        data_client=rest_client,
         universe_path=universe_file,
     )
     state = SessionState()
@@ -1252,3 +1252,316 @@ def test_metrics_loop_lag_resets_after_interval():
     m.tick_metrics_interval()
     assert m.loop_lag_max_ms == 0.0, "loop_lag_max_ms should reset per interval"
     assert m.loop_lag_max_ms_session >= 150.0, "session max should be preserved"
+
+
+# ---------------------------------------------------------------------------
+# Item 2 (TEST): After reconnect, quote_set.current and quote_cache cleared
+# so the new socket receives a full subscribe (not just the diff).
+# ---------------------------------------------------------------------------
+
+
+async def test_reconnect_clears_quote_set_and_cache():
+    """session.run() clears quote_set.current and quote_cache at the start so that
+    a reconnected socket receives the full subscribe set, not only the diff."""
+    from ohmytradeagent_sidecar.flow_collector import Quote
+
+    state = SessionState()
+    # Pre-populate state as if we had a prior connection
+    state.quote_set.current = frozenset(["AAPL241220C00150000"])
+    state.quote_cache["AAPL241220C00150000"] = Quote(
+        contract="AAPL241220C00150000", bid=2.0, ask=2.1,
+        bid_size=10, ask_size=10,
+        ts=NOW_IN, ts_raw="2026-10-29T13:40:00Z",
+    )
+
+    # Session with only greeting+auth (no quote frames) so cache won't be re-populated.
+    # ConnectionClosed on frame exhaustion → _StreamError.
+    frames = [_greeting(), _auth_success(), _sub_ack()]
+    session = FlowSession(
+        key_id="k", secret="s", heartbeat_fn=lambda: None,
+        dry_run=True, log=LOG, clock=lambda: NOW_IN,
+    )
+    ws = FakeWebSocket(frames)
+    with pytest.raises(_StreamError):
+        await session.run(state, ws)
+
+    # Clearing happens before any recv() call, so after the exception both are empty.
+    assert state.quote_set.current == frozenset(), (
+        "quote_set.current must be cleared at the start of run() so new socket gets full subscribe"
+    )
+    assert state.quote_cache == {}, (
+        "quote_cache must be cleared at the start of run() so stale quotes are not used"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Item 3 (TEST): Disconnect whose back-off crosses window close ends the session
+# (manifest + summary), resets state, clears last_disconnect_ts.
+# ---------------------------------------------------------------------------
+
+
+async def test_disconnect_backoff_crosses_window_close_ends_session(tmp_path, caplog):
+    """When the back-off after a disconnect crosses the window close, run_loop
+    must: call _end_session (logs 'flow session ended'), reset state, and clear
+    last_disconnect_ts — so the next window starts fresh without re-using the
+    stale disconnect timestamp."""
+    # Clock sequence:
+    # 1. top of while loop (in-window) → connect attempt
+    # 2. inside exception handler: _fmt_ts(_clock()) for last_disconnect_ts
+    # 3. top of while loop after sleep: out-of-window → window-close path taken
+    # 4+ subsequent: out-of-window (idle)
+    clock_calls = [0]
+    clocks = [NOW_IN, NOW_IN, NOW_OUT, NOW_OUT, NOW_OUT, NOW_OUT, NOW_OUT, NOW_OUT]
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    sleeps: list[float] = []
+    sleep_calls = [0]
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        sleep_calls[0] += 1
+        if sleep_calls[0] >= 3:  # allow a few idle sleeps then stop
+            raise asyncio.CancelledError
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw):
+        # Immediately drop the connection (no frames) → ConnectionClosed (WebSocketException)
+        ws = FakeWebSocket([])
+        yield ws
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"), \
+         pytest.raises(asyncio.CancelledError):
+        await flow_main.run_loop(
+            key_id="k",
+            secret="s",
+            archive_dir=archive_dir,  # non-None: state.archiver is not None → end-session fires
+            dry_run=True,
+            heartbeat_path=heartbeat_path,
+            log=LOG,
+            connect_fn=fake_connect,
+            clock=advancing_clock,
+            sleep=fake_sleep,
+        )
+
+    # _end_session must have been called: it always logs "flow session ended"
+    session_end_msgs = [r.message for r in caplog.records if "flow session ended" in r.message]
+    assert len(session_end_msgs) >= 1, (
+        "run_loop must call _end_session when disconnect back-off crosses window close; "
+        f"log lines: {[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Item 4 (TEST): SIGTERM via asyncio.Event ends session normally (no RuntimeError,
+# no loop.stop()).
+# ---------------------------------------------------------------------------
+
+
+async def test_sigterm_stop_event_ends_session_normally(tmp_path):
+    """Setting stop_event during session.run() causes it to return normally
+    (no exception, no RuntimeError from loop.stop())."""
+    # stop_event is set after we receive the first trade frame.
+    stop_event = asyncio.Event()
+
+    # Craft a clock that is always in-window; stop_event is set externally.
+    frames = [_greeting(), _auth_success(), _sub_ack(), _trade_frame()]
+
+    session = FlowSession(
+        key_id="k", secret="s", heartbeat_fn=lambda: None,
+        dry_run=True, log=LOG, clock=lambda: NOW_IN,
+    )
+    state = SessionState()
+    ws = FakeWebSocket(frames)
+
+    # Set the stop_event before the run so it exits on the first iteration check.
+    stop_event.set()
+
+    # Must return normally (no exception) when stop_event is set.
+    await session.run(state, ws, stop_event=stop_event)
+    # No assertion needed — reaching here means no exception was raised.
+
+
+async def test_sigterm_stop_event_run_loop_returns_normally(tmp_path):
+    """run_loop returns normally (no exception) when stop_event is set at startup."""
+    stop_event = asyncio.Event()
+    stop_event.set()  # already set — loop exits on first iteration
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    # Should return without raising
+    await flow_main.run_loop(
+        key_id="k",
+        secret="s",
+        archive_dir=None,
+        dry_run=True,
+        heartbeat_path=heartbeat_path,
+        log=LOG,
+        clock=lambda: NOW_OUT,  # outside window (idle path)
+        stop_event=stop_event,
+    )
+    # Reaching here = returned normally, no RuntimeError from loop.stop()
+
+
+# ---------------------------------------------------------------------------
+# Item 5 (TEST): Cache only SUCCESSFUL option-contract fetches.
+# A rate-limit stop or REST error must NOT cache [] for the day.
+# ---------------------------------------------------------------------------
+
+
+async def test_options_cache_not_populated_on_rest_error(tmp_path):
+    """When the options-contracts REST call returns a 500, the ticker must NOT
+    be cached so the next rotation retries."""
+    universe_file = tmp_path / "universe.txt"
+    universe_file.write_text("AAPL\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/v2/stocks/trades/latest" in str(request.url):
+            return httpx.Response(200, json={"trades": {"AAPL": {"p": 150.0}}})
+        if "/v2/options/contracts" in str(request.url):
+            return httpx.Response(500)  # server error
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(
+        base_url=flow_main.DATA_BASE_URL, transport=httpx.MockTransport(handler)
+    )
+    session = FlowSession(
+        key_id="k", secret="s", heartbeat_fn=lambda: None,
+        dry_run=True, log=LOG, clock=lambda: NOW_IN,
+        data_client=client, universe_path=universe_file,
+    )
+    state = SessionState()
+    await session._choose_quote_set(state)
+    await client.aclose()
+
+    assert "AAPL" not in state.options_cache, (
+        "must not cache on REST error so next rotation retries"
+    )
+
+
+async def test_options_cache_not_populated_when_rate_limited(tmp_path):
+    """When the REST bucket is exhausted, no fetch is attempted and the ticker
+    must NOT be cached with [] (so next rotation retries when budget refills)."""
+    universe_file = tmp_path / "universe.txt"
+    universe_file.write_text("AAPL\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/v2/stocks/trades/latest" in str(request.url):
+            return httpx.Response(200, json={"trades": {"AAPL": {"p": 150.0}}})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(
+        base_url=flow_main.DATA_BASE_URL, transport=httpx.MockTransport(handler)
+    )
+
+    # Exhausted bucket: no REST calls allowed
+    from ohmytradeagent_sidecar.flow_main import _RestBucket
+    exhausted_bucket = _RestBucket(rate_per_min=0, floor=0)
+    exhausted_bucket._tokens = 0.0  # force bucket empty
+
+    session = FlowSession(
+        key_id="k", secret="s", heartbeat_fn=lambda: None,
+        dry_run=True, log=LOG, clock=lambda: NOW_IN,
+        data_client=client, universe_path=universe_file,
+        rest_bucket=exhausted_bucket,
+    )
+    state = SessionState()
+    await session._choose_quote_set(state)
+    await client.aclose()
+
+    assert "AAPL" not in state.options_cache, (
+        "must not cache [] when rate-limited so next rotation retries when budget refills"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Item 7 (TEST): rest_calls_min counts every HTTP call (per page);
+# gaps= does not double-count (single source of truth).
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_option_contracts_increments_metrics_per_page(tmp_path):
+    """_fetch_option_contracts must call metrics.add_rest_call() once per HTTP page,
+    not once per ticker call."""
+    from ohmytradeagent_sidecar.flow_main import _fetch_option_contracts, _RestBucket
+
+    pages_served = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = pages_served[0]
+        pages_served[0] += 1
+        if page == 0:
+            return httpx.Response(200, json={
+                "option_contracts": [{"symbol": "AAPL261105C00150000",
+                                      "expiration_date": "2026-11-05",
+                                      "strike_price": "150.0"}],
+                "next_page_token": "P2",
+            })
+        return httpx.Response(200, json={
+            "option_contracts": [{"symbol": "AAPL261105P00150000",
+                                  "expiration_date": "2026-11-05",
+                                  "strike_price": "150.0"}],
+            "next_page_token": None,
+        })
+
+    client = httpx.AsyncClient(
+        base_url=flow_main.TRADING_BASE_URL, transport=httpx.MockTransport(handler)
+    )
+    bucket = _RestBucket(rate_per_min=300)
+    metrics = Metrics()
+
+    await _fetch_option_contracts(
+        client, "AAPL", "2026-11-30", 150.0, "k", "s", bucket, metrics=metrics
+    )
+    await client.aclose()
+
+    # 2 pages → 2 calls counted
+    assert metrics._rest_calls_this_min == 2, (
+        f"expected 2 REST calls (one per page), got {metrics._rest_calls_this_min}"
+    )
+
+
+async def test_gap_count_uses_archiver_as_single_source(tmp_path, caplog):
+    """gaps= in the metrics line uses len(state.archiver.gaps) as the single source
+    of truth when an archiver is present — no double-counting with metrics.gap_count."""
+    archive_dir = tmp_path / "archive"
+    from ohmytradeagent_sidecar.flow_collector import TapeArchiver
+
+    state = SessionState()
+    state.archiver = TapeArchiver(archive_dir)
+
+    # Record one gap via the archiver
+    state.archiver.record_gap("2026-10-29T13:00:00Z", "2026-10-29T13:01:00Z", "reconnect")
+    # Also bump metrics.gap_count independently (simulates what run_loop does when
+    # it records the gap in BOTH places — we verify the log uses only one)
+    state.metrics.gap_count += 1  # duplicate count
+
+    session = FlowSession(
+        key_id="k", secret="s", heartbeat_fn=lambda: None,
+        dry_run=True, log=LOG, clock=lambda: NOW_IN,
+    )
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        session._log_metrics(state, NOW_IN)
+
+    metrics_lines = [r.message for r in caplog.records if "flow metrics" in r.message]
+    assert metrics_lines, f"no metrics line found in: {caplog.text}"
+    line = metrics_lines[-1]
+
+    # gaps= must be 1 (from archiver), not 2 (double-counted with metrics.gap_count)
+    m = re.search(r"gaps=(\d+)", line)
+    assert m is not None, f"gaps= not found in metrics line: {line!r}"
+    assert int(m.group(1)) == 1, (
+        f"gaps= double-counted: expected 1 (archiver), got {m.group(1)}. "
+        "Single source of truth must be archiver.gaps when archiver is present."
+    )

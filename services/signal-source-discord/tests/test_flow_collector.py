@@ -24,6 +24,7 @@ from ohmytradeagent_sidecar.flow_collector import (
     QuoteSet,
     TapeArchiver,
     Trade,
+    _usable_quote,
     classify,
     dte,
     parse_frame,
@@ -916,3 +917,77 @@ def test_archiver_open_disk_stop_at_session_close_records_gap_with_null_to(tmp_p
     open_gaps = [g for g in arch.gaps if g.get("to") is None]
     assert len(open_gaps) >= 1, f"expected a gap with to=null; gaps={arch.gaps}"
     assert open_gaps[0]["reason"] == "disk_cap"
+
+
+# ---------------------------------------------------------------------------
+# Item 6 (TEST): _usable_quote — shared predicate used by classify and
+# trade_to_archive_row (at/before trade, ≤3 s, two-sided, not crossed)
+# ---------------------------------------------------------------------------
+
+
+def test_usable_quote_returns_quote_when_all_conditions_met():
+    """A quote at/before the trade, ≤3 s old, two-sided and not crossed is usable."""
+    trade_ts = ts("2026-10-29T14:00:03Z")
+    q = _quote(bid=2.0, ask=2.1, ts_str="2026-10-29T14:00:00Z")  # exactly 3 s before
+    assert _usable_quote(q, trade_ts) is q
+
+
+def test_usable_quote_returns_none_when_quote_is_none():
+    result = _usable_quote(None, ts("2026-10-29T14:00:00Z"))
+    assert result is None
+
+
+def test_usable_quote_returns_none_when_quote_after_trade():
+    """Quote stamped after the trade is never usable."""
+    trade_ts = ts("2026-10-29T14:00:00Z")
+    q = _quote(bid=2.0, ask=2.1, ts_str="2026-10-29T14:00:01Z")  # 1 s AFTER trade
+    assert _usable_quote(q, trade_ts) is None
+
+
+def test_usable_quote_returns_none_when_older_than_3s():
+    """Quote older than 3 s is stale."""
+    trade_ts = ts("2026-10-29T14:00:03.001Z")
+    q = _quote(bid=2.0, ask=2.1, ts_str="2026-10-29T14:00:00Z")  # 3.001 s before trade
+    assert _usable_quote(q, trade_ts) is None
+
+
+def test_usable_quote_returns_none_when_one_sided_bid_zero():
+    """One-sided book (bid ≤ 0) is not usable."""
+    trade_ts = ts("2026-10-29T14:00:01Z")
+    q = _quote(bid=0.0, ask=2.1, ts_str="2026-10-29T14:00:00Z")
+    assert _usable_quote(q, trade_ts) is None
+
+
+def test_usable_quote_returns_none_when_one_sided_ask_zero():
+    """One-sided book (ask ≤ 0) is not usable."""
+    trade_ts = ts("2026-10-29T14:00:01Z")
+    q = _quote(bid=2.0, ask=0.0, ts_str="2026-10-29T14:00:00Z")
+    assert _usable_quote(q, trade_ts) is None
+
+
+def test_usable_quote_returns_none_when_crossed():
+    """Crossed book (ask < bid) is not usable."""
+    trade_ts = ts("2026-10-29T14:00:01Z")
+    q = _quote(bid=2.2, ask=2.1, ts_str="2026-10-29T14:00:00Z")  # crossed
+    assert _usable_quote(q, trade_ts) is None
+
+
+def test_usable_quote_same_predicate_used_by_classify_and_archive_row():
+    """classify() and trade_to_archive_row() use _usable_quote consistently:
+    a quote that _usable_quote rejects must not appear in either output."""
+    # Crossed quote — _usable_quote returns None
+    t = _trade(price=2.1, ts_str="2026-10-29T14:00:01Z")
+    q = _quote(bid=2.2, ask=2.1, ts_str="2026-10-29T14:00:00Z")  # crossed
+
+    assert _usable_quote(q, t.ts) is None  # guard: predicate says unusable
+
+    # classify must report unknown/none side
+    labels = classify(t, q, t.ts)
+    assert labels["side"] == "unknown"
+    assert labels["side_source"] == "none"
+
+    # trade_to_archive_row must emit None for bid/ask fields
+    row = trade_to_archive_row(t, q)
+    assert row["bp"] is None
+    assert row["ap"] is None
+    assert row["qt"] is None

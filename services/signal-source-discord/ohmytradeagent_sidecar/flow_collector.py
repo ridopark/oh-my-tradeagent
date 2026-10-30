@@ -245,6 +245,27 @@ def _parse_quote(item: dict) -> Quote | Control:
 # ---------------------------------------------------------------------------
 
 
+def _usable_quote(quote: Quote | None, trade_ts: datetime) -> Quote | None:
+    """Return ``quote`` iff it is usable for side classification and archive stamping.
+
+    Rules (binding; Q1 operator decision 2026-10-30):
+    - Quote timestamp must be at or before the trade timestamp.
+    - Quote age must be ≤ ``FLOW_QUOTE_MAX_AGE`` (3 s).
+    - Both bid and ask must be positive (two-sided book).
+    - Ask must not be less than bid (not crossed).
+
+    Returns ``None`` when any condition fails.  Both ``classify`` and
+    ``trade_to_archive_row`` use this single predicate so they are consistent.
+    """
+    if quote is None:
+        return None
+    if quote.ts > trade_ts or trade_ts - quote.ts > FLOW_QUOTE_MAX_AGE:
+        return None
+    if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+        return None
+    return quote
+
+
 def classify(trade: Trade, quote: Quote | None, now: datetime) -> dict:
     """Classify a trade.  Returns a dict with side, side_source, sweep, auction,
     cross, multi_leg, premium, dte, conditions (space-joined).
@@ -252,21 +273,15 @@ def classify(trade: Trade, quote: Quote | None, now: datetime) -> dict:
     ``now`` is used only for DTE; it may be the trade's own ``ts`` for pure-function
     tests but the real loop passes ``clock()``.
     """
-    # Side from quote
-    if (
-        quote is None
-        or quote.ts > trade.ts
-        or trade.ts - quote.ts > FLOW_QUOTE_MAX_AGE
-    ):
-        side = "unknown"
-        side_source = "none"
-    elif quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+    # Side from quote (uses the shared _usable_quote predicate)
+    uq = _usable_quote(quote, trade.ts)
+    if uq is None:
         side = "unknown"
         side_source = "none"
     else:
-        if trade.price >= quote.ask:
+        if trade.price >= uq.ask:
             side = "buy"
-        elif trade.price <= quote.bid:
+        elif trade.price <= uq.bid:
             side = "sell"
         else:
             side = "mid"
@@ -740,7 +755,7 @@ class TapeArchiver:
                 )
             return
 
-        # Invalidate cached dir size so the next check re-scans.
+        # Update the cached dir-size estimate with the bytes just written.
         self._cached_dir_size += len(data)
         self._bytes_today += len(data)
         self._trades_written += len(rows)
@@ -810,18 +825,10 @@ def _sha256_file(path: pathlib.Path) -> str:
 def trade_to_archive_row(trade: Trade, quote: Quote | None) -> dict:
     """Produce the archive NDJSON row for a single trade.
 
-    Quote fields are stamped only when the quote is at or before the trade
-    and within ``FLOW_QUOTE_MAX_AGE`` (3 s) — the same rule as ``classify``.
+    Quote fields are stamped only when the quote passes ``_usable_quote`` —
+    the same predicate as ``classify`` (at/before trade, ≤3 s, two-sided, not crossed).
     """
-    usable_quote: Quote | None = (
-        None
-        if (
-            quote is None
-            or quote.ts > trade.ts
-            or trade.ts - quote.ts > FLOW_QUOTE_MAX_AGE
-        )
-        else quote
-    )
+    usable_quote = _usable_quote(quote, trade.ts)
     return {
         "t": trade.ts_raw,
         "S": trade.contract,

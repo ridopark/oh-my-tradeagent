@@ -286,10 +286,15 @@ def _classify_services(jobs: list[dict]) -> dict[str, str]:
 
 
 def _is_gated(pending: list[dict]) -> bool:
-    """Return True if production-homelab env is still awaiting our approval."""
+    """Return True if production-homelab env is still awaiting our approval.
+
+    GitHub's ``GET /actions/runs/{id}/pending_deployments`` nests the id under
+    ``environment.id`` (``[{"environment": {"id": …, "name": …}, "current_user_can_approve": …}]``).
+    Reading a top-level ``id`` matched nothing, so every waiting run was skipped as
+    "nothing waiting" (first real deploy, run 41048268583, 2026-10-30)."""
     for env in pending:
-        if env.get("id") == _PRODUCTION_HOMELAB_ENV_ID:
-            return env.get("current_user_can_approve", False)
+        if (env.get("environment") or {}).get("id") == _PRODUCTION_HOMELAB_ENV_ID:
+            return bool(env.get("current_user_can_approve", False))
     return False
 
 

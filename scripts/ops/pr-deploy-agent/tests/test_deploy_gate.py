@@ -397,7 +397,7 @@ def _run_deploy_gate(bin_dir: pathlib.Path, tmp_state: pathlib.Path,
 
 
 def _pending_env(env_id=15500297208):
-    return [{"id": env_id, "current_user_can_approve": True}]
+    return [{"environment": {"id": env_id, "name": "production-homelab"}, "current_user_can_approve": True, "wait_timer": 0}]
 
 
 class TestDecideJson(unittest.TestCase):
