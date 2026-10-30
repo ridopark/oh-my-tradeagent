@@ -85,5 +85,15 @@ if [[ "$VERIFY_RESULT" == '{"verifications": []}' ]] || [[ "$VERIFY_RESULT" == '
   echo "$TS $LOG_TAG nothing to verify" >&2
 fi
 
+# ── PR duty ─────────────────────────────────────────────────────────────────
+PR_RESULT="$(python3 "$SCRIPT_DIR/pr_duty.py" --plan --json 2>&1)"
+PR_EXIT=$?
+
+echo "$TS $LOG_TAG pr_duty --plan exit=$PR_EXIT result=$PR_RESULT" >&2
+
+if [[ "$PR_RESULT" == '{"prs": []}' ]] || [[ "$PR_RESULT" == '{"prs":[]}' ]]; then
+  echo "$TS $LOG_TAG no PRs to act on" >&2
+fi
+
 echo "$TS $LOG_TAG tick done" >&2
 exit 0

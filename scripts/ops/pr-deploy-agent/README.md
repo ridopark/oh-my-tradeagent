@@ -82,8 +82,14 @@ A name not listed is treated as `unknown` and the run is **never** approved.
 | **deploy deferred** | yellow | First tick where a run is UNSAFE; names the blocking reason |
 | **waiting > 2h** | yellow | A deferred run has been waiting more than 2 hours |
 | **read error** | red | `gh api` or live-state read failed for a specific run |
+| **PR merged** | green | A READY/SKIPPED PR was squash-merged (act mode) |
+| **PR NOT_REVIEWED** | yellow | PR touches `.github/workflows/**` — review by hand (once per SHA) |
+| **PR BLOCKED** | yellow | Claude review blocked the PR (once per SHA) |
+| **unrelated check rerun** | yellow | A failing Java module check was rerun after issue link |
+| **unrelated check still failing** | yellow | Second failure after rerun — check manually |
+| **operator steps** | yellow | Operator/manual section from a merged PR body |
 
-Messages are deduplicated: each `(run_id, event)` key is posted once.
+Messages are deduplicated: each `(pr_number_or_run_id, sha, event)` key is posted once.
 Keys older than 14 days are pruned from `state.json`.
 
 ---
@@ -103,7 +109,8 @@ Tests use fake `gh` and `ssh` executables on PATH — no network required.
 ```
 scripts/ops/pr-deploy-agent/
 ├── tick.sh          # entry point: kill switch, lock, env, calls duties
-├── deploy_gate.py   # Step 1: classify services, check live state, decide safe/unsafe
+├── deploy_gate.py   # Steps 1+2: classify services, check live state, decide safe/unsafe
+├── pr_duty.py       # Step 3: merge READY PRs, ping, rerun unrelated checks
 ├── live_state.py    # live-state reads (temporal + psql) via ssh
 ├── market_hours.py  # NYSE session hours + holiday calendar
 ├── notify.py        # Discord webhook, deduplicated via statefile
@@ -111,6 +118,29 @@ scripts/ops/pr-deploy-agent/
 ├── systemd/         # service + timer units + env.example
 └── tests/           # offline unit tests (fake gh/ssh)
 ```
+
+### PR duty (`PR_MODE`)
+
+`pr_duty.py` runs on every tick after the deploy gate.  It reads each open, non-draft,
+same-repo PR's `claude/verdict` commit status (set by `claude-pr.yml`) and:
+
+| Verdict token | Action |
+|---|---|
+| `READY` | Checks all non-Claude CI green + mergeable + CLEAN → merge (act) / would-merge (recommend) |
+| `SKIPPED` | Same as READY (docs-only diff, no review needed) |
+| `NEEDS_FIXES` | Skip — Step 4 handles the fix loop |
+| `NOT_REVIEWED` | Ping Discord once per (PR, SHA); never merge |
+| `BLOCKED` | Ping Discord once; never merge |
+| `NO_VERDICT` | Ping Discord once |
+| `PENDING` | Do nothing this tick |
+
+**Unrelated-check rule:** if a `Java (<module>)` check fails on a PR that touches
+neither that module nor `contract/`, `pom.xml`, or `infra/docker/`, the check is treated
+as unrelated.  The agent files or comments on an issue for the test class, then runs
+`gh run rerun --failed` once.  A second failure on the same head triggers a Discord ping
+instead of another rerun.
+
+**do-not-merge** and **needs-input** labels keep the agent's hands off the PR entirely.
 
 Installed units live in `~/.config/systemd/user/`; they are NOT tracked by git.
 Runtime state lives in `~/.local/state/pr-deploy-agent/`.
