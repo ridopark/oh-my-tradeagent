@@ -1,0 +1,14 @@
+[Unit]
+Description=pr-deploy-agent — fire every 5 minutes
+
+[Timer]
+# First fire at most 30 s after boot/enable so the first tick does not wait 5 min.
+OnBootSec=30s
+# Then every 5 minutes.
+OnUnitActiveSec=5min
+# Fire even if the previous tick is still running (it will exit immediately on the
+# flock; Type=oneshot means the service is "active" until the ExecStart exits).
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

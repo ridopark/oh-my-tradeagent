@@ -8,6 +8,7 @@ scripts/ops/
 ├── cf_access_add_email.sh                    # add an email to the Cloudflare Access edge gate
 ├── temporal-copytrade-namespace-bootstrap.sh # register the `copytrade` Temporal namespace + SAs
 ├── check_drill_freshness.py                  # Phase 7 promotion-gate: kill-switch/rollback drill freshness
+├── pr-deploy-agent/                          # systemd timer: auto-approve safe deploys + merge READY PRs
 └── tests/
     └── test_check_drill_freshness.py
 ```

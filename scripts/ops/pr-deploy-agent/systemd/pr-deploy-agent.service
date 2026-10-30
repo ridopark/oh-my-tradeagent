@@ -1,0 +1,14 @@
+[Unit]
+Description=pr-deploy-agent tick
+# Runs once per timer fire; exits when the tick completes.
+
+[Service]
+Type=oneshot
+# Resolve the repo root relative to this unit's ConditionPathExists file.
+# tick.sh finds REPO_ROOT itself; we just need to point at the script.
+ExecStart=%h/src/oh-my-tradeagent/scripts/ops/pr-deploy-agent/tick.sh
+# Forward stdout+stderr to the journal under the unit name.
+StandardOutput=journal
+StandardError=journal
+# Do not restart on failure — wait for the next timer fire.
+Restart=no
