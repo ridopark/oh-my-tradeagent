@@ -3614,8 +3614,11 @@ class CopytradeSignalWorkflowImplTest {
       }
       PartialExitRequest received = RecordingPositionWorkflowImpl.PARTIAL_EXITS.get(posWfId);
       assertThat(received).as("PositionWorkflow received the partialExit signal").isNotNull();
-      // Release the parked double so the env closes cleanly.
-      target.onFill(fillFor("brk-lotto"));
+      // Do NOT signal onFill here: for fraction=1.0 (lotto full-close), the PositionWorkflow can
+      // complete before the test thread reaches this point, making a stub.signal call throw
+      // WorkflowNotFoundException. The PARTIAL_EXITS map already holds the captured value, and
+      // localEnv.close() below terminates any still-parked double cleanly — the same pattern used
+      // by runBtoCapturingChildInput for its parked child.
       return received;
     } finally {
       localEnv.close();
