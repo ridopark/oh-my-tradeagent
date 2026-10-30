@@ -901,12 +901,16 @@ public class PositionWorkflowImpl implements PositionWorkflow {
    * suppressed with an {@code ExitDuplicateSuppressed} audit instead of being placed.
    *
    * <p>Read ONLY on the duplicate branch (after the {@code processedSignalIds.contains} check), so
-   * a history that never had a drain duplicate carries no marker and a legacy history that did
+   * a history that never reached that branch carries no marker, and a legacy history that did
    * (recorded before this fix) resolves {@code DEFAULT_VERSION} and falls through to {@code
-   * processOne} — reproducing the recorded double placement byte-identically.
+   * processOne} — reproducing the recorded placement byte-identically. Two recorded shapes reach
+   * the branch: the all-copies-pre-init double place (#1023), and histories recorded before {@link
+   * #VERSION_PREINIT_STC_DEDUPE} existed, where a post-init redelivery was added to {@code
+   * processedSignalIds} before the bundled pre-init copy drained (pre-#964; that copy is the only
+   * placement there). Both replay unchanged because neither carries this marker.
    *
    * <p>Read in the main loop only (never inside a handler) per the repo's gate-ordering rule; see
-   * the {@code VERSION_BUFFERED_OPERATOR_AUDIT} javadoc.
+   * the {@link #VERSION_BUFFERED_OPERATOR_AUDIT} javadoc.
    */
   private static final String VERSION_PREINIT_STC_DRAIN_DEDUPE = "preinit-stc-drain-dedupe-v1";
 

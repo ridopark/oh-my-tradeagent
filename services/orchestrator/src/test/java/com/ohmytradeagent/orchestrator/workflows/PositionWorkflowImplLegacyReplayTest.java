@@ -546,6 +546,10 @@ class PositionWorkflowImplLegacyReplayTest {
    * </pre>
    *
    * <p>NEVER re-record this fixture after merge: a change that breaks it needs a version gate.
+   *
+   * <p>Not the only tripwire for this gate: {@code position-preinit-redelivery-legacy-history.json}
+   * (recorded pre-#964) also reaches the duplicate branch and fails replay if the gate is defeated.
+   * Both are intended; do not "fix" either as a duplicate test.
    */
   @Test
   void preInitDrainDoublePlaceLegacyHistoryReplaysWithoutNonDeterminism() throws Exception {
