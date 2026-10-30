@@ -81,6 +81,24 @@ class TestMarketHoursHolidays(unittest.TestCase):
         # 2027-11-25
         self.assertFalse(mh.is_market_open(_et(2027, 11, 25, 11, 0)))
 
+    def test_juneteenth_2026_closed(self):
+        """2026-06-19 Juneteenth is a NYSE holiday (Friday)."""
+        self.assertFalse(mh.is_market_open(_et(2026, 6, 19, 10, 0)))
+
+    def test_juneteenth_2027_observed_closed(self):
+        """2027-06-18 Juneteenth observed (Jun 19 is Saturday) is a NYSE holiday."""
+        self.assertFalse(mh.is_market_open(_et(2027, 6, 18, 10, 0)))
+
+    def test_june_18_2026_is_open(self):
+        """2026-06-18 is a regular trading day (day before Juneteenth)."""
+        self.assertTrue(mh.is_market_open(_et(2026, 6, 18, 10, 0)))
+
+    def test_juneteenth_in_holiday_list_2026(self):
+        self.assertIn(date(2026, 6, 19), mh.NYSE_HOLIDAYS)
+
+    def test_juneteenth_in_holiday_list_2027(self):
+        self.assertIn(date(2027, 6, 18), mh.NYSE_HOLIDAYS)
+
 
 class TestMarketHoursDST(unittest.TestCase):
     def test_march_dst_switch_open(self):
@@ -117,7 +135,3 @@ class TestMarketHoursHolidayList(unittest.TestCase):
             mh._ensure_holiday_list_current(next_year)
 
 
-class TestIsMarketClosed(unittest.TestCase):
-    def test_closed_is_inverse_of_open(self):
-        t = _et(2026, 10, 27, 10, 0)
-        self.assertNotEqual(mh.is_market_open(t), mh.is_market_closed(t))

@@ -27,13 +27,13 @@ import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import notify as _notify
 import statefile as _sf
+from _shared import _gh, _parse_claude_json
 
 _DEFAULT_REPO = "ridopark/oh-my-tradeagent"
 _DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "pr-deploy-agent"
@@ -72,20 +72,6 @@ class PRDecision:
 # ---------------------------------------------------------------------------
 # GitHub API helpers
 # ---------------------------------------------------------------------------
-
-def _gh(*args: str, timeout: int = 30, stdin_data: str | None = None) -> str:
-    """Run `gh <args>` and return stdout; raise RuntimeError on failure."""
-    result = subprocess.run(
-        ["gh"] + list(args),
-        input=stdin_data,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"gh {args[0] if args else '?'} failed: {result.stderr.strip()[:200]}")
-    return result.stdout
-
 
 def _list_prs(repo: str) -> list[dict]:
     """List open, non-draft, same-repo PRs with their checks and files."""
@@ -311,12 +297,19 @@ def _handle_unrelated_check(
 # Merge helpers
 # ---------------------------------------------------------------------------
 
-def _merge_pr(repo: str, pr_number: int, title: str, body: str) -> str | None:
-    """Squash-merge (or merge-commit) the PR and return the merge commit SHA."""
+def _merge_pr(repo: str, pr_number: int, title: str, body: str, head_sha: str = "") -> str | None:
+    """Squash-merge (or merge-commit) the PR and return the merge commit SHA.
+
+    head_sha: the SHA the claude/verdict status was read on; passed as
+    --match-head-commit so the merge is refused if the head has since moved.
+    """
     use_merge_commit = bool(_MERGE_COMMIT_RE.search(title) or _MERGE_COMMIT_RE.search(body))
     strategy = "--merge" if use_merge_commit else "--squash"
+    cmd = ["pr", "merge", str(pr_number), strategy, "--delete-branch", "--repo", repo]
+    if head_sha:
+        cmd += ["--match-head-commit", head_sha]
     try:
-        _gh("pr", "merge", str(pr_number), strategy, "--delete-branch", "--repo", repo)
+        _gh(*cmd)
     except RuntimeError:
         return None
     # Fetch the merge commit SHA.
@@ -355,26 +348,40 @@ _VERIFY_SCHEMA = json.dumps({
 })
 
 
+_FINDINGS_CONTENT_RE = re.compile(r"^\s*[-*]|\d+\.", re.MULTILINE)
+
+
 def _get_findings_comment(repo: str, pr_number: int, verdict_created_at: str) -> str | None:
     """Return the body of the latest claude[bot] comment on the PR.
 
-    Only used if the comment's updated_at is >= verdict_created_at.
+    Only comments from login == "claude[bot]" (exact) are accepted; bots such
+    as "github-actions[bot]" are intentionally excluded.
+
+    The comment is only used if:
+      - its updated_at is >= verdict_created_at, AND
+      - its body contains at least one list-item line (has findings content).
+
+    If the comment has no findings content, return None so the fix round is
+    skipped rather than posting an empty "findings not fixed" comment.
     """
     try:
         raw = _gh("api", f"repos/{repo}/issues/{pr_number}/comments")
         comments = json.loads(raw)
-        bot_comments = [
+        claude_comments = [
             c for c in (comments if isinstance(comments, list) else [])
-            if "[bot]" in ((c.get("user") or {}).get("login") or "")
-            or (c.get("user") or {}).get("login") in ("claude[bot]", "claude-bot")
+            if (c.get("user") or {}).get("login") == "claude[bot]"
         ]
-        if not bot_comments:
+        if not claude_comments:
             return None
-        bot_comments.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-        latest = bot_comments[0]
+        claude_comments.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+        latest = claude_comments[0]
         if verdict_created_at and (latest.get("updated_at") or "") < verdict_created_at:
             return None
-        return latest.get("body") or None
+        body = latest.get("body") or ""
+        # Require at least one list-item line to have findings content.
+        if not _FINDINGS_CONTENT_RE.search(body):
+            return None
+        return body
     except (RuntimeError, json.JSONDecodeError):
         return None
 
@@ -460,7 +467,7 @@ def _run_fable_verify(
                 "--model", "claude-fable-5-1",
                 "--output-format", "json",
                 "--json-schema", _VERIFY_SCHEMA,
-                "--max-turns", "5",
+                "--max-turns", "20",
                 "--allowedTools",
                 "Read,Grep,Glob,"
                 "Bash(git log:*),Bash(git diff:*),Bash(mvn:*),Bash(uv run pytest:*)",
@@ -475,31 +482,20 @@ def _run_fable_verify(
     if r.returncode != 0:
         return None
 
-    try:
-        data = json.loads(r.stdout)
-        # Handle wrapped output from real claude -p
-        if "confirmed" in data:
-            return data
-        if "structured_output" in data and isinstance(data.get("structured_output"), dict):
-            return data["structured_output"]
-        if "result" in data:
-            raw = data["result"]
-            inner = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(inner, dict) and "confirmed" in inner:
-                return inner
-        return None
-    except (json.JSONDecodeError, TypeError):
-        return None
+    return _parse_claude_json(r.stdout, key="confirmed")
 
 
 def _run_sonnet_fix(
     worktree_path: Path,
     confirmed_findings: list[str],
-    timeout: int = 300,
+    timeout: int = 1800,
 ) -> bool:
     """Run Sonnet 4.6 in the worktree to fix confirmed findings.
 
     Returns True if at least one new commit was made, False otherwise.
+
+    Git credentials are disabled so only the script's own push can authenticate.
+    On TimeoutExpired, still checks whether a commit was made before the timeout.
     """
     prompt_file = Path(__file__).parent / "prompts" / "pr-fix.md"
     system_text = prompt_file.read_text() if prompt_file.exists() else ""
@@ -507,6 +503,15 @@ def _run_sonnet_fix(
     full_prompt = f"{system_text}\n\n---\n\n{findings_block}"
 
     head_before = _worktree_head_sha(worktree_path)
+
+    # Disable git credential prompts so only the script's own push can authenticate.
+    extra_env = {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.helper",
+        "GIT_CONFIG_VALUE_0": "",
+    }
+    env = {**os.environ, **extra_env}
 
     try:
         subprocess.run(
@@ -523,8 +528,13 @@ def _run_sonnet_fix(
             ],
             cwd=str(worktree_path),
             capture_output=True, text=True, timeout=timeout,
+            env=env,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except subprocess.TimeoutExpired:
+        # Timed out — but a commit may already have been made; check HEAD.
+        head_after = _worktree_head_sha(worktree_path)
+        return bool(head_before and head_after and head_before != head_after)
+    except (FileNotFoundError, OSError):
         return False
 
     head_after = _worktree_head_sha(worktree_path)
@@ -663,6 +673,37 @@ def _run_needs_fixes_round(
         if not _worktree_is_clean(worktree_path):
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "worktree dirty after fix")
 
+        # 5a. Push guard: refuse if any new commit message contains [skip-review].
+        head_after = _worktree_head_sha(worktree_path)
+        skip_check = subprocess.run(
+            ["git", "log", f"{head_sha}..{head_after}", "--format=%s%n%b"],
+            cwd=str(worktree_path), capture_output=True, text=True,
+        )
+        if "[skip-review]" in (skip_check.stdout or ""):
+            return PRDecision(
+                pr_number, title, head_sha, "NEEDS_FIXES", "skip",
+                "commit contains [skip-review]",
+            )
+
+        # 5b. Push guard: refuse if the diff deletes or renames any test file.
+        _TEST_PATH_RE = re.compile(
+            r"(/tests?/|test_[^/]+\.py$|[A-Z][^/]*Test\.java$|\.test\.[^/]+$)"
+        )
+        diff_check = subprocess.run(
+            ["git", "diff", "--name-status", f"{head_sha}..{head_after}"],
+            cwd=str(worktree_path), capture_output=True, text=True,
+        )
+        for diff_line in (diff_check.stdout or "").splitlines():
+            # D (deleted) or R (renamed) followed by the old path
+            parts = diff_line.split("\t")
+            status = parts[0] if parts else ""
+            if status.startswith(("D", "R")) and len(parts) >= 2:
+                if _TEST_PATH_RE.search(parts[1]):
+                    return PRDecision(
+                        pr_number, title, head_sha, "NEEDS_FIXES", "skip",
+                        f"commit deletes/renames a test file: {parts[1]}",
+                    )
+
         # 6. Push to the PR branch (never --force).
         push_result = subprocess.run(
             ["git", "push", "origin", f"HEAD:{head_ref}"],
@@ -725,7 +766,6 @@ def _post_operator_steps(
     repo: str,
     state: dict,
     repo_root: Path,
-    pr_mode: str,
 ) -> None:
     """Post operator steps for merged PRs whose deploy run has completed.
 
@@ -737,11 +777,16 @@ def _post_operator_steps(
             continue
         merge_commit = meta.get("merge_commit", "")
         merged_at_str = meta.get("merged_at", "")
-        body = meta.get("body", "")
         title = meta.get("title", "")
         pr_number = int(pr_str)
 
-        steps = _extract_operator_steps(body)
+        # Use pre-extracted op_steps_text if present; fall back to body for
+        # state entries written by older versions.
+        if "op_steps_text" in meta:
+            steps = meta["op_steps_text"] or None
+        else:
+            body = meta.get("body", "")
+            steps = _extract_operator_steps(body)
         # Check if enough time has passed or deploy is done.
         deploy_completed = False
         try:
@@ -805,7 +850,7 @@ def plan_all(
     if state_dir is None:
         state_dir = _DEFAULT_STATE_DIR
     # Post operator steps for previously merged PRs.
-    _post_operator_steps(repo, state, repo_root, pr_mode)
+    _post_operator_steps(repo, state, repo_root)
 
     prs = _list_prs(repo)
     decisions: list[PRDecision] = []
@@ -967,7 +1012,7 @@ def plan_all(
 
         # All conditions met — merge or would-merge.
         if pr_mode == "act":
-            merge_commit = _merge_pr(repo, pr_number, title, body)
+            merge_commit = _merge_pr(repo, pr_number, title, body, head_sha=head_sha)
             if merge_commit is not None:
                 _notify.post(
                     repo_root,
@@ -976,10 +1021,12 @@ def plan_all(
                     "green",
                 )
                 # Remember for operator-steps tracking.
+                # Store only extracted steps text, not the whole PR body.
+                op_steps_text = _extract_operator_steps(body) or ""
                 state.setdefault("merged_prs", {})[str(pr_number)] = {
                     "merge_commit": merge_commit,
                     "title": title,
-                    "body": body,
+                    "op_steps_text": op_steps_text,
                     "merged_at": datetime.now(tz=_UTC).isoformat(),
                     "op_steps_posted": False,
                 }

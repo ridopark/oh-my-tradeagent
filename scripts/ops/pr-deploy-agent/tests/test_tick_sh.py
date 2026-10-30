@@ -177,3 +177,91 @@ class TestLock(unittest.TestCase):
         self.assertIn("another tick holds the lock", result.stderr)
         # Should exit almost immediately (< 2 seconds)
         self.assertLess(elapsed, 2.0, f"Expected fast exit but took {elapsed:.2f}s")
+
+
+# ---------------------------------------------------------------------------
+# Test: duty isolation — a failing python duty must not abort subsequent ones
+# ---------------------------------------------------------------------------
+
+class TestDutyIsolation(unittest.TestCase):
+    """Finding 5: set -e in tick.sh must not cause one duty's exit 1 to abort the rest.
+
+    Before the fix, the tick used $(python3 ... ) which propagates non-zero exits
+    through set -e, aborting the remaining duties.  The fix uses || EXIT=$? so each
+    duty always runs.
+    """
+
+    def test_failing_decide_does_not_abort_verify_and_plan(self):
+        """If deploy_gate.py --decide exits 1, the --verify and pr_duty.py --plan duties
+        must still run, and tick.sh must still exit 0.
+        """
+        with tempfile.TemporaryDirectory() as tmp_config, \
+             tempfile.TemporaryDirectory() as tmp_state, \
+             tempfile.TemporaryDirectory() as tmp_bin:
+
+            bin_dir = pathlib.Path(tmp_bin)
+
+            # Write a fake python3 that makes --decide exit 1 but records all invocations.
+            # Use /usr/bin/python3 (not /usr/bin/env python3) in the shebang so the
+            # fake does not recurse into itself when the OS resolves "python3" on PATH.
+            invoke_log = bin_dir / "python3_invocations.log"
+            real_python = sys.executable  # absolute path to the running interpreter
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f"#!{real_python}\n"
+                "import sys, pathlib\n"
+                "args = sys.argv[1:]\n"
+                f"log = pathlib.Path({str(invoke_log)!r})\n"
+                "with open(log, 'a') as f:\n"
+                "    f.write(' '.join(args) + '\\n')\n"
+                "# Make --decide fail, but --verify and --plan succeed with empty output\n"
+                "if '--decide' in args:\n"
+                "    sys.stderr.write('fake decide error\\n')\n"
+                "    sys.exit(1)\n"
+                "if '--verify' in args:\n"
+                "    print('{\"verifications\": []}')\n"
+                "    sys.exit(0)\n"
+                "if '--plan' in args:\n"
+                "    print('{\"prs\": []}')\n"
+                "    sys.exit(0)\n"
+                "sys.exit(0)\n"
+            )
+            fake_python.chmod(fake_python.stat().st_mode | 0o755)
+
+            # Also need a fake gh on PATH (to satisfy any early path checks)
+            fake_gh = bin_dir / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\necho '{}'\nexit 0\n"
+            )
+            fake_gh.chmod(fake_gh.stat().st_mode | 0o755)
+
+            env = {
+                **os.environ,
+                "HOME": os.environ["HOME"],
+                "XDG_CONFIG_HOME": tmp_config,
+                "XDG_STATE_HOME": tmp_state,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "PYTHONPATH": str(AGENT_DIR),
+                "DISCORD_DRY_RUN": "1",
+            }
+            result = subprocess.run(
+                ["bash", str(TICK_SH)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+
+            # tick.sh must exit 0 even when --decide fails
+            self.assertEqual(result.returncode, 0,
+                             f"tick.sh must exit 0 when a duty fails; stderr={result.stderr[:300]}")
+
+            # All three duties must have been invoked (check while tmp dir still exists)
+            if invoke_log.exists():
+                invocations = invoke_log.read_text().splitlines()
+            else:
+                invocations = []
+            duty_flags = [
+                any("--decide" in inv for inv in invocations),
+                any("--verify" in inv for inv in invocations),
+                any("--plan" in inv for inv in invocations),
+            ]
+            self.assertTrue(all(duty_flags),
+                            f"All three duties must run; invocations={invocations}")

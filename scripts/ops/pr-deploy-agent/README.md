@@ -46,6 +46,16 @@ journalctl --user -u pr-deploy-agent -n 20 -f
 | `STATE_DIR` | `~/.local/state/pr-deploy-agent` | Runtime state (lock, state.json, worktrees) |
 | `DISCORD_WEBHOOK_URL` | *(from repo .env)* | Override the webhook; falls back to `.env` |
 
+> **Format**: values in the env file must **not** be shell-quoted.  The file is loaded
+> with `set -a; source "$ENV_FILE"; set +a`, so `KEY=value` is correct and
+> `KEY="value"` would include the literal quotes in the variable.
+
+> **Secrets warning**: the env file is exported into every `claude -p` session that
+> this agent spawns.  Do **not** put `gh` tokens, API keys, or any other secret in it.
+> Use the OS keyring or a separate credential helper instead.  `DISCORD_WEBHOOK_URL`
+> is written by `scripts/discord-notify.sh` from the git-ignored repo `.env` — keep
+> it there, not in this file.
+
 ---
 
 ## Kill switch
@@ -126,9 +136,9 @@ same-repo PR's `claude/verdict` commit status (set by `claude-pr.yml`) and:
 
 | Verdict token | Action |
 |---|---|
-| `READY` | Checks all non-Claude CI green + mergeable + CLEAN → merge (act) / would-merge (recommend) |
+| `READY` | Checks all non-Claude CI green + mergeable + CLEAN → squash-merge (act) / would-merge (recommend).  Use `--merge` if the PR title or body contains the phrase "merge commit". |
 | `SKIPPED` | Same as READY (docs-only diff, no review needed) |
-| `NEEDS_FIXES` | Skip — Step 4 handles the fix loop |
+| `NEEDS_FIXES` | One fix round per tick (up to 3 total): Fable verifies findings, Sonnet fixes confirmed ones and commits, script pushes.  After 3 rounds still NEEDS_FIXES → `needs-input` label + Discord ping; PR is then skipped on all future ticks. |
 | `NOT_REVIEWED` | Ping Discord once per (PR, SHA); never merge |
 | `BLOCKED` | Ping Discord once; never merge |
 | `NO_VERDICT` | Ping Discord once |

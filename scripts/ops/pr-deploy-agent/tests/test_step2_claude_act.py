@@ -428,6 +428,34 @@ class TestActModeApproval(unittest.TestCase):
             claude_calls = _claude_calls(bin_dir)
             self.assertEqual(claude_calls, [], "Claude should not be called with no waiting runs")
 
+    def test_claude_call_includes_tools_and_max_turns(self):
+        """Finding 4: the Claude call must include --tools "" and --max-turns 1.
+
+        Before this fix, the call had neither; Claude could use arbitrary tools
+        and run for unlimited turns on each gate decision.
+        """
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            run_id = 98023
+            fixture = _build_fixture(run_id, ["dashboard"])
+            _write_fake_gh(bin_dir, fixture, allow_writes=True)
+            _write_fake_claude(bin_dir, {"verdict": "approve", "reason": "ok"})
+            _run_gate(bin_dir, pathlib.Path(tmp_state), extra_env={"DEPLOY_MODE": "act"})
+            calls = _claude_calls(bin_dir)
+            self.assertTrue(calls, "Claude should have been called")
+            argv = calls[0]
+            self.assertIn("--tools", argv,
+                          "--tools flag must be present in Claude call")
+            tools_idx = argv.index("--tools")
+            self.assertEqual(argv[tools_idx + 1], "",
+                             "--tools must be followed by empty string (no tools)")
+            self.assertIn("--max-turns", argv,
+                          "--max-turns must be present in Claude call")
+            turns_idx = argv.index("--max-turns")
+            self.assertEqual(argv[turns_idx + 1], "1",
+                             "--max-turns must be 1")
+
 
 # ---------------------------------------------------------------------------
 # Test: human override detection
@@ -543,6 +571,44 @@ class TestHumanOverrideDetection(unittest.TestCase):
             after = _sf.load(state_dir / "state.json")
             self.assertNotIn(f"run:{run_id}:human-override", after.get("notified", {}),
                              "Agent approval should not trigger human-override message")
+
+    def test_human_override_removes_run_from_deferred_run_ids(self):
+        """Finding 6: after a human override is detected, the run_id is removed from
+        deferred_run_ids so the agent stops polling it on subsequent ticks.
+
+        Before this fix, the id remained in deferred_run_ids, causing the agent to
+        query approvals for every future tick even after the run was handled.
+        """
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            run_id = 98034
+            state_dir = pathlib.Path(tmp_state)
+            state_dir.mkdir(exist_ok=True)
+
+            state = {
+                "notified": {
+                    f"run:{run_id}:first-deferral": "2026-10-29T09:00:00+00:00",
+                },
+                "deferred_run_ids": [run_id],
+            }
+            _sf.save(state_dir / "state.json", state)
+
+            fixture = {
+                "workflows/deploy.yml/runs": {"workflow_runs": []},
+                f"runs/{run_id}/approvals": [
+                    {"state": "approved", "comment": "manual: looks good",
+                     "user": {"login": "ridopark"}}
+                ],
+            }
+            _write_fake_gh(bin_dir, fixture, allow_writes=False)
+            _run_gate(bin_dir, state_dir)
+
+            after = _sf.load(state_dir / "state.json")
+            deferred = after.get("deferred_run_ids", [run_id])  # default keeps it (pre-fix behaviour)
+            self.assertNotIn(run_id, deferred,
+                             f"run_id {run_id} must be removed from deferred_run_ids after human override; "
+                             f"deferred_run_ids={deferred}")
 
 
 # ---------------------------------------------------------------------------

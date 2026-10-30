@@ -87,17 +87,29 @@ def _make_nonterminal_row(tenant="prod_real", symbol="SPY251121P00580000", state
 
 
 # ---------------------------------------------------------------------------
+# Helper: parse SERVICES from deploy.yml (Finding 14)
+# ---------------------------------------------------------------------------
+
+def _services_from_deploy_yml() -> set[str]:
+    """Parse the SERVICES: line from .github/workflows/deploy.yml."""
+    deploy_yml = AGENT_DIR.parents[2] / ".github" / "workflows" / "deploy.yml"
+    text = deploy_yml.read_text()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SERVICES:"):
+            # e.g.  SERVICES: "orchestrator exec-alpaca-paper ..."
+            val = stripped[len("SERVICES:"):].strip().strip('"').strip("'")
+            return set(val.split())
+    raise RuntimeError("SERVICES: not found in deploy.yml")
+
+
+# ---------------------------------------------------------------------------
 # Test: service class table completeness
 # ---------------------------------------------------------------------------
 
 class TestServiceClassTable(unittest.TestCase):
-    # All 13 services that appear in deploy.yml SERVICES variable.
-    _DEPLOY_SERVICES = {
-        "orchestrator", "exec-alpaca-paper", "market-data", "api-gateway",
-        "signal-source-discord", "discord-chat-mirror", "discord-signals-mirror",
-        "discord-lotto-mirror", "lotto-signal", "darkpool-collector",
-        "tenant-dashboard-bff", "dashboard", "stc-intent-service",
-    }
+    # Services parsed from deploy.yml rather than hard-coded (Finding 14).
+    _DEPLOY_SERVICES = _services_from_deploy_yml()
 
     def test_all_deploy_services_in_table(self):
         for svc in self._DEPLOY_SERVICES:
@@ -488,3 +500,56 @@ class TestDecideJson(unittest.TestCase):
                                 call[idx + 1], ("GET", "HEAD"),
                                 f"Non-GET api call in recommend mode: {call}",
                             )
+
+    def test_zero_services_unsafe(self):
+        """Finding 3: a run whose jobs list has no 'Roll <svc>' entries → UNSAFE.
+
+        Before this fix, decide_run returned safe with an empty services list.
+        """
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            run_id = 99010
+            # Jobs are not "Roll <svc>" — they are something else entirely.
+            non_roll_jobs = {"jobs": [{"name": "Setup", "status": "waiting"},
+                                      {"name": "Build", "status": "waiting"}]}
+            gh_fixture = {
+                "workflows/deploy.yml/runs": {"workflow_runs": [_make_run(run_id)]},
+                f"runs/{run_id}/jobs": non_roll_jobs,
+                f"runs/{run_id}/pending_deployments": _pending_env(),
+            }
+            _make_fake_gh(bin_dir, gh_fixture)
+            out = _run_deploy_gate(bin_dir, pathlib.Path(tmp_state))
+        self.assertEqual(out["runs"][0]["verdict"], "unsafe",
+                         "Expected unsafe when no Roll jobs found")
+        reasons = out["runs"][0]["reasons"]
+        self.assertTrue(any("no waiting Roll jobs" in r for r in reasons),
+                        f"Expected 'no waiting Roll jobs' in reasons; got {reasons}")
+
+
+# ---------------------------------------------------------------------------
+# Tests: token guard in _verify_service (Finding 10)
+# ---------------------------------------------------------------------------
+
+class TestVerifyServiceTokenGuard(unittest.TestCase):
+    """Finding 10: _verify_service must reject service names with non-[a-z0-9-] chars."""
+
+    def test_bad_service_name_raises(self):
+        """A service name like '../etc/passwd' must raise ValueError before any ssh call."""
+        with self.assertRaises(ValueError) as ctx:
+            dg._verify_service(
+                "../etc/passwd",
+                "fake@host",
+                pathlib.Path("."),
+            )
+        self.assertIn("unsafe", str(ctx.exception).lower())
+
+    def test_good_service_name_does_not_raise_on_token_check(self):
+        """A valid service name like 'dashboard' passes the token guard (ssh will fail, not the guard)."""
+        # We expect RuntimeError (ssh failure) or ValueError only for the token, not both.
+        try:
+            dg._verify_service("dashboard", "fake@host", pathlib.Path("."))
+        except RuntimeError:
+            pass  # ssh failure is expected — the token guard passed
+        except ValueError as exc:
+            self.fail(f"Token guard incorrectly rejected a valid name: {exc}")

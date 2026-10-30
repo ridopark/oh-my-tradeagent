@@ -70,8 +70,17 @@ def mark_notified(state: dict, key: str) -> None:
 
 
 def prune(state: dict, days: int = 14) -> None:
-    """Remove notification keys older than `days` days (mutates in-place)."""
+    """Remove entries older than `days` days from notification and run/PR registries.
+
+    Pruned collections:
+      - ``notified``      — Discord dedupe keys
+      - ``approved_runs`` — runs the agent approved (keyed by run_id, field ``approved_at``)
+      - ``verified_run_ids`` — run ids already verified; stale when no longer in approved_runs
+      - ``merged_prs``    — merged PRs awaiting operator-steps (keyed by pr, field ``merged_at``)
+    """
     cutoff = datetime.now(tz=_UTC) - timedelta(days=days)
+
+    # Prune notified keys.
     notified = state.get("notified", {})
     to_delete = []
     for key, ts in notified.items():
@@ -82,6 +91,37 @@ def prune(state: dict, days: int = 14) -> None:
             to_delete.append(key)
     for key in to_delete:
         del notified[key]
+
+    # Prune approved_runs entries older than cutoff.
+    approved = state.get("approved_runs", {})
+    approved_to_delete = []
+    for run_id_str, meta in approved.items():
+        ts = meta.get("approved_at", "")
+        try:
+            if datetime.fromisoformat(ts) < cutoff:
+                approved_to_delete.append(run_id_str)
+        except (ValueError, TypeError):
+            approved_to_delete.append(run_id_str)
+    for k in approved_to_delete:
+        del approved[k]
+
+    # Prune verified_run_ids: remove ids that are no longer in approved_runs.
+    verified = state.get("verified_run_ids", [])
+    live_approved_ids = {int(k) for k in approved}
+    state["verified_run_ids"] = [rid for rid in verified if rid in live_approved_ids]
+
+    # Prune merged_prs entries older than cutoff.
+    merged = state.get("merged_prs", {})
+    merged_to_delete = []
+    for pr_str, meta in merged.items():
+        ts = meta.get("merged_at", "")
+        try:
+            if datetime.fromisoformat(ts) < cutoff:
+                merged_to_delete.append(pr_str)
+        except (ValueError, TypeError):
+            merged_to_delete.append(pr_str)
+    for k in merged_to_delete:
+        del merged[k]
 
 
 # ---------------------------------------------------------------------------

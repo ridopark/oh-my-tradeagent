@@ -24,9 +24,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
-import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ import live_state as _live
 import market_hours as _mh
 import notify as _notify
 import statefile as _sf
+from _shared import _gh, _parse_claude_json
 
 # ---------------------------------------------------------------------------
 # Authoritative service-class table.
@@ -156,20 +157,6 @@ class VerificationResult:
 # ---------------------------------------------------------------------------
 # GitHub API helpers
 # ---------------------------------------------------------------------------
-def _gh(*args: str, timeout: int = 30, stdin_data: str | None = None) -> str:
-    """Run `gh <args>` and return stdout; raise RuntimeError on failure."""
-    result = subprocess.run(
-        ["gh"] + list(args),
-        input=stdin_data,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"gh {args[0] if args else '?'} failed: {result.stderr.strip()[:200]}")
-    return result.stdout
-
-
 def _list_waiting_runs(repo: str) -> list[dict]:
     url = f"repos/{repo}/actions/workflows/deploy.yml/runs?status=waiting&per_page=20"
     raw = _gh("api", url)
@@ -245,6 +232,8 @@ def _call_claude_second_opinion(bundle: dict, timeout: int = 120) -> tuple[str, 
                 "--model", "claude-fable-5-1",
                 "--output-format", "json",
                 "--json-schema", _SECOND_OPINION_SCHEMA,
+                "--tools", "",
+                "--max-turns", "1",
                 user_prompt,
             ],
             capture_output=True,
@@ -259,37 +248,15 @@ def _call_claude_second_opinion(bundle: dict, timeout: int = 120) -> tuple[str, 
     if result.returncode != 0:
         return "defer", f"claude exit {result.returncode}: {result.stderr.strip()[:100]}"
 
-    try:
-        data = json.loads(result.stdout)
-        # Handle three possible shapes:
-        # 1. Direct {"verdict": ..., "reason": ...}  — fake claude in tests
-        # 2. Real claude wrapper with "structured_output" key (--json-schema)
-        # 3. Real claude wrapper with "result" key (JSON-encoded string)
-        if not isinstance(data, dict):
-            return "defer", f"claude output not a dict: {result.stdout[:100]}"
+    parsed = _parse_claude_json(result.stdout, key="verdict")
+    if parsed is None:
+        return "defer", f"claude bad JSON: {result.stdout[:100]}"
 
-        if "verdict" in data:
-            # Shape 1: direct structured output (test fakes use this)
-            claude_verdict = str(data["verdict"])
-            reason = str(data.get("reason", ""))
-        elif "structured_output" in data and isinstance(data.get("structured_output"), dict):
-            # Shape 2: real claude -p with --json-schema
-            so = data["structured_output"]
-            claude_verdict = str(so.get("verdict", "defer"))
-            reason = str(so.get("reason", ""))
-        elif "result" in data:
-            # Shape 3: real claude -p without --json-schema, result is a JSON string
-            raw_result = data["result"]
-            inner = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-            if isinstance(inner, dict) and "verdict" in inner:
-                claude_verdict = str(inner["verdict"])
-                reason = str(inner.get("reason", ""))
-            else:
-                return "defer", f"claude result field not parseable: {str(raw_result)[:100]}"
-        else:
-            return "defer", f"claude unexpected output: {result.stdout[:150]}"
-    except (json.JSONDecodeError, TypeError) as exc:
-        return "defer", f"claude bad JSON ({exc}): {result.stdout[:100]}"
+    try:
+        claude_verdict = str(parsed["verdict"])
+        reason = str(parsed.get("reason", ""))
+    except (KeyError, TypeError) as exc:
+        return "defer", f"claude output missing verdict ({exc}): {result.stdout[:100]}"
 
     if claude_verdict not in ("approve", "defer"):
         return "defer", f"claude unknown verdict: {claude_verdict!r}"
@@ -339,6 +306,18 @@ def decide_run(
     reasons: list[str] = []
     market_open = _mh.is_market_open(at)
 
+    # A run with zero classified services is never safe (nothing to approve).
+    if not service_classes:
+        return RunDecision(
+            run_id=run_id,
+            services=services,
+            service_classes=service_classes,
+            verdict="unsafe",
+            reasons=["no waiting Roll jobs"],
+            created_at=created_at,
+            pending=True,
+        )
+
     for svc, cls in service_classes.items():
         if cls == "unknown":
             reasons.append(f"unknown service: {svc}")
@@ -381,9 +360,12 @@ def _check_human_overrides(
     'pr-deploy-agent:'.  Posts one Discord message per run, then records the key.
     """
     deferred = state.get("deferred_run_ids", [])
-    for run_id in deferred:
+    to_remove: list[int] = []
+    for run_id in list(deferred):
         key = f"run:{run_id}:human-override"
         if _sf.is_notified(state, key):
+            # Already notified — remove from deferred so we don't keep checking
+            to_remove.append(run_id)
             continue
         try:
             approvals = _get_run_approvals(repo, run_id)
@@ -403,7 +385,14 @@ def _check_human_overrides(
                         ),
                         "green",
                     )
+                    to_remove.append(run_id)
                     break
+    # Remove notified/overridden runs from deferred list.
+    for run_id in to_remove:
+        try:
+            deferred.remove(run_id)
+        except ValueError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +411,16 @@ def decide_all(
     In act mode, doubly-SAFE runs (script + Claude) are approved via GitHub API.
     Side-effect: posts Discord messages and updates state (caller must persist).
     """
-    runs = _list_waiting_runs(repo)
+    try:
+        runs = _list_waiting_runs(repo)
+    except Exception as exc:
+        _notify.post(
+            repo_root,
+            "[pr-deploy-agent] list-runs failed",
+            str(exc),
+            "red",
+        )
+        return []
 
     # Always check human overrides even when no runs are waiting.
     _check_human_overrides(repo, state, repo_root)
@@ -605,6 +603,9 @@ def _ssh_cmd(homelab_ssh: str, remote_cmd: str, timeout: int = 30) -> str:
     return result.stdout
 
 
+_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
+
+
 def _verify_service(
     svc: str,
     homelab_ssh: str,
@@ -612,6 +613,13 @@ def _verify_service(
     copytrade_ns: str = "copytrade",
 ) -> tuple[bool, str]:
     """Check one deployed service.  Returns (healthy, reason)."""
+    # Validate tokens before interpolating into the remote shell string.
+    for label, tok in (("svc", svc), ("ns", copytrade_ns)):
+        if not _TOKEN_RE.fullmatch(tok):
+            raise ValueError(
+                f"unsafe {label} token for ssh interpolation: {tok!r}"
+            )
+
     # 1. Deployment readiness
     try:
         deploy_json = _ssh_cmd(

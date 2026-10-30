@@ -27,7 +27,6 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 _DEFAULT_HOMELAB_SSH = "ridopark@192.168.10.123"
 _DEFAULT_NS = "copytrade"
@@ -128,19 +127,9 @@ def _psql_nonterminal(host: str, db: str, ns: str, timeout: int) -> list[dict]:
         f"kubectl -n {ns} exec -i postgres-0 -- "
         f"psql -U temporal -d {db} -tAF'|' -v ON_ERROR_STOP=1 -f -"
     )
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, remote_cmd],
-        input=_NON_TERMINAL_QUERY,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"psql {db} exit {result.returncode}: {result.stderr.strip()[:200]}"
-        )
+    raw = _run_ssh(host, remote_cmd, stdin=_NON_TERMINAL_QUERY, timeout=timeout)
     rows = []
-    for line in result.stdout.splitlines():
+    for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
