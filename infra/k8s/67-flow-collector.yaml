@@ -1,0 +1,195 @@
+# Options-flow collector (PLAN-2026-10-29-flow-page, Step 1). Holds Alpaca's single OPRA
+# options-stream slot 09:25-16:20 ET, subscribes to all option trades (wildcard) plus live
+# quotes for up to 950 chosen contracts, classifies and groups trades into orders, and
+# archives every trade to daily gzip files. POSTing to the BFF is wired in Step 2.
+#
+# READ-ONLY ON MARKETS: nothing here touches a trading path.
+#
+# ONE OPRA SLOT PER ACCOUNT. Alpaca allows one WebSocket per endpoint per account: the
+# stock (/v2/sip) and options (/v1beta1/opra) endpoints are separate, so this collector
+# does NOT interfere with market-data's equity feed. A second connection to the same
+# OPTIONS endpoint is refused with 406 and the FIRST connection survives — so:
+#   - replicas: 1, strategy: Recreate — never two pods simultaneously (one would 406).
+#   - The reconnect loop treats 406 as "previous pod still holds the slot": back off 60 s
+#     and retry, never crash-loop.
+#
+# COMMAND vs ARGS. Use `command:`, NEVER `args:`. The Dockerfile's ENTRYPOINT is exec-form
+# with no CMD, so `args:` would APPEND to the entrypoint rather than replace it and would
+# start the live Discord signal watcher — the highest-consequence line in this file.
+#
+# ARCHIVE. The PVC below is local-path — local-path does NOT enforce capacity limits.
+# The collector's own disk guard (FLOW_ARCHIVE_CAP_BYTES / FLOW_ARCHIVE_FREE_FLOOR_BYTES)
+# is the real enforcer. See docs/ops/flow-archive-format.md.
+#
+# DRY RUN (default "true"): archives the tape, logs metrics, posts nothing. Flip to "false"
+# after confirming the Step 1 measurement report:
+#   kubectl -n copytrade set env deploy/flow-collector FLOW_DRY_RUN=false
+#
+# FIRST-TIME CREATE IS MANUAL. deploy.yml's "Verify :latest is current" step runs
+# `kubectl get deployment/flow-collector` BEFORE the apply step, so a Deployment that does
+# not exist yet fails the roll. The bootstrap guard skips it (notice, not failure) until
+# the operator applies this file once:
+#   kubectl -n copytrade apply -f infra/k8s/67-flow-collector.yaml
+# Every later change rolls through deploy.yml normally.
+#
+# STEP 2 CHANGES:
+#   - Lower the memory limit to 300 Mi after the dry-run measurement confirms rss_peak <= 240 MB.
+#   - Add FLOW_STORE_MIN_PREMIUM (the confirmed floor), BFF_INTERNAL_URL, ALERT_DISCORD_WEBHOOK_URL.
+#   - Lower FLOW_ARCHIVE_CAP_BYTES / FLOW_ARCHIVE_FREE_FLOOR_BYTES if the dry run shows
+#     archive_bytes_today > 500 MB.
+#
+# CREDENTIALS. Three existing Secrets; no new Secret is needed:
+#   - alpaca-credentials-data  : READ-ONLY Alpaca DATA keys (APCA_API_KEY_ID_DATA /
+#                                APCA_API_SECRET_KEY_DATA). The same Secret that
+#                                53-market-data.yaml mounts. NOT trading keys.
+#   - dashboard-secrets        : OPTIONS_CHAT_INGEST_TOKEN. Route-scoped ingest credential
+#                                gating /internal/flow/** on the BFF (Step 2). Wired now so
+#                                Step 2 only flips the env var, not the manifest.
+#   - discord-alert-credentials: ALERT_DISCORD_WEBHOOK_URL for health alerts (Step 2 wires).
+#                                Mounted but not consumed in Step 1.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flow-archive
+  namespace: copytrade
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # local-path does not enforce capacity — the collector's disk guard is the real cap.
+  # This value is documentation only; it matches the 93 G free / 20 GB guard target.
+  resources:
+    requests:
+      storage: 25Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flow-collector
+  namespace: copytrade
+  labels:
+    app: flow-collector
+spec:
+  replicas: 1
+  # Recreate: ensures only one pod holds the OPRA slot at a time. A rolling update
+  # would momentarily run TWO pods, causing the new one to get 406 and the old one
+  # to survive — defeating the update. See the header comment.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flow-collector
+  template:
+    metadata:
+      labels:
+        app: flow-collector
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
+          imagePullPolicy: Always
+          # MUST be `command:` — NEVER `args:`. See the header comment.
+          command: ["python", "-m", "ohmytradeagent_sidecar.flow_main"]
+          # NO securityContext, deliberately — matching 55-signal-source-discord.yaml and the
+          # mirrors, which run this image with {} (its USER is the name `pwuser`, which
+          # `runAsNonRoot: true` cannot verify). Harden in its own PR, not here.
+          envFrom:
+            # READ-ONLY Alpaca DATA keys (APCA_API_KEY_ID_DATA / APCA_API_SECRET_KEY_DATA).
+            - secretRef:
+                name: alpaca-credentials-data
+          env:
+            # Dark by default — see the header. Only the literal "false" enables posting.
+            - name: FLOW_DRY_RUN
+              value: "true"
+            # Archive directory: mounted from the PVC below.
+            - name: FLOW_ARCHIVE_DIR
+              value: /app/archive
+            # Heartbeat / state dir: emptyDir, owned by the liveness probe.
+            - name: STATE_DIR
+              value: /app/state
+            # Universe file: same ConfigMap as the darkpool-collector.
+            - name: DARKPOOL_UNIVERSE_FILE
+              value: /app/universe/universe.txt
+            # Step 2: flip to the BFF after the measurement report confirms the floor.
+            # - name: BFF_INTERNAL_URL
+            #   value: http://tenant-dashboard-bff:8083
+            # Route-scoped ingest credential for POST /internal/flow/ingest (Step 2).
+            - name: OPTIONS_CHAT_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: OPTIONS_CHAT_INGEST_TOKEN
+            # Step 2: uncomment for health alerts.
+            # - name: ALERT_DISCORD_WEBHOOK_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: discord-alert-credentials
+            #       key: ALERT_DISCORD_WEBHOOK_URL
+          volumeMounts:
+            - name: state
+              mountPath: /app/state
+            - name: archive
+              mountPath: /app/archive
+            - name: universe
+              mountPath: /app/universe
+              readOnly: true
+          # Heartbeat present and mtime within 180s. Touched on every window-idle sleep
+          # (every 1 s outside 09:25-16:20 ET) and on every recv loop iteration inside
+          # the window; the 180 s margin covers a 60 s slow flush plus back-off.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /app/state/heartbeat && test $(( $(date +%s) - $(stat -c %Y /app/state/heartbeat) )) -lt 180
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              # No Chromium, no Temporal client: msgpack + the bounded order/quote structures.
+              memory: 256Mi
+            limits:
+              cpu: 300m
+              # 400 Mi during the dry-run session so the peak rss_peak_mb is MEASURED before
+              # the cap is applied. Step 2 lowers this to 300 Mi once the measurement confirms
+              # rss_peak_mb <= 240 MB. See the go/no-go thresholds in the plan.
+              memory: 400Mi
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: archive
+          persistentVolumeClaim:
+            claimName: flow-archive
+        - name: universe
+          configMap:
+            name: darkpool-universe
+---
+# ADDITIVE ingress rule for the BFF, a sibling of the darkpool-collector grant (66) and the
+# mirrors' policies (62/63/64). Kept as its OWN policy so that deleting this collector
+# deletes exactly its own access. NetworkPolicies selecting the same pod are UNIONed, not
+# overridden, so this grants flow-collector -> BFF:8083 WITHOUT touching
+# `tenant-dashboard-bff-allow-dashboard-only` in 58-tenant-dashboard-bff.yaml.
+#
+# Egress to stream.data.alpaca.markets needs no policy: there are no Egress policies in
+# this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-flow-collector
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flow-collector
+      ports:
+        - protocol: TCP
+          port: 8083
