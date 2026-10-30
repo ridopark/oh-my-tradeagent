@@ -31,9 +31,11 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Any
 
+import httpx
+import msgpack
 import websockets
 import websockets.exceptions
 from dotenv import load_dotenv
@@ -44,6 +46,8 @@ from .flow_collector import (
     FLOW_ARCHIVE_FREE_FLOOR_BYTES,
     FLOW_QUOTE_CAP,
     FLOW_QUOTE_UNIVERSE_SHARE,
+    FLOW_UNIVERSE_MAX_DTE,
+    FLOW_UNIVERSE_MONEYNESS_PCT,
     Control,
     Order,
     OrderAggregator,
@@ -51,6 +55,7 @@ from .flow_collector import (
     QuoteSet,
     TapeArchiver,
     Trade,
+    _fmt_ts,
     classify,
     parse_frame,
     trade_to_archive_row,
@@ -60,6 +65,7 @@ from .runtime import required, setup_logging
 
 UTC = timezone.utc
 WS_URL = "wss://stream.data.alpaca.markets/v1beta1/opra"
+DATA_BASE_URL = "https://data.alpaca.markets"
 # RTH-plus window (plan spec): connect 5 min before the open, disconnect 20 min after
 WINDOW_OPEN_ET = dtime(9, 25)
 WINDOW_CLOSE_ET = dtime(16, 20)
@@ -76,8 +82,17 @@ QUOTE_ROTATION_SECS = 300.0
 METRICS_INTERVAL_SECS = 60.0
 # Stock spot price endpoint (batch).
 STOCK_LATEST_URL = "/v2/stocks/trades/latest"
+# Options contracts endpoint.
+OPTIONS_CONTRACTS_PATH = "/v2/options/contracts"
 # Max REST calls per minute (shared 10k budget with market-data and darkpool).
 FLOW_MAX_REST_PER_MIN = 300
+# Rolling premium map: track the last WINDOW_SECS of premium, bounded to MAX_K entries.
+ROLLING_PREMIUM_WINDOW_SECS = 900.0
+ROLLING_PREMIUM_MAX_K = 2_000  # memory bound: at most 2 k contracts in the map
+# Seen-contracts set: capped to limit memory (all-day tape has ~0.5 M distinct contracts).
+SEEN_CONTRACTS_CAP = 50_000
+# Pending ingest buffer bound (Step 2 drains this; dry run never fills it).
+ORDERS_PENDING_MAX = 10_000
 
 
 def parse_dry_run(raw: str | None) -> bool:
@@ -121,36 +136,53 @@ class GapRecord:
 
 
 # ---------------------------------------------------------------------------
-# Fake WebSocket for testing
+# Rolling premium map (bounded, time-windowed)
 # ---------------------------------------------------------------------------
 
 
-class FakeWebSocket:
-    """Minimal async context-manager fake for tests."""
+class RollingPremiumMap:
+    """Bounded rolling accumulator of order premium over a sliding time window.
 
-    def __init__(self, frames: list[bytes], *, close_after: int = -1) -> None:
-        self._frames = list(frames)
-        self._sent: list[bytes] = []
-        self.close_after = close_after
-        self._count = 0
-        self.closed = False
+    Tracks contracts with recent premium activity for the quote-set ranking in
+    ``QuoteSet.choose``.  Bounded to ``max_k`` entries: when full, the lowest-premium
+    contract is evicted on every ``prune`` call.  Entries older than ``window_secs``
+    are evicted unconditionally.
+    """
 
-    async def send(self, data: bytes) -> None:
-        self._sent.append(data)
+    def __init__(
+        self,
+        window_secs: float = ROLLING_PREMIUM_WINDOW_SECS,
+        max_k: int = ROLLING_PREMIUM_MAX_K,
+    ) -> None:
+        self._window = window_secs
+        self._max_k = max_k
+        # {contract: (last_seen_mono, accumulated_premium)}
+        self._data: dict[str, tuple[float, float]] = {}
 
-    async def recv(self) -> bytes:
-        if self.close_after >= 0 and self._count >= self.close_after:
-            raise websockets.exceptions.ConnectionClosed(None, None)
-        if not self._frames:
-            raise websockets.exceptions.ConnectionClosed(None, None)
-        self._count += 1
-        return self._frames.pop(0)
+    def add(self, contract: str, premium: float, now_mono: float) -> None:
+        if contract in self._data:
+            _, old = self._data[contract]
+            self._data[contract] = (now_mono, old + premium)
+        else:
+            self._data[contract] = (now_mono, premium)
 
-    async def __aenter__(self) -> FakeWebSocket:
-        return self
+    def prune(self, now_mono: float) -> None:
+        """Evict stale entries (older than window) then trim to max_k by premium."""
+        cutoff = now_mono - self._window
+        stale = [k for k, (ts, _) in self._data.items() if ts < cutoff]
+        for k in stale:
+            del self._data[k]
+        if len(self._data) > self._max_k:
+            # Drop the lowest-premium entries
+            sorted_items = sorted(self._data.items(), key=lambda kv: kv[1][1])
+            for k, _ in sorted_items[: len(self._data) - self._max_k]:
+                del self._data[k]
 
-    async def __aexit__(self, *args: Any) -> None:
-        self.closed = True
+    def get_map(self) -> dict[str, float]:
+        return {k: v for k, (_, v) in self._data.items()}
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 
 # ---------------------------------------------------------------------------
@@ -163,26 +195,31 @@ class Metrics:
     trades_total: int = 0
     trades_1s_peak: int = 0
     _trades_this_second: int = 0
+    _trades_since_last_log: int = 0
     quotes_total: int = 0
     quotes_1s_peak: int = 0
     _quotes_this_second: int = 0
+    _quotes_since_last_log: int = 0
     loop_lag_max_ms: float = 0.0
     orders_total: int = 0
     orders_25k: int = 0
     orders_50k: int = 0
     orders_100k: int = 0
+    _orders_since_last_log: int = 0
     quoted_premium: float = 0.0
     total_premium: float = 0.0
     rss_mb_peak: float = 0.0
-    distinct_contracts: int = 0
     reconnects: int = 0
     gap_seconds: float = 0.0
+    _rest_calls_this_min: int = 0
     rest_calls_min_peak: int = 0
     _last_tick_time: float = field(default_factory=time.monotonic)
 
     def tick_second(self) -> None:
         now = time.monotonic()
-        lag_ms = (now - self._last_tick_time) * 1000.0
+        # loop_lag_max_ms = max(actual interval - nominal 1000 ms, 0)
+        interval_ms = (now - self._last_tick_time) * 1000.0
+        lag_ms = max(0.0, interval_ms - FLUSH_INTERVAL_SECS * 1000.0)
         self.loop_lag_max_ms = max(self.loop_lag_max_ms, lag_ms)
         self._last_tick_time = now
         self.trades_1s_peak = max(self.trades_1s_peak, self._trades_this_second)
@@ -195,13 +232,16 @@ class Metrics:
     def add_trade(self) -> None:
         self.trades_total += 1
         self._trades_this_second += 1
+        self._trades_since_last_log += 1
 
     def add_quote(self) -> None:
         self.quotes_total += 1
         self._quotes_this_second += 1
+        self._quotes_since_last_log += 1
 
     def add_order(self, premium: float, side_source: str) -> None:
         self.orders_total += 1
+        self._orders_since_last_log += 1
         if premium >= 25_000:
             self.orders_25k += 1
         if premium >= 50_000:
@@ -212,6 +252,18 @@ class Metrics:
         if side_source == "quote":
             self.quoted_premium += premium
 
+    def add_rest_call(self) -> None:
+        self._rest_calls_this_min += 1
+
+    def tick_metrics_interval(self) -> None:
+        """Called each time the metrics line is emitted; updates the REST peak and resets
+        per-interval counters."""
+        self.rest_calls_min_peak = max(self.rest_calls_min_peak, self._rest_calls_this_min)
+        self._rest_calls_this_min = 0
+        self._trades_since_last_log = 0
+        self._quotes_since_last_log = 0
+        self._orders_since_last_log = 0
+
 
 # ---------------------------------------------------------------------------
 # Flow runner (the real loop + the testable core)
@@ -220,7 +272,11 @@ class Metrics:
 
 @dataclass
 class SessionState:
-    """Mutable state for one streaming session (reset on reconnect)."""
+    """Mutable state for one trading-day session.
+
+    Persists across reconnects within the same calendar day; reset at session end
+    (16:20 ET or SIGTERM) by creating a new ``SessionState`` in ``run_loop``.
+    """
 
     agg: OrderAggregator = field(default_factory=OrderAggregator)
     quote_cache: dict[str, Quote] = field(default_factory=dict)  # contract → latest Quote
@@ -230,17 +286,21 @@ class SessionState:
     last_trade_ts: str | None = None
     gap_open: GapRecord | None = None
     gaps: list[GapRecord] = field(default_factory=list)
-    seen_contracts: set[str] = field(default_factory=set)
-    orders_pending: list[Order] = field(default_factory=list)  # not yet posted (Step 2)
+    seen_contracts: set[str] = field(default_factory=set)  # capped at SEEN_CONTRACTS_CAP
+    orders_pending: list[Order] = field(default_factory=list)  # bounded; dry run always empty
     last_quote_rotation: float = field(default_factory=time.monotonic)
     last_metrics_log: float = field(default_factory=time.monotonic)
+    rolling_premium: RollingPremiumMap = field(default_factory=RollingPremiumMap)
+    options_cache: dict[str, list] = field(default_factory=dict)  # ticker → contract list
+    options_cache_date: str = ""  # ET date the cache is for (reset per day)
 
 
 class FlowSession:
     """The streaming client for one connection lifetime.
 
-    Designed for testability: ``connect_fn`` and ``clock`` are injectable, and the
-    full public protocol is exercised via ``run()`` over a ``FakeWebSocket``.
+    Designed for testability: ``connect_fn``, ``clock``, ``rest_client``, and
+    ``universe_path`` are injectable, and the full public protocol is exercised via
+    ``run()`` over a ``FakeWebSocket`` with an ``httpx.MockTransport``.
     """
 
     def __init__(
@@ -249,22 +309,24 @@ class FlowSession:
         key_id: str,
         secret: str,
         heartbeat_fn: Callable[[], None],
-        archive_dir: pathlib.Path | None,
         dry_run: bool,
         log: logging.Logger,
         connect_fn: Callable[..., Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        rest_client: httpx.AsyncClient | None = None,
+        universe_path: pathlib.Path | None = None,
     ) -> None:
         self._key_id = key_id
         self._secret = secret
         self._heartbeat = heartbeat_fn
-        self._archive_dir = archive_dir
         self._dry_run = dry_run
         self._log = log
         self._connect_fn = connect_fn or websockets.connect
         self._clock = clock or now_utc
         self._sleep = sleep or asyncio.sleep
+        self._rest_client = rest_client
+        self._universe_path = universe_path
 
     async def run(
         self,
@@ -272,8 +334,6 @@ class FlowSession:
         ws: Any,
     ) -> None:
         """Run one WebSocket session from greeting through trades until disconnection."""
-        import msgpack
-
         self._log.info("flow session started")
         # Greeting
         greeting = await ws.recv()
@@ -299,6 +359,9 @@ class FlowSession:
                 break
         if not authenticated:
             raise _StreamError("no auth acknowledgement")
+
+        # Populate initial quote set via REST (non-blocking; fails gracefully → empty set)
+        await self._choose_quote_set(state)
 
         # Subscribe: wildcard trades + current quote set
         sub_msg: dict = {"action": "subscribe", "trades": ["*"]}
@@ -332,15 +395,20 @@ class FlowSession:
                 for rec in parse_frame(frame):
                     if isinstance(rec, Trade):
                         state.metrics.add_trade()
-                        state.seen_contracts.add(rec.contract)
+                        if len(state.seen_contracts) < SEEN_CONTRACTS_CAP:
+                            state.seen_contracts.add(rec.contract)
                         quote = state.quote_cache.get(rec.contract)
                         labels = classify(rec, quote, now)
                         labels["_quote"] = quote
                         closed = state.agg.feed(rec, labels)
                         for order in closed:
                             state.metrics.add_order(order.premium, order.side_source)
+                            state.rolling_premium.add(
+                                order.contract, order.premium, time.monotonic()
+                            )
                             if not self._dry_run:
-                                state.orders_pending.append(order)
+                                if len(state.orders_pending) < ORDERS_PENDING_MAX:
+                                    state.orders_pending.append(order)
                         if state.archiver:
                             archive_rows_buf.append(trade_to_archive_row(rec, quote))
                         state.last_trade_ts = rec.ts_raw
@@ -360,8 +428,10 @@ class FlowSession:
                 # Flush idle order windows
                 for order in state.agg.flush(now):
                     state.metrics.add_order(order.premium, order.side_source)
+                    state.rolling_premium.add(order.contract, order.premium, mono)
                     if not self._dry_run:
-                        state.orders_pending.append(order)
+                        if len(state.orders_pending) < ORDERS_PENDING_MAX:
+                            state.orders_pending.append(order)
                 # Archive flush
                 if state.archiver and archive_rows_buf:
                     state.archiver.write_flush(archive_rows_buf, now)
@@ -383,19 +453,103 @@ class FlowSession:
         if state.archiver and archive_rows_buf:
             state.archiver.write_flush(archive_rows_buf, self._clock())
 
-    async def _rotate_quotes(self, state: SessionState, ws: Any) -> None:
-        """Re-choose the quoted set and send subscribe/unsubscribe diffs."""
-        import msgpack
+    async def _choose_quote_set(self, state: SessionState) -> tuple[list[str], list[str]]:
+        """Build the universe, prune the rolling map, run QuoteSet.choose.
 
-        # In Step 1, the universe is the static darkpool-universe (no BFF call).
-        # QuoteSet.choose takes (universe_contracts, rolling_premium, cap, share).
-        # With no spot prices or rolling_premium available in Step 1, use empty args.
+        Returns ``(subscribe_diff, unsubscribe_diff)`` — the diffs against the previous
+        quote set.  Errors in REST calls are logged and treated as empty universe.
+        """
+        universe_contracts = await self._build_universe_contracts(state)
+        state.rolling_premium.prune(time.monotonic())
+        rolling_map = state.rolling_premium.get_map()
         _, subscribe, unsubscribe = state.quote_set.choose(
-            [],  # no universe in Step 1 (spot REST not wired)
-            {},  # no rolling premium
+            universe_contracts,
+            rolling_map,
             cap=FLOW_QUOTE_CAP,
             universe_share=FLOW_QUOTE_UNIVERSE_SHARE,
         )
+        return subscribe, unsubscribe
+
+    async def _build_universe_contracts(
+        self, state: SessionState
+    ) -> list[tuple[str, str, float, int]]:
+        """Return the near-money short-dated contracts for the static universe.
+
+        Result: ``[(contract, ticker, abs_moneyness_frac, dte)]``.
+        Returns ``[]`` when no REST client or universe path is configured.
+        """
+        if self._rest_client is None or self._universe_path is None:
+            return []
+        try:
+            tickers = _read_universe(self._universe_path)
+        except OSError as exc:
+            self._log.warning("flow: cannot read universe file %s: %s", self._universe_path, exc)
+            return []
+        if not tickers:
+            return []
+
+        # Fetch spot prices (one batched REST call)
+        spots: dict[str, float] = {}
+        try:
+            spots = await _fetch_spot_prices(
+                self._rest_client, tickers, self._key_id, self._secret
+            )
+            state.metrics.add_rest_call()
+        except Exception as exc:
+            self._log.warning("flow: spot price fetch failed: %s", exc)
+
+        # Options contracts: cached per day
+        today = self._clock().astimezone(ET).date()
+        today_str = today.isoformat()
+        if state.options_cache_date != today_str:
+            state.options_cache.clear()
+            state.options_cache_date = today_str
+        max_expiry = today + timedelta(days=FLOW_UNIVERSE_MAX_DTE)
+        expiry_cutoff = max_expiry.isoformat()
+
+        universe_contracts: list[tuple[str, str, float, int]] = []
+        for ticker in tickers:
+            spot = spots.get(ticker)
+            if not spot or spot <= 0:
+                continue
+            if ticker not in state.options_cache:
+                try:
+                    raw = await _fetch_option_contracts(
+                        self._rest_client, ticker, expiry_cutoff, self._key_id, self._secret
+                    )
+                    state.metrics.add_rest_call()
+                    filtered: list[tuple[str, str, float, int]] = []
+                    for contract_sym, exp_str, strike in raw:
+                        mon = abs(strike - spot) / spot
+                        if mon > FLOW_UNIVERSE_MONEYNESS_PCT:
+                            continue
+                        try:
+                            exp = date.fromisoformat(exp_str)
+                        except ValueError:
+                            continue
+                        dte_val = (exp - today).days
+                        if dte_val < 0 or dte_val > FLOW_UNIVERSE_MAX_DTE:
+                            continue
+                        filtered.append((contract_sym, ticker, mon, dte_val))
+                    state.options_cache[ticker] = filtered
+                except Exception as exc:
+                    self._log.warning(
+                        "flow: options contracts fetch for %s failed: %s", ticker, exc
+                    )
+                    state.options_cache[ticker] = []
+            universe_contracts.extend(state.options_cache.get(ticker, []))
+
+        return universe_contracts
+
+    async def _rotate_quotes(self, state: SessionState, ws: Any) -> None:
+        """Re-choose the quoted set and send subscribe/unsubscribe diffs.
+
+        Prunes ``quote_cache`` for contracts we unsubscribe from.
+        """
+        subscribe, unsubscribe = await self._choose_quote_set(state)
+        # Evict stale cached quotes for contracts we are unsubscribing
+        for contract in unsubscribe:
+            state.quote_cache.pop(contract, None)
         if subscribe:
             await ws.send(msgpack.packb({"action": "subscribe", "quotes": subscribe}))
         if unsubscribe:
@@ -403,21 +557,23 @@ class FlowSession:
 
     def _log_metrics(self, state: SessionState, now: datetime) -> None:
         m = state.metrics
-        trades_s_mean = (
-            m.trades_total / max(1, METRICS_INTERVAL_SECS)
-        )  # approximation over the window
+        # Per-interval rates (count in last interval ÷ interval seconds)
+        trades_s_mean = m._trades_since_last_log / max(1.0, METRICS_INTERVAL_SECS)
+        quotes_s_mean = m._quotes_since_last_log / max(1.0, METRICS_INTERVAL_SECS)
+        orders_per_min = m._orders_since_last_log / max(1.0, METRICS_INTERVAL_SECS) * 60.0
         rss = rss_mb()
         self._log.info(
             "flow metrics: trades/s mean=%.1f peak=%d quotes/s mean=%.1f peak=%d "
-            "loop_lag_max_ms=%.0f orders/min total=%d >=25k=%d >=50k=%d >=100k=%d "
+            "loop_lag_max_ms=%.0f orders/min rate=%.1f total=%d >=25k=%d >=50k=%d >=100k=%d "
             "quoted_premium_share=%.2f rss_mb=%.0f rss_peak_mb=%.0f "
-            "open_windows=%d quoted=%d seen_contracts=%d "
-            "archive_bytes=%d gaps=%d reconnects=%d",
+            "open_windows=%d quoted=%d rolling_map=%d seen_contracts=%d "
+            "archive_bytes=%d gap_seconds=%.0f gaps=%d reconnects=%d rest_calls_min=%d",
             trades_s_mean,
             m.trades_1s_peak,
-            m.quotes_total / max(1, METRICS_INTERVAL_SECS),
+            quotes_s_mean,
             m.quotes_1s_peak,
             m.loop_lag_max_ms,
+            orders_per_min,
             m.orders_total,
             m.orders_25k,
             m.orders_50k,
@@ -427,11 +583,15 @@ class FlowSession:
             m.rss_mb_peak,
             len(state.agg._open),
             len(state.quote_set.current),
+            len(state.rolling_premium),
             len(state.seen_contracts),
             state.archiver.bytes_today if state.archiver else 0,
+            m.gap_seconds,
             len(state.gaps),
             m.reconnects,
+            m.rest_calls_min_peak,
         )
+        m.tick_metrics_interval()
 
 
 class _SlotHeldError(Exception):
@@ -439,12 +599,95 @@ class _SlotHeldError(Exception):
 
 
 class _StreamError(Exception):
-    """Unrecoverable stream error."""
+    """Unrecoverable stream error (reconnect with backoff)."""
+
+
+# ---------------------------------------------------------------------------
+# REST helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_universe(path: pathlib.Path) -> list[str]:
+    """Read ticker names from a universe file (one per line; ``#`` = comment)."""
+    tickers: list[str] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                tickers.append(line)
+    return tickers
+
+
+async def _fetch_spot_prices(
+    client: httpx.AsyncClient,
+    tickers: list[str],
+    key_id: str,
+    secret: str,
+) -> dict[str, float]:
+    """Batch-fetch the latest trade price for each ticker."""
+    resp = await client.get(
+        STOCK_LATEST_URL,
+        params={"symbols": ",".join(tickers)},
+        headers={"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret},
+    )
+    resp.raise_for_status()
+    return {sym: float(d["p"]) for sym, d in resp.json().get("trades", {}).items()}
+
+
+async def _fetch_option_contracts(
+    client: httpx.AsyncClient,
+    ticker: str,
+    expiry_cutoff: str,
+    key_id: str,
+    secret: str,
+) -> list[tuple[str, str, float]]:
+    """Fetch active option contracts for ``ticker`` expiring by ``expiry_cutoff``.
+
+    Returns ``[(symbol, expiration_date, strike_price)]``.
+    """
+    resp = await client.get(
+        OPTIONS_CONTRACTS_PATH,
+        params={
+            "underlying_symbols": ticker,
+            "expiration_date_lte": expiry_cutoff,
+            "status": "active",
+        },
+        headers={"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret},
+    )
+    resp.raise_for_status()
+    result: list[tuple[str, str, float]] = []
+    for row in resp.json().get("option_contracts", []):
+        sym = str(row.get("symbol", ""))
+        exp = str(row.get("expiration_date", ""))
+        try:
+            strike = float(row.get("strike_price", 0))
+        except (ValueError, TypeError):
+            continue
+        if sym and exp and strike > 0:
+            result.append((sym, exp, strike))
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Top-level loop
 # ---------------------------------------------------------------------------
+
+
+def _make_session_state(
+    archive_dir: pathlib.Path | None,
+    cap_bytes: int,
+    free_floor_bytes: int,
+    log: logging.Logger,
+) -> SessionState:
+    state = SessionState()
+    if archive_dir:
+        state.archiver = TapeArchiver(
+            archive_dir,
+            cap_bytes=cap_bytes,
+            free_floor_bytes=free_floor_bytes,
+            log=log,
+        )
+    return state
 
 
 async def run_loop(
@@ -458,36 +701,36 @@ async def run_loop(
     connect_fn: Callable[..., Any] | None = None,
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    rest_client: httpx.AsyncClient | None = None,
+    universe_path: pathlib.Path | None = None,
 ) -> None:
     """Poll forever: idle outside the 09:25–16:20 ET window, connect/stream inside.
 
     On disconnection, record the gap and reconnect with back-off.  A 406 backs off
     ``SLOT_HELD_BACKOFF_SECS`` (60 s) without counting as a reconnect (the previous
-    pod is still alive).
+    pod is still alive).  A ``_StreamError`` (e.g. 402) reconnects with the same
+    capped backoff.
     """
     _clock = clock or now_utc
     _sleep = sleep or asyncio.sleep
+
+    cap_bytes = int(os.getenv("FLOW_ARCHIVE_CAP_BYTES", str(FLOW_ARCHIVE_CAP_BYTES)))
+    free_floor_bytes = int(os.getenv("FLOW_ARCHIVE_FREE_FLOOR_BYTES", str(FLOW_ARCHIVE_FREE_FLOOR_BYTES)))
 
     session = FlowSession(
         key_id=key_id,
         secret=secret,
         heartbeat_fn=heartbeat_path.touch,
-        archive_dir=archive_dir,
         dry_run=dry_run,
         log=log,
         connect_fn=connect_fn,
         clock=_clock,
         sleep=_sleep,
+        rest_client=rest_client,
+        universe_path=universe_path,
     )
 
-    state = SessionState()
-    if archive_dir:
-        state.archiver = TapeArchiver(
-            archive_dir,
-            cap_bytes=int(os.getenv("FLOW_ARCHIVE_CAP_BYTES", str(FLOW_ARCHIVE_CAP_BYTES))),
-            free_floor_bytes=int(os.getenv("FLOW_ARCHIVE_FREE_FLOOR_BYTES", str(FLOW_ARCHIVE_FREE_FLOOR_BYTES))),
-            log=log,
-        )
+    state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, log)
 
     reconnect_wait = RECONNECT_BASE_SECS
     last_disconnect_ts: str | None = None
@@ -502,7 +745,8 @@ async def run_loop(
 
         connect_args = dict(
             open_timeout=15,
-            ping_interval=None,
+            ping_interval=20,
+            ping_timeout=20,
             max_size=2**22,
         )
         try:
@@ -523,15 +767,24 @@ async def run_loop(
                     ).total_seconds()
                     last_disconnect_ts = None
                 await session.run(state, ws)
-            # session.run() returned cleanly (window closed) → reset back-off for next morning
+
+            # session.run() returned cleanly (window closed) — session end processing
+            _end_session(session, state, _clock(), log)
+            # Reset state for the next day
+            state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, log)
             reconnect_wait = RECONNECT_BASE_SECS
+
         except _SlotHeldError as exc:
             log.warning("flow: slot held (406) — backing off %ss: %s", SLOT_HELD_BACKOFF_SECS, exc)
             heartbeat_path.touch()
             await _sleep(SLOT_HELD_BACKOFF_SECS)
         except _StreamError as exc:
-            log.error("flow: stream error: %s", exc)
+            log.error("flow: stream error: %s — reconnecting in %.0fs", exc, reconnect_wait)
+            state.metrics.reconnects += 1
+            last_disconnect_ts = _fmt_ts(_clock())
             heartbeat_path.touch()
+            await _sleep(reconnect_wait)
+            reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)
         except (websockets.exceptions.WebSocketException, OSError, Exception) as exc:
             log.warning("flow: disconnected: %r; reconnecting in %.0fs", exc, reconnect_wait)
             state.metrics.reconnects += 1
@@ -541,11 +794,20 @@ async def run_loop(
             reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)
 
 
-def _fmt_ts(dt: datetime) -> str:
-    dt = dt.astimezone(UTC)
-    if dt.microsecond:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+def _end_session(
+    session: FlowSession,
+    state: SessionState,
+    now: datetime,
+    log: logging.Logger,
+) -> None:
+    """Flush open order windows, write the manifest, log the summary line."""
+    for order in state.agg.flush_all():
+        state.metrics.add_order(order.premium, order.side_source)
+    if state.archiver:
+        date_str = now.astimezone(ET).strftime("%Y-%m-%d")
+        state.archiver.close_session(date_str, "09:25-16:20")
+    session._log_metrics(state, now)
+    log.info("flow session ended (state reset for next day)")
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +827,9 @@ async def _run() -> int:
     archive_dir_env = os.getenv("FLOW_ARCHIVE_DIR", "")
     archive_dir = pathlib.Path(archive_dir_env) if archive_dir_env else None
 
+    universe_path_env = os.getenv("DARKPOOL_UNIVERSE_FILE", "")
+    universe_path = pathlib.Path(universe_path_env) if universe_path_env else None
+
     key_id = required("APCA_API_KEY_ID_DATA")
     secret = required("APCA_API_SECRET_KEY_DATA")
 
@@ -576,14 +841,17 @@ async def _run() -> int:
         archive_dir or "disabled",
     )
 
-    await run_loop(
-        key_id=key_id,
-        secret=secret,
-        archive_dir=archive_dir,
-        dry_run=dry_run,
-        heartbeat_path=heartbeat_path,
-        log=log,
-    )
+    async with httpx.AsyncClient(base_url=DATA_BASE_URL, timeout=30.0) as rest_client:
+        await run_loop(
+            key_id=key_id,
+            secret=secret,
+            archive_dir=archive_dir,
+            dry_run=dry_run,
+            heartbeat_path=heartbeat_path,
+            log=log,
+            rest_client=rest_client,
+            universe_path=universe_path,
+        )
     return 1
 
 

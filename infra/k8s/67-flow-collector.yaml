@@ -38,15 +38,15 @@
 #   - Lower FLOW_ARCHIVE_CAP_BYTES / FLOW_ARCHIVE_FREE_FLOOR_BYTES if the dry run shows
 #     archive_bytes_today > 500 MB.
 #
-# CREDENTIALS. Three existing Secrets; no new Secret is needed:
+# CREDENTIALS. Two existing Secrets needed in Step 1; more in Step 2:
 #   - alpaca-credentials-data  : READ-ONLY Alpaca DATA keys (APCA_API_KEY_ID_DATA /
 #                                APCA_API_SECRET_KEY_DATA). The same Secret that
 #                                53-market-data.yaml mounts. NOT trading keys.
+#   Step 2 additions:
 #   - dashboard-secrets        : OPTIONS_CHAT_INGEST_TOKEN. Route-scoped ingest credential
-#                                gating /internal/flow/** on the BFF (Step 2). Wired now so
-#                                Step 2 only flips the env var, not the manifest.
+#                                gating /internal/flow/** on the BFF (Step 2). Add when Step 2
+#                                wires the ingest client.
 #   - discord-alert-credentials: ALERT_DISCORD_WEBHOOK_URL for health alerts (Step 2 wires).
-#                                Mounted but not consumed in Step 1.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -114,11 +114,12 @@ spec:
             # - name: BFF_INTERNAL_URL
             #   value: http://tenant-dashboard-bff:8083
             # Route-scoped ingest credential for POST /internal/flow/ingest (Step 2).
-            - name: OPTIONS_CHAT_INGEST_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: dashboard-secrets
-                  key: OPTIONS_CHAT_INGEST_TOKEN
+            # Nothing in Step 1 reads this — wired in Step 2 with the ingest client.
+            # - name: OPTIONS_CHAT_INGEST_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: dashboard-secrets
+            #       key: OPTIONS_CHAT_INGEST_TOKEN
             # Step 2: uncomment for health alerts.
             # - name: ALERT_DISCORD_WEBHOOK_URL
             #   valueFrom:

@@ -1,6 +1,6 @@
 # Options Flow Archive Format
 
-Each RTH session (09:25–16:20 ET, weekdays) produces two files in the archive directory
+Each RTH session (09:25-16:20 ET, weekdays) produces two files in the archive directory
 (`FLOW_ARCHIVE_DIR`, mounted from PVC `flow-archive` at `/app/archive`):
 
 ```
@@ -63,7 +63,7 @@ Written at session end (window close or pod restart). Fields:
 | `first_t` | string\|null | Timestamp of the first trade (RFC-3339) |
 | `last_t` | string\|null | Timestamp of the last trade (RFC-3339) |
 | `gaps` | array | List of gap records (see below) |
-| `window` | string | `"09:25–16:20 ET"` |
+| `window` | string | `"09:25-16:20"` |
 | `build` | string | Sidecar image tag or `"dev"` |
 
 Each gap record in `gaps`:
@@ -72,7 +72,7 @@ Each gap record in `gaps`:
 |-------|------|-------------|
 | `from` | string | RFC-3339 timestamp when the gap opened (disconnect or cap stop) |
 | `to` | string\|null | RFC-3339 timestamp when the gap closed (reconnect); null if still open at session end |
-| `reason` | string | `"reconnect"`, `"disk_cap"`, or `"disk_free_floor"` |
+| `reason` | string | `"reconnect"`, `"disk_cap"`, `"disk_free_floor"`, or `"disk_write_error"` |
 
 ### Integrity check
 

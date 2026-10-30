@@ -440,9 +440,12 @@ class OrderAggregator:
         self._open: dict[tuple[str, str], Order] = {}
 
     def feed(self, trade: Trade, labels: dict) -> list[Order]:
-        """Add ``trade`` to its order (or open a new one).  Returns orders that were
-        closed because a trade arrived with a DIFFERENT side on the same contract
-        (since that contract+old_side window has no more trades of its side)."""
+        """Add ``trade`` to its order (or open a new one).
+
+        Returns orders closed because their window expired (> ``order_window_ms``
+        since the last trade in the window) before this trade arrived.  Different
+        sides on the same contract are always separate windows.
+        """
         closed: list[Order] = []
         key = (trade.contract, labels["side"])
         existing = self._open.get(key)
@@ -476,18 +479,13 @@ class OrderAggregator:
                 cross=labels["cross"],
                 multi_leg=labels["multi_leg"],
                 dte_val=labels["dte"],
-                conditions_set=list(trade.conditions),
+                conditions_set=[],  # add_trade populates this
                 block_premium_threshold=self._block_premium,
                 block_size_threshold=self._block_size,
                 order_window_ms=self._window_ms,
             )
-            # Initialize accumulators
-            order._prices_x_sizes = trade.price * trade.size
-            order._total_size = trade.size
-            order._total_premium = labels["premium"]
-            order._trade_count = 1
-            order._exchange_set = {trade.exchange}
             self._open[key] = order
+            order.add_trade(trade, labels)  # consistent path for all trades
         else:
             existing.add_trade(trade, labels)
 
@@ -622,22 +620,21 @@ class TapeArchiver:
         self.gaps: list[dict] = []
         self._disk_stopped: bool = False
         self._disk_stop_ts: str | None = None
+        self._disk_stop_reason: str = ""
 
     def _et_date_str(self, ts: datetime) -> str:
         return ts.astimezone(ET).strftime("%Y-%m-%d")
 
-    def _disk_ok(self) -> bool:
-        """Return True if disk constraints are satisfied.
-
-        Uses _bytes_today as an approximation of the archive dir's today contribution;
-        for the volume free-space check, falls back to the parent directory when the
-        archive dir does not yet exist.
+    def _disk_check(self) -> str:
+        """Return ``""`` if disk is OK, else the stop reason (``"disk_cap"`` or
+        ``"disk_free_floor"``).  Fails CLOSED: an OSError on the free-space query
+        is treated as unknown free space → stop archiving.
         """
         try:
             probe_dir = self._dir if self._dir.exists() else self._dir.parent
             free = shutil.disk_usage(probe_dir).free
         except OSError:
-            free = self._free_floor_bytes + 1  # unknown → optimistic
+            free = 0  # unknown → fail closed
         try:
             dir_size = sum(
                 f.stat().st_size
@@ -646,12 +643,21 @@ class TapeArchiver:
             ) if self._dir.exists() else 0
         except OSError:
             dir_size = 0
-        return dir_size < self._cap_bytes and free > self._free_floor_bytes
+        if dir_size >= self._cap_bytes:
+            return "disk_cap"
+        if free <= self._free_floor_bytes:
+            return "disk_free_floor"
+        return ""
+
+    def _disk_ok(self) -> bool:
+        return self._disk_check() == ""
 
     def write_flush(self, rows: list[dict], flush_ts: datetime) -> None:
         """Append one gzip member of NDJSON rows to today's archive file.
 
-        If disk constraints are violated, records a gap and returns without writing.
+        If disk constraints are violated, or an OSError occurs during the write
+        (e.g. ENOSPC), records a gap and returns without writing.  The stream
+        session is never torn down by this method.
         """
         if not rows:
             return
@@ -662,15 +668,15 @@ class TapeArchiver:
             self._path = self._dir / f"{date_str}.trades.ndjson.gz"
             self._bytes_today = self._path.stat().st_size if self._path.exists() else 0
 
-        if not self._disk_ok():
+        stop_reason = self._disk_check()
+        if stop_reason:
             if not self._disk_stopped:
                 self._disk_stopped = True
                 self._disk_stop_ts = _fmt_ts(flush_ts)
+                self._disk_stop_reason = stop_reason
                 self._log.warning(
-                    "flow archiver: disk guard triggered — stopping archive writes "
-                    "(cap=%d bytes or free space below %d bytes)",
-                    self._cap_bytes,
-                    self._free_floor_bytes,
+                    "flow archiver: disk guard triggered (%s) — stopping archive writes",
+                    stop_reason,
                 )
             return
 
@@ -678,8 +684,9 @@ class TapeArchiver:
         if self._disk_stopped:
             self._disk_stopped = False
             gap_from = self._disk_stop_ts or _fmt_ts(flush_ts)
-            self._gaps_append(gap_from, _fmt_ts(flush_ts), "disk_cap")
+            self._gaps_append(gap_from, _fmt_ts(flush_ts), self._disk_stop_reason or "disk_cap")
             self._disk_stop_ts = None
+            self._disk_stop_reason = ""
 
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
@@ -688,9 +695,21 @@ class TapeArchiver:
                 gz.write(line.encode())
         data = buf.getvalue()
 
-        self._dir.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "ab") as fh:
-            fh.write(data)
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with open(self._path, "ab") as fh:
+                fh.write(data)
+        except OSError as exc:
+            if not self._disk_stopped:
+                self._disk_stopped = True
+                self._disk_stop_ts = _fmt_ts(flush_ts)
+                self._disk_stop_reason = "disk_write_error"
+                self._log.warning(
+                    "flow archiver: write error — stopping archive writes "
+                    "(session continues): %s",
+                    exc,
+                )
+            return
 
         self._bytes_today += len(data)
         self._trades_written += len(rows)
@@ -749,7 +768,20 @@ def _sha256_file(path: pathlib.Path) -> str:
 
 
 def trade_to_archive_row(trade: Trade, quote: Quote | None) -> dict:
-    """Produce the archive NDJSON row for a single trade."""
+    """Produce the archive NDJSON row for a single trade.
+
+    Quote fields are stamped only when the quote is at or before the trade
+    and within ``FLOW_QUOTE_MAX_AGE`` (3 s) — the same rule as ``classify``.
+    """
+    usable_quote: Quote | None = (
+        None
+        if (
+            quote is None
+            or quote.ts > trade.ts
+            or trade.ts - quote.ts > FLOW_QUOTE_MAX_AGE
+        )
+        else quote
+    )
     return {
         "t": trade.ts_raw,
         "S": trade.contract,
@@ -757,9 +789,9 @@ def trade_to_archive_row(trade: Trade, quote: Quote | None) -> dict:
         "s": trade.size,
         "x": trade.exchange,
         "c": list(trade.conditions),
-        "bp": quote.bid if quote else None,
-        "ap": quote.ask if quote else None,
-        "bs": quote.bid_size if quote else None,
-        "as": quote.ask_size if quote else None,
-        "qt": quote.ts_raw if quote else None,
+        "bp": usable_quote.bid if usable_quote else None,
+        "ap": usable_quote.ask if usable_quote else None,
+        "bs": usable_quote.bid_size if usable_quote else None,
+        "as": usable_quote.ask_size if usable_quote else None,
+        "qt": usable_quote.ts_raw if usable_quote else None,
     }
