@@ -127,6 +127,13 @@ spec:
       labels:
         app: darkpool-collector
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: collector
           image: ghcr.io/ridopark/oh-my-tradeagent-signal-source-discord:latest
@@ -136,10 +143,11 @@ spec:
           # `... main -m ... darkpool_main` — i.e. a SECOND live trading signal watcher against
           # the real Discord account. This is the highest-consequence line in the file.
           command: ["python", "-m", "ohmytradeagent_sidecar.darkpool_main"]
-          # NO securityContext, deliberately — matching 55-signal-source-discord.yaml and the
-          # mirrors, which run this image with `{}` (its USER is the NAME `pwuser`, which
-          # `runAsNonRoot: true` cannot verify). Harden in its own PR, not here.
-          #
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
           # READ-ONLY Alpaca DATA keys (APCA_API_KEY_ID_DATA / APCA_API_SECRET_KEY_DATA), the
           # same Secret 53-market-data.yaml mounts. Not trading keys.
           envFrom:
@@ -188,6 +196,8 @@ spec:
             - name: universe
               mountPath: /app/universe
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           # Heartbeat present and mtime within 180s. The file is touched per symbol and per cycle
           # (and on every idle sleep outside 04:00-20:00 ET); the margin over lotto-signal's 120s
           # covers a 60s poll plus a slow cycle of many NBBO lookups.
@@ -210,6 +220,8 @@ spec:
               memory: 256Mi
       volumes:
         - name: state
+          emptyDir: {}
+        - name: tmp
           emptyDir: {}
         - name: universe
           configMap:
