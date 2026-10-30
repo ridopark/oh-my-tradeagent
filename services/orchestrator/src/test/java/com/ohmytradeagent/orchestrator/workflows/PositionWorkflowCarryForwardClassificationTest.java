@@ -198,6 +198,7 @@ class PositionWorkflowCarryForwardClassificationTest {
           "VERSION_BUFFERED_OPERATOR_AUDIT",
           "VERSION_CARRIED_PREINIT_DEDUPE",
           "VERSION_PREINIT_STC_DEDUPE",
+          "VERSION_PREINIT_STC_DRAIN_DEDUPE",
           "VERSION_RISK_BREACH_EXEMPT_LONG_DATED");
 
   private static final Path IMPL_SOURCE =

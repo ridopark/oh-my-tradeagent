@@ -18,7 +18,9 @@ Definitions (binding, they must match the BFF — ``DarkpoolIngestBatch`` / the 
   ``min_size``). Kept prints are stamped with the NBBO at or before the print, within 5 s.
 * ``side``: ``buy`` if price >= ask, ``sell`` if price <= bid, ``mid`` strictly between, ``unknown``
   when there is no usable quote — none at or before the print within 5 s, or a one-sided
-  (bid <= 0 or ask <= 0) or crossed (ask < bid) NBBO, which classifies nothing. Never inferred
+  (bid <= 0 or ask <= 0) or crossed (ask < bid) NBBO, which classifies nothing — or when the
+  price falls outside [bid − D, ask + D] where D = max(one spread, 10 bp of mid): prints far
+  outside the NBBO are erroneous/intermarket and are not counted as directional. Never inferred
   from VWAP for a kept print.
 * ``large`` = off-exchange with notional >= ``LARGE_NOTIONAL`` ($200,000) — the SAME number the BFF
   uses for its price-level summary, so ``large_count``/``large_volume`` agree with it.
@@ -133,10 +135,17 @@ def keep(trade: Trade, *, min_notional: float, min_size: int) -> bool:
 
 def side(price: float, quote: Quote | None, print_ts: datetime) -> str:
     """NBBO side of a print; ``unknown`` without a usable quote at or before the print within
-    5 s. One-sided (bid or ask <= 0) and crossed (ask < bid) books classify nothing."""
+    5 s, when the quote is one-sided (bid or ask <= 0) or crossed (ask < bid), or when the
+    price falls outside [bid − D, ask + D] where D = max(one spread, 10 bp of mid) — prints
+    far outside the NBBO are erroneous/intermarket and must not be counted as directional."""
     if quote is None or quote.ts > print_ts or print_ts - quote.ts > QUOTE_MAX_AGE:
         return "unknown"
     if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+        return "unknown"
+    spread = quote.ask - quote.bid
+    mid = (quote.bid + quote.ask) / 2
+    d = max(spread, mid * 0.001)  # max(one spread, 10 bp of mid)
+    if price < quote.bid - d or price > quote.ask + d:
         return "unknown"
     if price >= quote.ask:
         return "buy"

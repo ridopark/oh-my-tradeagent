@@ -52,6 +52,7 @@ SERVICE_CLASS: dict[str, str] = {
     # signal-watcher: safe only while the market is CLOSED
     "signal-source-discord": "signal-watcher",
     "discord-lotto-mirror": "signal-watcher",
+    # flow-collector: a mid-session restart leaves a permanent gap in the OPRA tape archive (#1018)
     "flow-collector": "signal-watcher",
     # trading-path: see is_trading_path_unsafe() below — THE ONE PLACE for that rule
     "orchestrator": "trading-path",

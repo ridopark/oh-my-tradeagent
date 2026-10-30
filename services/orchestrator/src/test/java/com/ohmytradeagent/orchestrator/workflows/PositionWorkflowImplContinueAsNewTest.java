@@ -24,11 +24,15 @@ import com.ohmytradeagent.orchestrator.activities.GetOptionQuoteActivity;
 import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.enums.v1.EventType;
 import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
+import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.lang.reflect.Field;
@@ -75,6 +79,16 @@ class PositionWorkflowImplContinueAsNewTest {
   @BeforeEach
   void setUp() throws Exception {
     originalWatermark = PositionWorkflowImpl.historyLengthWatermark;
+    buildEnv();
+    env.start();
+  }
+
+  /**
+   * Builds (but does NOT start) the {@link TestWorkflowEnvironment}. Separated so the forced
+   * all-copies-pre-init test can rebuild without starting, send all signals before any worker
+   * polls, assert the history precondition, and THEN call {@code env.start()}.
+   */
+  private void buildEnv() {
     env = TestWorkflowEnvironment.newInstance();
     // Production registers these at namespace setup; the carried run re-asserts them via
     // Workflow.upsertTypedSearchAttributes, and an unregistered attribute fails that command.
@@ -104,8 +118,6 @@ class PositionWorkflowImplContinueAsNewTest {
     brokerWorker.registerActivitiesImplementations(exec);
     Worker mdWorker = env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE);
     mdWorker.registerActivitiesImplementations(marketData, optionQuote);
-
-    env.start();
   }
 
   @AfterEach
@@ -1116,14 +1128,130 @@ class PositionWorkflowImplContinueAsNewTest {
     assertThat(auditKinds("ExitDuplicateSuppressed"))
         .filteredOn(e -> "sig-x".equals(e.getSubject().get("signal_id")))
         .hasSize(2);
+
+    // Marker-absence: the new drain-dedupe gate is never read on this path (redeliveries reach the
+    // handler, not the drain as a second pre-init copy), so no preinit-stc-drain-dedupe-v1 marker
+    // appears in the history.
+    WorkflowExecutionHistory histNoMarker = env.getWorkflowClient().fetchHistory(wfId);
+    long drainDedupeMarkersAbsent =
+        histNoMarker.getEvents().stream()
+            .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+            .filter(
+                e ->
+                    e.getMarkerRecordedEventAttributes().getDetailsMap().entrySet().stream()
+                        .anyMatch(
+                            kv ->
+                                "changeId".equals(kv.getKey())
+                                    && kv.getValue().getPayloadsList().stream()
+                                        .anyMatch(
+                                            p ->
+                                                p.getData()
+                                                    .toStringUtf8()
+                                                    .contains("preinit-stc-drain-dedupe-v1"))))
+            .count();
+    assertThat(drainDedupeMarkersAbsent)
+        .as("no preinit-stc-drain-dedupe-v1 marker (gate only read on drain duplicate branch)")
+        .isEqualTo(0L);
   }
 
   /**
-   * Pins the measured SDK ordering the pre-init dedupe relies on: with polling suspended, the
-   * start, the signal bundled into signalWithStart and two more copies all sit in the FIRST
-   * workflow task, yet only the bundled signal is dispatched before run() assigns input. The later
-   * copies reach the handler with input set and are suppressed there. So two copies both buffered
-   * pre-init is not reachable on a fresh run, and the drain needs no suppression of its own.
+   * Issue #1023: all three copies of the same STC share the FIRST workflow task (they all arrive
+   * before any worker polls), so all three land in {@code preInitBuffered}. The drain must place
+   * the exit exactly ONCE and suppress the two duplicates with {@code ExitDuplicateSuppressed}
+   * audits — it cannot rely on the handler to suppress them because the handler's input-null check
+   * already returned and the handler will not be called again for these copies.
+   *
+   * <p>Forced ordering: {@link TestWorkflowEnvironment#newInstance()} starts the in-memory Temporal
+   * service; {@code env.start()} starts the workers. Rebuilding without starting means no worker
+   * polls until the precondition is asserted and {@code env.start()} is called explicitly. The
+   * precondition assertion (3 {@code WorkflowExecutionSignaled}, 0 {@code WorkflowTaskStarted})
+   * verifies the ordering before the test proceeds.
+   *
+   * <p>On unmodified production code this test fails: the drain's {@code preInitBuffered.remove()}
+   * returns {@code true} for every copy, so {@code processOne} is called for both copy 1 AND copy 2
+   * — placing two sell orders under the same intent key.
+   */
+  @Test
+  void freshRun_allCopiesInFirstTask_drainSuppressesDuplicates_placeOnce() throws Exception {
+    // Forced ordering: close the env started by setUp, rebuild without starting.
+    env.close();
+    buildEnv();
+
+    when(exec.placeOrder(any())).thenReturn(submittedResult());
+    String wfId = "pos-fresh-all-preinit";
+    PositionWorkflow stub = newStub(wfId);
+    WorkflowClient client = env.getWorkflowClient();
+
+    // All three copies land before any worker polls.
+    WorkflowStub.fromTyped(stub)
+        .signalWithStart(
+            "partialExit",
+            new Object[] {partialExitRequest("sig-y", wfId, 0.5)},
+            new Object[] {futureInput(6)});
+    stub.partialExit(partialExitRequest("sig-y", wfId, 0.5));
+    stub.partialExit(partialExitRequest("sig-y", wfId, 0.5));
+
+    // History precondition: all three copies buffered before any task starts.
+    WorkflowExecutionHistory preHistory = client.fetchHistory(wfId);
+    long signalCount =
+        preHistory.getEvents().stream()
+            .filter(e -> e.getEventType() == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
+            .count();
+    long taskStartedCount =
+        preHistory.getEvents().stream()
+            .filter(e -> e.getEventType() == EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED)
+            .count();
+    assertThat(signalCount).as("all three copies in history before any task starts").isEqualTo(3L);
+    assertThat(taskStartedCount).as("no task started before env.start()").isEqualTo(0L);
+
+    env.start();
+
+    confirmEntry(stub, 6L);
+    waitForPlaceOrderAtLeast(1);
+    stub.onFill(fill("brk-exit", 3L, new BigDecimal("2.60")));
+    Thread.sleep(1_500);
+
+    assertThat(placeOrderInvocations()).as("three copies, one placement").isEqualTo(1L);
+    ArgumentCaptor<OrderIntent> intent = ArgumentCaptor.forClass(OrderIntent.class);
+    verify(exec, atLeastOnce()).placeOrder(intent.capture());
+    assertThat(intent.getAllValues())
+        .extracting(OrderIntent::getIntentKey)
+        .containsExactly(wfId + ":exit:sig-y");
+    assertThat(auditKinds("ExitDuplicateSuppressed"))
+        .filteredOn(e -> "sig-y".equals(e.getSubject().get("signal_id")))
+        .hasSize(2);
+    assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+
+    // Marker-presence: the drain-dedupe gate IS read on this path (two copies are drain
+    // duplicates), so at least one preinit-stc-drain-dedupe-v1 marker must appear with version 1.
+    WorkflowExecutionHistory postHistory = client.fetchHistory(wfId);
+    long drainDedupeMarkersPresent =
+        postHistory.getEvents().stream()
+            .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+            .filter(
+                e ->
+                    e.getMarkerRecordedEventAttributes().getDetailsMap().entrySet().stream()
+                        .anyMatch(
+                            kv ->
+                                "changeId".equals(kv.getKey())
+                                    && kv.getValue().getPayloadsList().stream()
+                                        .anyMatch(
+                                            p ->
+                                                p.getData()
+                                                    .toStringUtf8()
+                                                    .contains("preinit-stc-drain-dedupe-v1"))))
+            .count();
+    assertThat(drainDedupeMarkersPresent)
+        .as("preinit-stc-drain-dedupe-v1 marker present (gate read on drain duplicate branch)")
+        .isGreaterThanOrEqualTo(1L);
+  }
+
+  /**
+   * The start, the signal bundled into signalWithStart and two more copies all sit in the FIRST
+   * workflow task (polling suspended). On this scheduler timing the later copies may reach the
+   * handler after run() assigns input and be suppressed there, or all three may land pre-init and
+   * be suppressed in the drain — either way the result is one placement, two {@code
+   * ExitDuplicateSuppressed} audits, and remaining 3.
    */
   @Test
   void freshRun_copiesQueuedInFirstTask_onlyBundledOneIsPreInit_placeOnce() throws Exception {
@@ -1151,7 +1279,7 @@ class PositionWorkflowImplContinueAsNewTest {
     assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
     assertThat(auditKinds("ExitDuplicateSuppressed"))
         .filteredOn(e -> "sig-y".equals(e.getSubject().get("signal_id")))
-        .as("both later copies suppressed in the handler, before the entry is confirmed")
+        .as("both later copies suppressed (handler or drain)")
         .hasSize(2);
   }
 

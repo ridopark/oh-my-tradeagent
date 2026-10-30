@@ -852,6 +852,11 @@ public class AlpacaPaperBroker implements OptionsBroker {
                     if (dateEnd != null) {
                       uriBuilder.queryParam("date_end", dateEnd);
                     }
+                    // Alpaca defaults extended_hours=false for intraday timeframes, which cuts the
+                    // series at the 16:00 ET bar and drops after-hours P&L from the /live range.
+                    if (timeframe.endsWith("Min") || timeframe.endsWith("H")) {
+                      uriBuilder.queryParam("extended_hours", "true");
+                    }
                     return uriBuilder.build();
                   })
               .retrieve()
