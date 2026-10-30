@@ -1,8 +1,13 @@
 name: Claude review
 
-# Runs Claude as an advisory code reviewer on every PR. Posts a sticky
-# review comment; the job is treated as advisory — plain CI in
-# `.github/workflows/ci.yml` is the merge gate.
+# Runs Claude as a code reviewer on every PR and makes its verdict MACHINE-READABLE:
+#   - the review returns its verdict through `--json-schema` (structured_output), so it is a
+#     validated enum, not a word to grep out of markdown;
+#   - the job's conclusion IS the verdict: green only on READY (or a docs-only skip), red on
+#     NEEDS_FIXES / BLOCKED / no verdict;
+#   - a commit status `claude/verdict` on the head SHA says which, e.g. "NEEDS_FIXES: <summary>".
+# Readers (pr-review-loop's probe, a merge rule) read that status, never the comment text. The
+# sticky comment stays as the human-readable review.
 #
 # Auth: uses CLAUDE_CODE_OAUTH_TOKEN (tied to a Claude Max subscription).
 # Generate with `claude setup-token` on a workstation logged into the Max
@@ -12,19 +17,18 @@ name: Claude review
 # The job gates on head.repo == base.repo so external contributors see a
 # clean skip instead of a hard failure at the action step.
 
+# No paths-ignore: a filtered PR gets NO check at all, which a required check (or any reader)
+# cannot tell from "still running". Docs-only PRs are detected in the job instead and get a green
+# `claude/verdict` = "SKIPPED: docs-only" without spending a review.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/README*"
-      - ".gitignore"
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
+  statuses: write  # the `claude/verdict` commit status
   id-token: write  # required by anthropics/claude-code-action@v1 OIDC flow
 
 concurrency:
@@ -42,8 +46,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Docs-only diffs (the old paths-ignore list) and diffs that edit .github/workflows/** (which
+      # GitHub blocks from running their own review: the action posts nothing) skip the review.
+      - name: Scope
+        id: scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          files=$(gh pr view "$PR" --json files --jq '.files[].path')
+          kind=review
+          if [ -z "$(printf '%s\n' "$files" | grep -vE '^docs/|\.md$|(^|/)README[^/]*$|^\.gitignore$' || true)" ]; then
+            kind=docs
+          elif printf '%s\n' "$files" | grep -q '^\.github/workflows/'; then
+            kind=workflow
+          fi
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "scope: $kind"
+
       - name: Code review
         id: review
+        if: steps.scope.outputs.kind == 'review'
         uses: anthropics/claude-code-action@v1
         with:
           prompt: |
@@ -75,6 +99,15 @@ jobs:
                  * Test coverage
                - Verdict: READY | NEEDS FIXES | BLOCKED
 
+            VERDICT CONTRACT (this is what gates the PR, so it must be exact):
+            - Your FINAL answer is the structured output required by the JSON schema: `verdict` is
+              exactly one of READY, NEEDS_FIXES, BLOCKED; `summary` is one sentence naming the worst
+              finding (or "no blocking findings"); `findings` lists each finding's severity + title.
+            - READY = nothing at blocker/major severity. NEEDS_FIXES = at least one blocker or major
+              the author can fix. BLOCKED = you could not review (diff unreadable, out of budget).
+            - The comment's last line must repeat it verbatim: `Verdict: <READY|NEEDS_FIXES|BLOCKED>`.
+              If the comment and the structured output ever disagree, the structured output wins.
+
             Post the review by UPDATING your existing PR tracking comment (track_progress
             provides that comment plus the update tool). Do NOT create additional comments and
             do NOT write files. Your updated comment IS the review the reader sees, so it must
@@ -84,7 +117,10 @@ jobs:
             fought track_progress (which requires the model to update its comment), so the run
             ended without posting — hence this explicit instruction.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--allowed-tools 'Bash Read Grep'"
+          claude_args: >-
+            --allowed-tools 'Bash Read Grep'
+            --json-schema '{"type":"object","additionalProperties":false,"required":["verdict","summary","findings"],"properties":{"verdict":{"type":"string","enum":["READY","NEEDS_FIXES","BLOCKED"]},"summary":{"type":"string"},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","title"],"properties":{"severity":{"type":"string","enum":["blocker","major","minor","nit"]},"title":{"type":"string"}}}}}}'
+
           # This job triggers on `pull_request` with a `prompt:`, which claude-code-action
           # auto-detects as "agent" mode. In agent mode use_sticky_comment alone does NOT post a
           # PR comment (it only updates an existing tracking comment, which agent mode never creates)
@@ -96,62 +132,64 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # A green "Claude code review" check used to mean only "the action did not crash". On PR #755
-      # the run ended after 6 of its 7 steps — the last one being "post final review" — so no
-      # verdict was ever written, and the check still reported SUCCESS. That is worse than having no
-      # review job at all: it is a review-shaped signal that a reviewer can merge on. (It is the
-      # THIRD time this job has silently produced no verdict; see the two prompt-level fixes
-      # documented above.) This step makes "no verdict" a red check.
+      # THE GATE. A green check used to mean only "the action did not crash" (#755: no verdict, still
+      # SUCCESS), and then "a verdict word exists somewhere in the comment" — still green on NEEDS
+      # FIXES, and grep-on-markdown broke every time the bot reformatted. Now the verdict comes from
+      # the schema-validated structured_output of THIS run (so a stale sticky comment cannot satisfy
+      # it), the job's conclusion is the verdict, and `claude/verdict` records which.
       #
-      # It matches on THIS run's id, which the action embeds in its comment as
-      # ".../actions/runs/<id>" — so a sticky comment still holding a PREVIOUS push's verdict can
-      # never satisfy it. Verdict detection is deliberately format-loose (the word "Verdict" plus
-      # one of the three tokens, anywhere in the body) because past attempts to pin the bot's exact
-      # markdown have broken on reformatting.
+      # Tested by scripts/tests/test_claude_review_gate.py, which extracts this step and runs it
+      # against a fake `gh`. Edit both together.
       #
-      # NOTE for anyone editing this file: for same-repo `pull_request` runs GitHub uses the
-      # workflow from the PR HEAD, not the base branch — so a change here DOES take effect on its
-      # own PR and you get one free live test of it. (`pull_request_target` is the one that runs
-      # the base copy.) That is how the workflow-file exemption below was found.
-      - name: Verify a verdict was actually posted
+      # NOTE: for same-repo `pull_request` runs GitHub uses the workflow from the PR HEAD, so an edit
+      # here runs on its own PR — but that PR edits .github/workflows/**, so the review itself is
+      # skipped there (kind=workflow). The first real exercise is the NEXT ordinary PR.
+      - name: Verdict gate
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          KIND: ${{ steps.scope.outputs.kind }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          STRUCTURED: ${{ steps.review.outputs.structured_output }}
         run: |
           set -uo pipefail
-          # `| tail -1` here was a bug, not a safeguard: jq emits the comment body across many
-          # LINES, so tail took the body's last LINE rather than the last matching COMMENT. Every
-          # grep below then ran against that single line, and any review whose verdict is followed
-          # by a closing sentence failed with "carries no Verdict section" while displaying a
-          # verdict. Observed on #761: 4441 chars / 40 lines collapsed to a 318-char paragraph.
-          # Select the last matching comment IN jq instead, keeping the body whole.
-          body=$(gh pr view "$PR" --json comments \
-            --jq "[.comments[] | select(.body | contains(\"actions/runs/$RUN_ID\")) | .body] | last // \"\"")
-
-          # Known GitHub guardrail: a PR that edits `.github/workflows/**` cannot run its own
-          # Claude review — the action posts nothing at all. That is not a stalled review, it is
-          # structurally impossible, so failing here would leave every future CI-fix PR permanently
-          # red with no way to clear it. Warn loudly and pass; plain CI is the gate for those PRs.
-          # (Discovered by this very step on its own PR, #760.)
-          if [ -z "$body" ] && gh pr view "$PR" --json files --jq '.files[].path' \
-               | grep -q '^\.github/workflows/'; then
-            echo "::warning::No Claude review for run $RUN_ID: this PR edits .github/workflows/**, which GitHub blocks from running its own review. NOT reviewed by the bot — plain CI is the gate. Review this one by hand."
-            exit 0
-          fi
-          if [ -z "$body" ]; then
-            echo "::error::Claude review posted NO comment for run $RUN_ID. The review did not happen — do not treat this PR as reviewed."
-            exit 1
-          fi
-          if ! printf '%s' "$body" | grep -qi 'verdict'; then
-            echo "::error::Claude review comment for run $RUN_ID carries no Verdict section — the run ended before posting one (unchecked final step). The PR is NOT reviewed."
-            echo "--- comment tail ---"; printf '%s\n' "$body" | tail -25
-            exit 1
-          fi
-          if ! printf '%s' "$body" | grep -qE 'READY|NEEDS FIXES|BLOCKED'; then
-            echo "::error::Claude review comment for run $RUN_ID names no verdict token (READY | NEEDS FIXES | BLOCKED). The PR is NOT reviewed."
-            echo "--- comment tail ---"; printf '%s\n' "$body" | tail -25
-            exit 1
-          fi
-          echo "Verdict present for run $RUN_ID."
+          status() {  # state, description (GitHub caps it at 140 chars)
+            gh api -X POST "repos/$REPO/statuses/$SHA" -f context=claude/verdict -f state="$1" \
+              -f description="${2:0:140}" -f target_url="$RUN_URL" >/dev/null \
+              || echo "::warning::could not set the claude/verdict status"
+          }
+          case "$KIND" in
+            docs)
+              status success "SKIPPED: docs-only diff, not reviewed"
+              echo "Docs-only diff: review skipped."; exit 0 ;;
+            workflow)
+              # Not a failure of the PR: GitHub does not let a workflow-editing PR run this review.
+              # The job stays green so CI-fix PRs are not permanently red, but the STATUS says it was
+              # not reviewed, so nothing that reads claude/verdict can treat it as approved.
+              status failure "NOT_REVIEWED: edits .github/workflows, review by hand"
+              echo "::warning::This PR edits .github/workflows/** — GitHub blocks its own Claude review. NOT reviewed by the bot; review by hand."
+              exit 0 ;;
+            review) ;;
+            *)
+              status error "NO_VERDICT: scope step did not run"
+              echo "::error::scope step produced no kind ('$KIND')"; exit 1 ;;
+          esac
+          verdict=$(printf '%s' "$STRUCTURED" | jq -r '.verdict // empty' 2>/dev/null || true)
+          summary=$(printf '%s' "$STRUCTURED" | jq -r '.summary // empty' 2>/dev/null || true)
+          case "$verdict" in
+            READY)
+              status success "READY: $summary"
+              echo "Verdict READY: $summary" ;;
+            NEEDS_FIXES|BLOCKED)
+              status failure "$verdict: $summary"
+              echo "::error::Claude review verdict $verdict: $summary"
+              printf '%s' "$STRUCTURED" | jq -r '.findings[]? | "- [\(.severity)] \(.title)"' || true
+              exit 1 ;;
+            *)
+              status error "NO_VERDICT: review step $REVIEW_OUTCOME, no structured verdict"
+              echo "::error::The review produced no structured verdict (review step: $REVIEW_OUTCOME). The PR is NOT reviewed."
+              exit 1 ;;
+          esac

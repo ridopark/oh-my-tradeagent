@@ -36,7 +36,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              | grep -qE '^(infra/k8s/|tenants/|scripts/tests/|\.github/workflows/(ci|deploy|k8s-drift)\.yml$)'; then
+              | grep -qE '^(infra/k8s/|tenants/|scripts/tests/|\.github/workflows/(ci|deploy|k8s-drift|claude-pr)\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -153,6 +153,15 @@ jobs:
         run: |
           python3 -m pip install --quiet pyyaml
           python3 scripts/tests/test_deploy_matrix_routing.py
+
+      - name: claude-pr.yml verdict gate
+        if: steps.changed.outputs.run == 'true'
+        # The review job's Scope + Verdict gate decide whether "Claude code review" is green and
+        # what the claude/verdict status says; everything that auto-merges reads that status. The
+        # suite extracts both scripts from claude-pr.yml and runs them against a fake gh.
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/tests/test_claude_review_gate.py
 
   java:
     # Per-module matrix: each Maven module verifies on its own runner, in parallel.
