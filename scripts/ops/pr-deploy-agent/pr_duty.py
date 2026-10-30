@@ -101,12 +101,13 @@ def _list_prs(repo: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _read_verdict_status(repo: str, sha: str) -> tuple[str, str]:
+def _read_verdict_status(repo: str, sha: str) -> tuple[str, str, str]:
     """Read the claude/verdict commit status for a SHA.
 
-    Returns (token, full_description).
+    Returns (token, full_description, created_at).
     token is one of: READY NEEDS_FIXES BLOCKED SKIPPED NOT_REVIEWED NO_VERDICT PENDING.
     PENDING means no claude/verdict status was found.
+    created_at is the ISO-8601 timestamp of the status entry, or "" if absent.
     """
     raw = _gh("api", f"repos/{repo}/commits/{sha}/status")
     data = json.loads(raw)
@@ -114,8 +115,9 @@ def _read_verdict_status(repo: str, sha: str) -> tuple[str, str]:
         if s.get("context") == "claude/verdict":
             desc = s.get("description") or ""
             token = desc.split(":")[0].strip().upper() if ":" in desc else desc.strip().upper()
-            return token, desc
-    return "PENDING", ""
+            created_at = s.get("created_at") or ""
+            return token, desc, created_at
+    return "PENDING", "", ""
 
 
 def _classify_checks(rollup: list[dict]) -> tuple[str, list[dict]]:
@@ -327,6 +329,374 @@ def _merge_pr(repo: str, pr_number: int, title: str, body: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# NEEDS_FIXES loop helpers (Step 4)
+# ---------------------------------------------------------------------------
+
+# JSON schema for Fable's verify output.
+_VERIFY_SCHEMA = json.dumps({
+    "type": "object",
+    "required": ["confirmed", "wrong", "stale", "out_of_scope"],
+    "properties": {
+        "confirmed": {"type": "array", "items": {"type": "string"}},
+        "wrong": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["title", "evidence"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
+        "stale": {"type": "array", "items": {"type": "string"}},
+        "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    },
+})
+
+
+def _get_findings_comment(repo: str, pr_number: int, verdict_created_at: str) -> str | None:
+    """Return the body of the latest claude[bot] comment on the PR.
+
+    Only used if the comment's updated_at is >= verdict_created_at.
+    """
+    try:
+        raw = _gh("api", f"repos/{repo}/issues/{pr_number}/comments")
+        comments = json.loads(raw)
+        bot_comments = [
+            c for c in (comments if isinstance(comments, list) else [])
+            if "[bot]" in ((c.get("user") or {}).get("login") or "")
+            or (c.get("user") or {}).get("login") in ("claude[bot]", "claude-bot")
+        ]
+        if not bot_comments:
+            return None
+        bot_comments.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+        latest = bot_comments[0]
+        if verdict_created_at and (latest.get("updated_at") or "") < verdict_created_at:
+            return None
+        return latest.get("body") or None
+    except (RuntimeError, json.JSONDecodeError):
+        return None
+
+
+def _setup_worktree(
+    worktree_path: Path,
+    head_ref: str,
+    repo_root: Path,
+) -> bool:
+    """Fetch the PR branch and create a git worktree.
+
+    Returns True on success, False on failure.
+    Removes any stale worktree at the same path before creating a new one.
+    """
+    # Remove stale worktree if present.
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=str(repo_root), capture_output=True,
+        )
+
+    # Fetch the branch.
+    r = subprocess.run(
+        ["git", "fetch", "origin", head_ref],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        return False
+
+    # Create worktree.
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), f"origin/{head_ref}"],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=30,
+    )
+    return r.returncode == 0
+
+
+def _remove_worktree(worktree_path: Path, repo_root: Path) -> None:
+    """Remove a git worktree, ignoring errors."""
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        cwd=str(repo_root), capture_output=True,
+    )
+
+
+def _worktree_head_sha(worktree_path: Path) -> str:
+    """Return the current HEAD SHA of the worktree."""
+    r = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(worktree_path), capture_output=True, text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _worktree_is_clean(worktree_path: Path) -> bool:
+    """Return True if the worktree has no uncommitted changes."""
+    r = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(worktree_path), capture_output=True, text=True,
+    )
+    return r.returncode == 0 and r.stdout.strip() == ""
+
+
+def _run_fable_verify(
+    worktree_path: Path,
+    findings_text: str,
+    timeout: int = 120,
+) -> dict | None:
+    """Run Fable 5.1 in the worktree to verify findings.
+
+    Returns {confirmed, wrong, stale, out_of_scope} or None on failure.
+    """
+    prompt_file = Path(__file__).parent / "prompts" / "pr-verify.md"
+    system_text = prompt_file.read_text() if prompt_file.exists() else ""
+    full_prompt = (
+        f"{system_text}\n\n---\n\n## Findings to classify\n\n{findings_text}"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "claude", "-p",
+                "--model", "claude-fable-5-1",
+                "--output-format", "json",
+                "--json-schema", _VERIFY_SCHEMA,
+                "--max-turns", "5",
+                "--allowedTools",
+                "Read,Grep,Glob,"
+                "Bash(git log:*),Bash(git diff:*),Bash(mvn:*),Bash(uv run pytest:*)",
+                full_prompt,
+            ],
+            cwd=str(worktree_path),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    if r.returncode != 0:
+        return None
+
+    try:
+        data = json.loads(r.stdout)
+        # Handle wrapped output from real claude -p
+        if "confirmed" in data:
+            return data
+        if "structured_output" in data and isinstance(data.get("structured_output"), dict):
+            return data["structured_output"]
+        if "result" in data:
+            raw = data["result"]
+            inner = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(inner, dict) and "confirmed" in inner:
+                return inner
+        return None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _run_sonnet_fix(
+    worktree_path: Path,
+    confirmed_findings: list[str],
+    timeout: int = 300,
+) -> bool:
+    """Run Sonnet 4.6 in the worktree to fix confirmed findings.
+
+    Returns True if at least one new commit was made, False otherwise.
+    """
+    prompt_file = Path(__file__).parent / "prompts" / "pr-fix.md"
+    system_text = prompt_file.read_text() if prompt_file.exists() else ""
+    findings_block = "\n".join(f"- {f}" for f in confirmed_findings)
+    full_prompt = f"{system_text}\n\n---\n\n{findings_block}"
+
+    head_before = _worktree_head_sha(worktree_path)
+
+    try:
+        subprocess.run(
+            [
+                "claude", "-p",
+                "--model", "claude-sonnet-4-6",
+                "--permission-mode", "acceptEdits",
+                "--max-turns", "20",
+                "--allowedTools",
+                "Read,Edit,Write,Glob,Grep,"
+                "Bash(mvn:*),Bash(uv run:*),"
+                "Bash(git add:*),Bash(git commit:*)",
+                full_prompt,
+            ],
+            cwd=str(worktree_path),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+    head_after = _worktree_head_sha(worktree_path)
+    return bool(head_before and head_after and head_before != head_after)
+
+
+def _post_rejected_findings_comment(
+    repo: str,
+    pr_number: int,
+    wrong: list[dict],
+    out_of_scope: list[str],
+) -> None:
+    """Post a PR comment listing findings that were not fixed (wrong or out-of-scope)."""
+    lines: list[str] = ["### pr-deploy-agent: findings not fixed\n"]
+    if wrong:
+        lines.append("**Wrong** (finding is incorrect):")
+        for w in wrong:
+            lines.append(f"- **{w.get('title', '?')}**: {w.get('evidence', '')}")
+    if out_of_scope:
+        lines.append("\n**Out of scope** (valid but not in this PR's scope):")
+        for title in out_of_scope:
+            lines.append(f"- {title}")
+    body = "\n".join(lines)
+    try:
+        _gh(
+            "pr", "comment", str(pr_number),
+            "--body", body,
+            "--repo", repo,
+        )
+    except RuntimeError:
+        pass  # best-effort
+
+
+def _run_needs_fixes_round(
+    pr: dict,
+    verdict_created_at: str,
+    repo: str,
+    state: dict,
+    state_dir: Path,
+    repo_root: Path,
+    pr_mode: str,
+) -> "PRDecision":
+    """Run one fix round for a NEEDS_FIXES PR.
+
+    Returns a PRDecision with action one of:
+      "fixed"      — push succeeded, round incremented
+      "would-fix"  — recommend mode, no action taken
+      "skip"       — round skipped for any reason (no commit, push failed, cap, etc.)
+    """
+    pr_number: int = pr["number"]
+    title: str = pr.get("title") or ""
+    head_sha: str = pr.get("headRefOid") or ""
+    head_ref: str = pr.get("headRefName") or ""
+
+    rounds = _sf.get_rounds(state, pr_number)
+
+    # Cap: 3 rounds exhausted, apply needs-input label and ping once.
+    if rounds >= 3:
+        key = f"pr:{pr_number}:needs-input"
+        if not _sf.is_notified(state, key):
+            if pr_mode == "act":
+                try:
+                    _gh(
+                        "pr", "edit", str(pr_number),
+                        "--add-label", "needs-input",
+                        "--repo", repo,
+                    )
+                except RuntimeError:
+                    pass
+            _notify.notify_once(
+                state, key, repo_root,
+                f"[pr-deploy-agent] PR #{pr_number} needs human input",
+                f"PR #{pr_number} \"{title}\" reached 3 fix rounds without READY → needs-input",
+                "red",
+            )
+        return PRDecision(
+            pr_number, title, head_sha, "NEEDS_FIXES", "skip",
+            "needs-input (3 rounds exhausted)",
+        )
+
+    # Recommend mode: report what we would do but take no action.
+    if pr_mode != "act":
+        return PRDecision(
+            pr_number, title, head_sha, "NEEDS_FIXES", "would-fix",
+            f"round {rounds + 1}/3 pending (recommend mode)",
+        )
+
+    # Act mode: run a full fix round.
+    worktree_path = state_dir / "worktrees" / f"pr-{pr_number}"
+
+    # 1. Set up worktree.
+    if not _setup_worktree(worktree_path, head_ref, repo_root):
+        _notify.post(
+            repo_root,
+            f"[pr-deploy-agent] PR #{pr_number} worktree setup failed",
+            f"PR #{pr_number} \"{title}\": could not fetch/create worktree for {head_ref}",
+            "red",
+        )
+        return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "worktree setup failed")
+
+    try:
+        # 2. Get findings comment.
+        findings_text = _get_findings_comment(repo, pr_number, verdict_created_at)
+        if not findings_text:
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "no findings comment")
+
+        # 3. Run Fable verify.
+        verify_result = _run_fable_verify(worktree_path, findings_text)
+        if verify_result is None:
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "verify failed")
+
+        confirmed = verify_result.get("confirmed") or []
+        wrong = verify_result.get("wrong") or []
+        out_of_scope = verify_result.get("out_of_scope") or []
+
+        if not confirmed:
+            # Nothing to fix — post rejection comment and stop.
+            _post_rejected_findings_comment(repo, pr_number, wrong, out_of_scope)
+            return PRDecision(
+                pr_number, title, head_sha, "NEEDS_FIXES", "skip",
+                "no confirmed findings",
+            )
+
+        # 4. Run Sonnet fix.
+        committed = _run_sonnet_fix(worktree_path, confirmed)
+        if not committed:
+            _notify.post(
+                repo_root,
+                f"[pr-deploy-agent] PR #{pr_number} fix produced nothing",
+                f"PR #{pr_number} \"{title}\": Sonnet made no commit on round {rounds + 1}",
+                "yellow",
+            )
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "fix produced nothing")
+
+        # 5. Refuse if worktree is dirty after Sonnet.
+        if not _worktree_is_clean(worktree_path):
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "worktree dirty after fix")
+
+        # 6. Push to the PR branch (never --force).
+        push_result = subprocess.run(
+            ["git", "push", "origin", f"HEAD:{head_ref}"],
+            cwd=str(worktree_path),
+            capture_output=True, text=True, timeout=60,
+        )
+        if push_result.returncode != 0:
+            err = push_result.stderr.strip()
+            reason = "remote head moved" if ("non-fast-forward" in err or "rejected" in err) else "push failed"
+            _notify.post(
+                repo_root,
+                f"[pr-deploy-agent] PR #{pr_number} push failed",
+                f"PR #{pr_number} \"{title}\": {reason} — {err[:120]}",
+                "red",
+            )
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", reason)
+
+        # 7. Post rejected-findings comment.
+        if wrong or out_of_scope:
+            _post_rejected_findings_comment(repo, pr_number, wrong, out_of_scope)
+
+        # 8. Increment round counter.
+        _sf.set_rounds(state, pr_number, rounds + 1)
+
+        return PRDecision(
+            pr_number, title, head_sha, "NEEDS_FIXES", "fixed",
+            f"round {rounds + 1}/3 pushed",
+        )
+
+    finally:
+        _remove_worktree(worktree_path, repo_root)
+
+
+# ---------------------------------------------------------------------------
 # Operator steps
 # ---------------------------------------------------------------------------
 
@@ -424,12 +794,16 @@ def plan_all(
     state: dict,
     repo_root: Path,
     pr_mode: str = "recommend",
+    state_dir: Path | None = None,
 ) -> list[PRDecision]:
     """Evaluate all open PRs and return decisions.
 
-    In act mode, merges READY/SKIPPED PRs, reruns unrelated checks, pings on issues.
+    In act mode, merges READY/SKIPPED PRs, reruns unrelated checks, pings on issues,
+    and runs the NEEDS_FIXES fix loop.
     Side-effect: posts Discord messages and updates state (caller must persist).
     """
+    if state_dir is None:
+        state_dir = _DEFAULT_STATE_DIR
     # Post operator steps for previously merged PRs.
     _post_operator_steps(repo, state, repo_root, pr_mode)
 
@@ -476,7 +850,7 @@ def plan_all(
 
         # Read the claude/verdict commit status.
         try:
-            token, description = _read_verdict_status(repo, head_sha)
+            token, description, verdict_created_at = _read_verdict_status(repo, head_sha)
         except (RuntimeError, json.JSONDecodeError, KeyError):
             decisions.append(PRDecision(
                 pr_number, title, head_sha, "PENDING", "pending", "verdict read failed",
@@ -504,14 +878,18 @@ def plan_all(
             ))
             continue
 
-        # NEEDS_FIXES — handled by Step 4; skip here.
+        # NEEDS_FIXES — run one fix round per tick (Step 4).
         if token == "NEEDS_FIXES":
-            decisions.append(PRDecision(
-                pr_number, title, head_sha, token, "skip", "needs fixes",
-            ))
+            decisions.append(
+                _run_needs_fixes_round(
+                    pr, verdict_created_at, repo, state, state_dir, repo_root, pr_mode,
+                )
+            )
             continue
 
-        # READY or SKIPPED — evaluate checks and mergeability.
+        # READY or SKIPPED — reset round counter (previous fix rounds are done),
+        # then evaluate checks and mergeability.
+        _sf.reset_rounds(state, pr_number)
         check_state, failing_checks = _classify_checks(rollup)
 
         if check_state == "pending":
@@ -641,7 +1019,7 @@ def main() -> None:
     state = _sf.load(state_path)
     _sf.prune(state)
 
-    decisions = plan_all(repo, state, repo_root, pr_mode=pr_mode)
+    decisions = plan_all(repo, state, repo_root, pr_mode=pr_mode, state_dir=state_dir)
     _sf.save(state_path, state)
 
     if args.json:

@@ -289,7 +289,7 @@ class TestReadVerdictStatus(unittest.TestCase):
         original_gh = pd._gh
         try:
             pd._gh = lambda *a, **kw: json.dumps(statuses)
-            token, desc = pd._read_verdict_status("owner/repo", "abc123")
+            token, desc, created_at = pd._read_verdict_status("owner/repo", "abc123")
             self.assertEqual(token, "READY")
             self.assertIn("READY", desc)
         finally:
@@ -300,7 +300,7 @@ class TestReadVerdictStatus(unittest.TestCase):
         original_gh = pd._gh
         try:
             pd._gh = lambda *a, **kw: json.dumps(statuses)
-            token, desc = pd._read_verdict_status("owner/repo", "abc123")
+            token, desc, created_at = pd._read_verdict_status("owner/repo", "abc123")
             self.assertEqual(token, "PENDING")
             self.assertEqual(desc, "")
         finally:
@@ -528,6 +528,7 @@ class TestPlanJsonSubprocess(unittest.TestCase):
             self.assertEqual(result["prs"][0]["action"], "pending")
 
     def test_needs_fixes_token(self):
+        """NEEDS_FIXES in recommend mode → would-fix (not skip; Step 4 behavior)."""
         pr = _make_pr(head_sha="sha_nf")
         tmp_bin, tmp_state = self._setup(
             [pr], {"commits/sha_nf/status": _make_verdict_status("NEEDS_FIXES", "fix it")}
@@ -535,7 +536,7 @@ class TestPlanJsonSubprocess(unittest.TestCase):
         with tmp_bin, tmp_state:
             result = _run_pr_duty(pathlib.Path(tmp_bin.name), pathlib.Path(tmp_state.name))
             self.assertEqual(result["prs"][0]["verdict_token"], "NEEDS_FIXES")
-            self.assertEqual(result["prs"][0]["action"], "skip")
+            self.assertEqual(result["prs"][0]["action"], "would-fix")
 
     def test_not_reviewed_verdict_pings_once(self):
         pr = _make_pr(head_sha="sha_nr")

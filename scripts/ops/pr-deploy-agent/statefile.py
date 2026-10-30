@@ -82,3 +82,22 @@ def prune(state: dict, days: int = 14) -> None:
             to_delete.append(key)
     for key in to_delete:
         del notified[key]
+
+
+# ---------------------------------------------------------------------------
+# Round counter for the NEEDS_FIXES fix loop
+# ---------------------------------------------------------------------------
+
+def get_rounds(state: dict, pr_number: int) -> int:
+    """Return the number of completed fix rounds for this PR (0 if not tracked)."""
+    return state.get("pr_rounds", {}).get(str(pr_number), 0)
+
+
+def set_rounds(state: dict, pr_number: int, count: int) -> None:
+    """Set the fix-round count for this PR (mutates state in-place)."""
+    state.setdefault("pr_rounds", {})[str(pr_number)] = count
+
+
+def reset_rounds(state: dict, pr_number: int) -> None:
+    """Remove the fix-round entry for this PR (resets to 0 on next get_rounds)."""
+    state.get("pr_rounds", {}).pop(str(pr_number), None)
