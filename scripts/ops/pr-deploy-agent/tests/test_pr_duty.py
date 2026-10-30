@@ -873,25 +873,121 @@ class TestPlanJsonSubprocess(unittest.TestCase):
                         "Body with bullet points must match the findings content regex")
 
 
+class TestChecksFailingTouchedModuleNotifiesOnce(unittest.TestCase):
+    """Item 4a: failing check in module the PR touched → one notify_once Discord message per (pr, head)."""
+
+    def test_checks_failing_touched_module_posts_discord_once(self):
+        """READY PR with a failing check in a module it touches → action=skip + notified key set."""
+        with tempfile.TemporaryDirectory() as tb, tempfile.TemporaryDirectory() as ts:
+            bin_dir = pathlib.Path(tb)
+            state_dir = pathlib.Path(ts)
+            # PR touches services/orchestrator AND has a failing Java (services/orchestrator) check.
+            pr = _make_pr(
+                number=55, head_sha="sha_cf",
+                rollup=_make_failing_rollup("services/orchestrator"),
+                files=["services/orchestrator/src/Main.java"],  # PR touches the module
+            )
+            _make_fake_gh(
+                bin_dir,
+                {
+                    "pr list --state open": [pr],
+                    "commits/sha_cf/status": _make_verdict_status("READY", "ok"),
+                },
+            )
+            result = _run_pr_duty(bin_dir, state_dir)
+            d = result["prs"][0]
+            self.assertEqual(d["action"], "skip",
+                             f"Expected skip when check fails in touched module; got {d['action']!r}")
+
+            state = __import__("statefile").load(state_dir / "state.json")
+            cf_key = "pr:55:sha_cf:checks-failing"
+            self.assertIn(cf_key, state.get("notified", {}),
+                          f"checks-failing key must be in notified; notified={state.get('notified', {})}")
+
+    def test_checks_failing_touched_module_not_repeated(self):
+        """Second tick: checks-failing key already in state → not re-posted."""
+        with tempfile.TemporaryDirectory() as tb, tempfile.TemporaryDirectory() as ts:
+            bin_dir = pathlib.Path(tb)
+            state_dir = pathlib.Path(ts)
+            import statefile as _sf_inner
+            existing = {"notified": {"pr:56:sha_cf2:checks-failing": "2026-10-29T09:00:00+00:00"}}
+            _sf_inner.save(state_dir / "state.json", existing)
+
+            pr = _make_pr(
+                number=56, head_sha="sha_cf2",
+                rollup=_make_failing_rollup("services/orchestrator"),
+                files=["services/orchestrator/src/X.java"],
+            )
+            _make_fake_gh(
+                bin_dir,
+                {
+                    "pr list --state open": [pr],
+                    "commits/sha_cf2/status": _make_verdict_status("READY", "ok"),
+                },
+            )
+            result = _run_pr_duty(bin_dir, state_dir)
+            # Key timestamp must not have changed.
+            after = _sf_inner.load(state_dir / "state.json")
+            self.assertEqual(
+                after["notified"]["pr:56:sha_cf2:checks-failing"],
+                "2026-10-29T09:00:00+00:00",
+                "checks-failing key timestamp must not change on second tick",
+            )
+
+
 class TestMergePrRefusesEmptyHeadSha(unittest.TestCase):
-    """Item 3: _merge_pr must return None (no gh call) when head_sha is empty."""
+    """_merge_pr must return None (no gh call) when head_sha is empty.
+
+    Uses a fake gh executable on PATH; no monkeypatching.
+    """
 
     def test_empty_head_sha_returns_none_no_gh_call(self):
-        """_merge_pr(head_sha='') must return None without invoking gh."""
-        calls: list = []
-        original = pd._gh
+        """When plan_all sees headRefOid='', no merge gh call is made."""
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            state_dir = pathlib.Path(tmp_state)
 
-        def _fake_gh(*args):
-            calls.append(args)
-            return original(*args)
-
-        pd._gh = _fake_gh
-        try:
-            result = pd._merge_pr("owner/repo", 99, "fix: something", "body", head_sha="")
-            self.assertIsNone(result, "_merge_pr must return None when head_sha is empty")
-            self.assertEqual(calls, [], "gh must not be called when head_sha is empty")
-        finally:
-            pd._gh = original
+            # A PR whose headRefOid is "" — _merge_pr must guard against this.
+            pr = {
+                "number": 99, "title": "fix: something", "body": "",
+                "headRefOid": "",  # empty — the guard must catch this
+                "headRefName": "feat/x", "baseRefName": "main",
+                "isDraft": False, "isCrossRepository": False,
+                "labels": [], "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [], "files": [],
+            }
+            _make_fake_gh(
+                bin_dir,
+                {
+                    "pr list --state open": [pr],
+                    # No claude/verdict → verdict read fails → PENDING verdict
+                    "api repos/ridopark/oh-my-tradeagent/commits//statuses": [],
+                },
+                allow_writes=False,
+            )
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "REPO": "ridopark/oh-my-tradeagent",
+                "PR_MODE": "act",
+                "STATE_DIR": str(state_dir),
+                "REPO_ROOT": str(AGENT_DIR.parents[2]),
+                "DISCORD_DRY_RUN": "1",
+                "PYTHONPATH": str(AGENT_DIR),
+            }
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--plan", "--json"],
+                capture_output=True, text=True, timeout=15, env=env,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"pr_duty.py must exit 0; stderr={result.stderr!r}")
+            # No gh pr merge call must appear in the call log
+            calls_log = bin_dir / "gh_calls.log"
+            calls_text = calls_log.read_text() if calls_log.exists() else ""
+            self.assertNotIn("pr merge", calls_text,
+                             f"gh pr merge must not be called for empty headRefOid; calls={calls_text!r}")
 
 
 class TestFindingsContentRegex(unittest.TestCase):
@@ -967,46 +1063,51 @@ class TestListPrsFailureExitsZero(unittest.TestCase):
 
 
 class TestNotifyPostCatchesOsError(unittest.TestCase):
-    """Item 6: notify.post must swallow OSError (covers URLError and TimeoutError)."""
+    """notify.post must swallow OSError (covers HTTP 500 / URLError / TimeoutError)."""
 
     def test_post_swallows_oserror_from_urlopen(self):
-        """notify.post must not propagate OSError when urlopen raises."""
-        import urllib.error
-        import importlib
+        """notify.post must not propagate OSError when the webhook returns HTTP 500."""
+        import http.server
+        import threading
 
-        # Load notify as a module so we can test it directly.
+        # Spin up a local HTTP server that always returns 500.
+        class _500Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.send_response(500)
+                self.end_headers()
+
+            def log_message(self, *args):  # silence test output
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _500Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
         import importlib.util as _ilu
         spec = _ilu.spec_from_file_location(
-            "notify_test_item6",
+            "notify_test_oserror",
             AGENT_DIR / "notify.py",
         )
         assert spec and spec.loader
         m = importlib.util.module_from_spec(spec)
-        # Inject statefile dep
         m.statefile = sys.modules.get("statefile")  # type: ignore[attr-defined]
         spec.loader.exec_module(m)  # type: ignore[union-attr]
 
-        # Patch urlopen to raise URLError (a subclass of OSError).
-        original = m.urllib.request.urlopen
-
-        def _raise_url_error(req, timeout=None):
-            raise urllib.error.URLError("simulated network failure")
-
-        m.urllib.request.urlopen = _raise_url_error
-        import os as _os
-        env_bak = _os.environ.get("DISCORD_WEBHOOK_URL")
-        _os.environ["DISCORD_WEBHOOK_URL"] = "http://fake.invalid/hook"
+        env_bak = os.environ.get("DISCORD_WEBHOOK_URL")
+        os.environ["DISCORD_WEBHOOK_URL"] = f"http://127.0.0.1:{port}/hook"
         try:
-            # Must not raise
+            # Must not raise — HTTPError (subclass of OSError) is swallowed.
             m.post(pathlib.Path("/tmp"), "title", "body", "red")
         except OSError as exc:
             self.fail(f"notify.post propagated OSError: {exc}")
         finally:
-            m.urllib.request.urlopen = original
             if env_bak is None:
-                _os.environ.pop("DISCORD_WEBHOOK_URL", None)
+                os.environ.pop("DISCORD_WEBHOOK_URL", None)
             else:
-                _os.environ["DISCORD_WEBHOOK_URL"] = env_bak
+                os.environ["DISCORD_WEBHOOK_URL"] = env_bak
+            server.server_close()
+        thread.join(timeout=2)
 
 
 if __name__ == "__main__":

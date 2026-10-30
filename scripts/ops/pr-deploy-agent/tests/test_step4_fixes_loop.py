@@ -635,8 +635,8 @@ class TestFixRoundWithGit(unittest.TestCase):
 
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("12", 0)
-        # Item-2 spec: count the round once Sonnet commits, regardless of push outcome.
-        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed (even if push rejected); got {rounds}")
+        # Round increments ONLY after a successful push; a rejected push does not count.
+        self.assertEqual(rounds, 0, f"Round must NOT increment when push rejected; got {rounds}")
 
     def test_recommend_mode_no_push(self):
         """PR_MODE=recommend → action='would-fix', no git push."""
@@ -745,10 +745,10 @@ class TestFixRoundWithGit(unittest.TestCase):
         self.assertIn("skip-review", d.get("reason", "").lower(),
                       f"reason must mention skip-review; got: {d.get('reason')}")
 
-        # Item-2 spec: round increments when Sonnet committed (push blocked counts).
+        # Round increments ONLY after a successful push; a push blocked by guard does not count.
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("14", 0)
-        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed even if push blocked; got {rounds}")
+        self.assertEqual(rounds, 0, f"Round must NOT increment when push is blocked by guard; got {rounds}")
 
     def test_test_file_deletion_aborts_push(self):
         """Finding 8b: if the Sonnet fix deletes a test file, the push is refused.
@@ -837,10 +837,10 @@ class TestFixRoundWithGit(unittest.TestCase):
         self.assertIn("test", d.get("reason", "").lower(),
                       f"reason must mention test file; got: {d.get('reason')}")
 
-        # Item-2 spec: round increments when Sonnet committed (push blocked counts).
+        # Round increments ONLY after a successful push; a push blocked by guard does not count.
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("15", 0)
-        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed even if push blocked; got {rounds}")
+        self.assertEqual(rounds, 0, f"Round must NOT increment when push is blocked by guard; got {rounds}")
 
     def test_timeout_expired_but_committed_returns_true(self):
         """Finding 9: when _run_sonnet_fix times out but a commit was made before the
@@ -955,33 +955,40 @@ class TestAttemptKeyIdempotency(unittest.TestCase):
 
 
 class TestSetupWorktreeTimeout(unittest.TestCase):
-    """Item 5: _setup_worktree TimeoutExpired → returns False, PR is skipped."""
+    """_fetch_timeout=0 → TimeoutExpired on git fetch → _setup_worktree returns False."""
 
     def test_setup_worktree_timeout_returns_false(self):
-        """When git fetch times out, _setup_worktree must return False (not raise)."""
-        import unittest.mock
-        # Load pr_duty as a module so we can call _setup_worktree directly.
-        spec = importlib.util.spec_from_file_location("pr_duty_wt", SCRIPT)
+        """When git fetch times out (_fetch_timeout=0), _setup_worktree must return False."""
+        # Load pr_duty so we can call _setup_worktree directly.
+        _MOD_NAME = "pr_duty_wt_timeout"
+        spec = importlib.util.spec_from_file_location(_MOD_NAME, SCRIPT)
         assert spec and spec.loader
-        m = importlib.util.module_from_spec(spec)
-        # Inject deps
+        mod = importlib.util.module_from_spec(spec)
         for dep in ("statefile", "notify"):
-            m.__dict__[dep] = sys.modules[dep]
-        sys.modules["pr_duty_wt"] = m
+            mod.__dict__[dep] = sys.modules[dep]
+        # Register in sys.modules before exec so @dataclass can look up the module.
+        sys.modules[_MOD_NAME] = mod
         try:
-            spec.loader.exec_module(m)  # type: ignore[union-attr]
-        except Exception:
-            pass  # module-level side effects (e.g. missing env vars) are OK to ignore
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        finally:
+            sys.modules.pop(_MOD_NAME, None)
 
-        with unittest.mock.patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["git", "fetch"], timeout=60)
-            import tempfile as _tmp
-            with _tmp.TemporaryDirectory() as td:
-                result = m._setup_worktree(
-                    pathlib.Path(td) / "wt",
-                    "feat/some-branch",
-                    pathlib.Path(td),
-                )
+        # A real git repo so the initial Remove-stale-worktree path works safely.
+        with tempfile.TemporaryDirectory() as td:
+            repo = pathlib.Path(td) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                           cwd=str(repo), capture_output=True,
+                           env={**os.environ, "GIT_AUTHOR_NAME": "t",
+                                "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                                "GIT_COMMITTER_EMAIL": "t@t"})
+            result = mod._setup_worktree(
+                repo / "wt",
+                "feat/some-branch",
+                repo,
+                _fetch_timeout=0,  # triggers TimeoutExpired immediately
+            )
         self.assertFalse(result, "_setup_worktree must return False on TimeoutExpired")
 
 

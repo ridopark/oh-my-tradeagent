@@ -8,6 +8,20 @@ Structure of state.json:
 {
   "notified": {
     "<key>": "<iso8601-utc-timestamp>"
+  },
+  "pr_rounds": {
+    "<pr_number>": <int>
+  },
+  "deferred_run_ids": [<run_id>, ...],
+  "deferred_run_timestamps": {
+    "<run_id>": "<iso8601-utc-timestamp>"
+  },
+  "approved_runs": {
+    "<run_id>": {"approved_at": "<iso8601-utc-timestamp>", "services": [...]}
+  },
+  "verified_run_ids": [<run_id>, ...],
+  "merged_prs": {
+    "<pr_number>": {"merged_at": "<iso8601-utc-timestamp>", "op_steps_posted": <bool>}
   }
 }
 

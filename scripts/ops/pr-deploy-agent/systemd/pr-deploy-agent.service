@@ -4,6 +4,8 @@ Description=pr-deploy-agent tick
 
 [Service]
 Type=oneshot
+# Ensure user-local binaries (claude, gh) are on PATH when systemd runs the timer.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # tick.sh auto-detects REPO_ROOT from its own location; no ConditionPathExists needed.
 ExecStart=%h/src/oh-my-tradeagent/scripts/ops/pr-deploy-agent/tick.sh
 # Forward stdout+stderr to the journal under the unit name.

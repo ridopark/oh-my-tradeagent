@@ -144,7 +144,7 @@ class TestLock(unittest.TestCase):
                     result = _run_tick(tmp_config, tmp_state)
             finally:
                 holder.terminate()
-                holder.wait()
+                holder.communicate()  # drain pipes and reap
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("another tick holds the lock", result.stderr)
@@ -171,7 +171,7 @@ class TestLock(unittest.TestCase):
                 elapsed = time.monotonic() - start
             finally:
                 holder.terminate()
-                holder.wait()
+                holder.communicate()  # drain pipes and reap
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("another tick holds the lock", result.stderr)

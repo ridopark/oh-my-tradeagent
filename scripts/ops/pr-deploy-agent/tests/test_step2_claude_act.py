@@ -611,6 +611,94 @@ class TestHumanOverrideDetection(unittest.TestCase):
                              f"deferred_run_ids={deferred}")
 
 
+class TestDeferredRunTimestampsCleanup(unittest.TestCase):
+    """Item 4b: removing a run from deferred_run_ids must also pop deferred_run_timestamps."""
+
+    def test_human_override_removes_deferred_timestamp(self):
+        """When a human override removes a run, its deferred_run_timestamps entry is cleared."""
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            run_id = 98060
+            state_dir = pathlib.Path(tmp_state)
+            state_dir.mkdir(exist_ok=True)
+
+            state = {
+                "notified": {
+                    f"run:{run_id}:first-deferral": "2026-10-29T09:00:00+00:00",
+                },
+                "deferred_run_ids": [run_id],
+                "deferred_run_timestamps": {
+                    str(run_id): "2026-10-29T09:00:00+00:00",
+                },
+            }
+            _sf.save(state_dir / "state.json", state)
+
+            fixture = {
+                "workflows/deploy.yml/runs": {"workflow_runs": []},
+                f"runs/{run_id}/approvals": [
+                    {"state": "approved", "comment": "looks good",
+                     "user": {"login": "ridopark"}}
+                ],
+            }
+            _write_fake_gh(bin_dir, fixture, allow_writes=False)
+            _run_gate(bin_dir, state_dir)
+
+            after = _sf.load(state_dir / "state.json")
+            timestamps = after.get("deferred_run_timestamps", {})
+            self.assertNotIn(str(run_id), timestamps,
+                             f"deferred_run_timestamps[{run_id}] must be popped after removal; "
+                             f"timestamps={timestamps}")
+
+
+class TestHumanOverrideCompletedRun(unittest.TestCase):
+    """Item 2: human approval on a completed run must still post the override message."""
+
+    def test_completed_run_with_human_approval_posts_override(self):
+        """A run whose status is 'completed' but has a human approval must post
+        the override message (approval check must happen BEFORE status removal)."""
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            run_id = 98050
+            state_dir = pathlib.Path(tmp_state)
+            state_dir.mkdir(exist_ok=True)
+
+            state = {
+                "notified": {
+                    f"run:{run_id}:first-deferral": "2026-10-29T09:00:00+00:00",
+                },
+                "deferred_run_ids": [run_id],
+            }
+            _sf.save(state_dir / "state.json", state)
+
+            fixture = {
+                "workflows/deploy.yml/runs": {"workflow_runs": []},
+                # Approvals key uses the longer path so pattern matching does not confuse
+                # the run-info endpoint (which is a prefix of the approvals URL).
+                f"runs/{run_id}/approvals": [
+                    {"state": "approved", "comment": "human approved this",
+                     "user": {"login": "ridopark"}}
+                ],
+                # Run info endpoint — here so _get_run_info does not 404 if called,
+                # though it should not be reached (we break on the human approval above).
+                f"actions/runs/{run_id}": {
+                    "status": "completed", "conclusion": "success",
+                },
+            }
+            _write_fake_gh(bin_dir, fixture, allow_writes=False)
+            _run_gate(bin_dir, state_dir, extra_env={"DEPLOY_MODE": "recommend"})
+
+            after = _sf.load(state_dir / "state.json")
+            override_key = f"run:{run_id}:human-override"
+            self.assertIn(override_key, after.get("notified", {}),
+                          f"override key must be posted even when run is completed; "
+                          f"notified={after.get('notified', {})}")
+            # Run must also be removed from deferred_run_ids
+            self.assertNotIn(run_id, after.get("deferred_run_ids", []),
+                             "run_id must be removed from deferred_run_ids")
+
+
 # ---------------------------------------------------------------------------
 # Test: post-roll verification
 # ---------------------------------------------------------------------------

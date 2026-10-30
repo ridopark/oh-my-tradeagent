@@ -53,8 +53,7 @@ journalctl --user -u pr-deploy-agent -n 20 -f
 > **Secrets warning**: the env file is exported into every `claude -p` session that
 > this agent spawns.  Do **not** put `gh` tokens, API keys, or any other secret in it.
 > Use the OS keyring or a separate credential helper instead.  `DISCORD_WEBHOOK_URL`
-> is written by `scripts/discord-notify.sh` from the git-ignored repo `.env` — keep
-> it there, not in this file.
+> belongs in the git-ignored repo `.env` — keep it there, not in this file.
 
 ---
 
@@ -110,6 +109,7 @@ until the next hour window).
 | **PR stacked** | yellow | PR's base branch is not `main` (once per SHA) |
 | **PR not mergeable** | yellow | `mergeable` is not MERGEABLE (once per SHA) |
 | **PR cannot merge** | yellow | `mergeStateStatus` is BEHIND or DIRTY (once per SHA) |
+| **checks failing** | yellow | A failing check touches a module the PR changed; not merging (once per PR+SHA) |
 | **unrelated check rerun** | yellow | A failing Java module check was rerun after issue link |
 | **unrelated check still failing** | yellow | Second failure after rerun — check manually |
 | **fix produced nothing** | yellow | Sonnet made no commit on a NEEDS_FIXES round (once per PR+SHA) |
@@ -138,7 +138,7 @@ Tests use fake `gh` and `ssh` executables on PATH — no network required.
 scripts/ops/pr-deploy-agent/
 ├── tick.sh          # entry point: kill switch, lock, env, calls duties
 ├── deploy_gate.py   # Steps 1+2: classify services, check live state, decide safe/unsafe
-├── pr_duty.py       # Step 3: merge READY PRs, ping, rerun unrelated checks
+├── pr_duty.py       # Steps 3 & 4: merge READY PRs, ping, rerun unrelated checks, NEEDS_FIXES loop
 ├── live_state.py    # live-state reads (temporal + psql) via ssh
 ├── market_hours.py  # NYSE session hours + holiday calendar
 ├── notify.py        # Discord webhook, deduplicated via statefile
@@ -172,3 +172,8 @@ instead of another rerun.
 
 Installed units live in `~/.config/systemd/user/`; they are NOT tracked by git.
 Runtime state lives in `~/.local/state/pr-deploy-agent/`.
+
+The service unit sets `Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` so
+that user-local binaries (`claude`, `gh`) are found when the systemd timer fires.  If you
+install these tools elsewhere, edit `~/.config/systemd/user/pr-deploy-agent.service` and
+run `systemctl --user daemon-reload`.

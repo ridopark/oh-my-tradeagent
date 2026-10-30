@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""PR duty for pr-deploy-agent (Step 3).
+"""PR duty for pr-deploy-agent (Steps 3 & 4).
 
 Reads the claude/verdict commit status for each open PR and, in act mode:
   - merges READY/SKIPPED PRs whose other checks are green and that are mergeable
   - re-runs an unrelated failing Java check once after linking it to an issue
   - pings once on NOT_REVIEWED / BLOCKED / NO_VERDICT
   - posts the merged PR's operator steps to Discord after its deploy completes
-
-No Claude call in this step.
+  - runs the NEEDS_FIXES loop: Fable verifies, Sonnet fixes and commits, script pushes
 
 CLI:
   python3 pr_duty.py --plan [--json]   evaluate all open PRs
@@ -24,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -34,6 +34,8 @@ from pathlib import Path
 import notify as _notify
 import statefile as _sf
 from _shared import _gh, _parse_claude_json
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_REPO = "ridopark/oh-my-tradeagent"
 _DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "pr-deploy-agent"
@@ -53,6 +55,11 @@ _MERGE_COMMIT_RE = re.compile(r"(?i)merge\s+commit")
 # PR files that make a failing Java check "related" (never treat as unrelated).
 _SHARED_PATH_PREFIXES = ("contract/", "infra/docker/")
 _SHARED_EXACT_FILES = {"pom.xml"}
+
+# Test-file path pattern used to guard against commits that delete tests.
+_TEST_PATH_RE = re.compile(
+    r"(/tests?/|test_[^/]+\.py$|[A-Z][^/]*Test\.java$|\.test\.[^/]+$)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -297,16 +304,15 @@ def _merge_pr(repo: str, pr_number: int, title: str, body: str, head_sha: str = 
     Returns None (without calling gh) if head_sha is empty.
     """
     if not head_sha:
-        import logging
-        logging.getLogger(__name__).warning(
-            "PR #%s: refusing to merge without a head SHA", pr_number
-        )
+        _log.warning("PR #%s: refusing to merge without a head SHA", pr_number)
         return None
     use_merge_commit = bool(_MERGE_COMMIT_RE.search(title) or _MERGE_COMMIT_RE.search(body))
     strategy = "--merge" if use_merge_commit else "--squash"
-    cmd = ["pr", "merge", str(pr_number), strategy, "--delete-branch", "--repo", repo]
-    if head_sha:
-        cmd += ["--match-head-commit", head_sha]
+    cmd = [
+        "pr", "merge", str(pr_number), strategy, "--delete-branch",
+        "--match-head-commit", head_sha,
+        "--repo", repo,
+    ]
     try:
         _gh(*cmd)
     except RuntimeError:
@@ -389,11 +395,17 @@ def _setup_worktree(
     worktree_path: Path,
     head_ref: str,
     repo_root: Path,
+    *,
+    _fetch_timeout: int = 60,
+    _add_timeout: int = 30,
 ) -> bool:
     """Fetch the PR branch and create a git worktree.
 
     Returns True on success, False on failure.
     Removes any stale worktree at the same path before creating a new one.
+
+    _fetch_timeout and _add_timeout are keyword-only parameters used in tests
+    to trigger TimeoutExpired without mocking subprocess.run.
     """
     # Remove stale worktree if present.
     if worktree_path.exists():
@@ -406,7 +418,7 @@ def _setup_worktree(
     try:
         r = subprocess.run(
             ["git", "fetch", "origin", head_ref],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=60,
+            cwd=str(repo_root), capture_output=True, text=True, timeout=_fetch_timeout,
         )
     except subprocess.TimeoutExpired:
         return False
@@ -418,7 +430,7 @@ def _setup_worktree(
     try:
         r = subprocess.run(
             ["git", "worktree", "add", str(worktree_path), f"origin/{head_ref}"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=30,
+            cwd=str(repo_root), capture_output=True, text=True, timeout=_add_timeout,
         )
     except subprocess.TimeoutExpired:
         return False
@@ -698,9 +710,6 @@ def _run_needs_fixes_round(
             )
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "fix produced nothing")
 
-        # Sonnet committed something — count the round regardless of what happens next.
-        _sf.set_rounds(state, pr_number, rounds + 1)
-
         # 5. Refuse if worktree is dirty after Sonnet.
         if not _worktree_is_clean(worktree_path):
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "worktree dirty after fix")
@@ -718,9 +727,6 @@ def _run_needs_fixes_round(
             )
 
         # 5b. Push guard: refuse if the diff deletes or renames any test file.
-        _TEST_PATH_RE = re.compile(
-            r"(/tests?/|test_[^/]+\.py$|[A-Z][^/]*Test\.java$|\.test\.[^/]+$)"
-        )
         diff_check = subprocess.run(
             ["git", "diff", "--name-status", f"{head_sha}..{head_after}"],
             cwd=str(worktree_path), capture_output=True, text=True,
@@ -737,11 +743,22 @@ def _run_needs_fixes_round(
                     )
 
         # 6. Push to the PR branch (never --force).
-        push_result = subprocess.run(
-            ["git", "push", "origin", f"HEAD:{head_ref}"],
-            cwd=str(worktree_path),
-            capture_output=True, text=True, timeout=60,
-        )
+        try:
+            push_result = subprocess.run(
+                ["git", "push", "origin", f"HEAD:{head_ref}"],
+                cwd=str(worktree_path),
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            pf_key = f"pr:{pr_number}:{head_sha}:push-failed"
+            _notify.notify_once(
+                state, pf_key, repo_root,
+                f"[pr-deploy-agent] PR #{pr_number} push failed",
+                f"PR #{pr_number} \"{title}\": push timed out",
+                "red",
+            )
+            return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "push timed out")
+
         if push_result.returncode != 0:
             err = push_result.stderr.strip()
             reason = "remote head moved" if ("non-fast-forward" in err or "rejected" in err) else "push failed"
@@ -753,6 +770,9 @@ def _run_needs_fixes_round(
                 "red",
             )
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", reason)
+
+        # Push succeeded — count the round now.
+        _sf.set_rounds(state, pr_number, rounds + 1)
 
         # 7. Post rejected-findings comment (only when there is content).
         if wrong or out_of_scope:
@@ -916,7 +936,7 @@ def plan_all(
         if "do-not-merge" in labels or "needs-input" in labels:
             decisions.append(PRDecision(
                 pr_number, title, head_sha, "N/A", "skip",
-                "label: " + next(l for l in labels if l in ("do-not-merge", "needs-input")),
+                "label: " + next(lbl for lbl in labels if lbl in ("do-not-merge", "needs-input")),
             ))
             continue
 
@@ -1004,6 +1024,14 @@ def plan_all(
                     "unrelated check rerun",
                 ))
             else:
+                cf_key = f"pr:{pr_number}:{head_sha}:checks-failing"
+                _notify.notify_once(
+                    state, cf_key, repo_root,
+                    f"[pr-deploy-agent] PR #{pr_number} checks failing",
+                    f"PR #{pr_number} \"{title}\": checks failing, not merging: "
+                    f"{[c.get('name') for c in failing_checks]}",
+                    "yellow",
+                )
                 decisions.append(PRDecision(
                     pr_number, title, head_sha, token, "skip",
                     f"checks failing: {[c.get('name') for c in failing_checks]}",

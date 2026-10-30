@@ -12,7 +12,7 @@
 #   REPO          GitHub repo slug   (default ridopark/oh-my-tradeagent)
 #   HOMELAB_SSH   ssh target         (default ridopark@192.168.10.123)
 #   DEPLOY_MODE   recommend|act      (default recommend)
-#   PR_MODE       recommend|act      (default recommend, reserved for Step 3)
+#   PR_MODE       recommend|act      (default recommend; Steps 3 & 4 logic in pr_duty.py)
 #   STATE_DIR     runtime state path (default ~/.local/state/pr-deploy-agent)
 #
 # Kill switch:  touch ~/.config/pr-deploy-agent/DISABLED
@@ -64,6 +64,11 @@ if ! flock -n 9; then
 fi
 
 echo "$TS $LOG_TAG tick start (DEPLOY_MODE=$DEPLOY_MODE)" >&2
+printf "%s %s   resolved: claude=%s gh=%s ssh=%s\n" \
+  "$TS" "$LOG_TAG" \
+  "$(command -v claude 2>/dev/null || echo MISSING)" \
+  "$(command -v gh    2>/dev/null || echo MISSING)" \
+  "$(command -v ssh   2>/dev/null || echo MISSING)" >&2
 
 # ── Deploy gate — decide ────────────────────────────────────────────────────
 # Run each duty in a subshell that captures stdout/stderr separately.

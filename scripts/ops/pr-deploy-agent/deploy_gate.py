@@ -25,10 +25,15 @@ import argparse
 import json
 import os
 import re
+import sys
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+# check_image_current lives one directory up (scripts/ops/).
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import check_image_current as _check_image_current
 
 import live_state as _live
 import market_hours as _mh
@@ -373,22 +378,13 @@ def _check_human_overrides(
             to_remove.append(run_id)
             continue
 
-        # Remove runs that are no longer waiting (completed, cancelled, or 404).
-        try:
-            run_info = _get_run_info(repo, run_id)
-            run_status = run_info.get("status", "")
-            if run_status in ("completed", "cancelled"):
-                to_remove.append(run_id)
-                continue
-        except RuntimeError as exc:
-            if "404" in str(exc) or "Not Found" in str(exc):
-                to_remove.append(run_id)
-                continue
-
+        # Check approvals BEFORE checking run status, so a human approval on a
+        # run that already completed still posts the override message.
         try:
             approvals = _get_run_approvals(repo, run_id)
         except RuntimeError:
-            continue  # can't read → skip silently
+            approvals = []  # can't read → fall through to status check
+
         for appr in approvals:
             if appr.get("state") == "approved":
                 comment = appr.get("comment") or ""
@@ -409,12 +405,26 @@ def _check_human_overrides(
                     # Agent's own approval seen — remove from deferred.
                     to_remove.append(run_id)
                     break
-    # Remove handled runs from deferred list.
+        else:
+            # No human approval found — remove runs that are no longer waiting
+            # (completed, cancelled, or 404).
+            try:
+                run_info = _get_run_info(repo, run_id)
+                run_status = run_info.get("status", "")
+                if run_status in ("completed", "cancelled"):
+                    to_remove.append(run_id)
+            except RuntimeError as exc:
+                if "404" in str(exc) or "Not Found" in str(exc):
+                    to_remove.append(run_id)
+
+    # Remove handled runs from deferred list and their timestamps.
+    timestamps = state.get("deferred_run_timestamps", {})
     for run_id in to_remove:
         try:
             deferred.remove(run_id)
         except ValueError:
             pass
+        timestamps.pop(str(run_id), None)
 
 
 # ---------------------------------------------------------------------------
@@ -627,48 +637,14 @@ _TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 
 
 def _resolve_tag_digest(tag_ref: str) -> str | None:
-    """Resolve the current registry digest for a tag reference via anonymous GHCR token.
+    """Resolve the current registry digest for a tag reference.
 
-    Returns the Docker-Content-Digest (e.g. 'sha256:abc…'), or None on any error.
-    Only handles ghcr.io references; other registries return None.
+    Delegates to check_image_current.image_revision(); returns the digest
+    string or None if it cannot be resolved (registry unreachable, non-GHCR
+    reference, etc.).
     """
-    import urllib.parse
-    import urllib.request
-
     try:
-        registry, _, rest = tag_ref.partition("/")
-        if not rest or registry != "ghcr.io":
-            return None
-        repo, _, tag = rest.partition(":")
-        if not repo:
-            return None
-        tag = tag or "latest"
-        scope = urllib.parse.quote(f"repository:{repo}:pull")
-        req = urllib.request.Request(
-            f"https://ghcr.io/token?scope={scope}",
-            headers={"User-Agent": "pr-deploy-agent"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            token_data = json.loads(resp.read())
-        auth = f"Bearer {token_data['token']}"
-        manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
-        manifest_types = ",".join([
-            "application/vnd.oci.image.index.v1+json",
-            "application/vnd.oci.image.manifest.v1+json",
-            "application/vnd.docker.distribution.manifest.list.v2+json",
-            "application/vnd.docker.distribution.manifest.v2+json",
-        ])
-        req2 = urllib.request.Request(
-            manifest_url,
-            headers={"Authorization": auth, "Accept": manifest_types},
-            method="HEAD",
-        )
-        with urllib.request.urlopen(req2, timeout=15) as resp2:
-            digest = (
-                resp2.headers.get("Docker-Content-Digest")
-                or resp2.headers.get("docker-content-digest")
-                or ""
-            )
+        _revision, digest = _check_image_current.image_revision(tag_ref)
         return digest or None
     except Exception:
         return None
@@ -750,7 +726,7 @@ def _verify_service(
             return False, f"{svc}: image check failed: {exc}"
 
         # 3b. Verify the pod is running the registry's current digest for the tag.
-        # If GHCR is unreachable the digest check is skipped (best-effort).
+        # If GHCR is unreachable the digest comparison is skipped (best-effort).
         registry_digest = _resolve_tag_digest(deploy_image)
         if registry_digest and pod_image_digest and registry_digest != pod_image_digest:
             return False, (
