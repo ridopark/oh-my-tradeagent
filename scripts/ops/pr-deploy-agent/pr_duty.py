@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import logging
 import os
 import re
@@ -1142,6 +1143,13 @@ def main() -> None:
     if args.json:
         out = {"prs": [asdict(d) for d in decisions]}
         print(json.dumps(out))
+        # One readable line per decision on stderr, so the journal records WHY each PR was
+        # merged, skipped or held (tick.sh logs stderr line by line; stdout stays pure JSON).
+        for d in decisions:
+            print(
+                f"PR #{d.pr_number} [{d.verdict_token}] {d.action}: {d.reason}",
+                file=sys.stderr,
+            )
     else:
         if not decisions:
             print("no PRs to act on")

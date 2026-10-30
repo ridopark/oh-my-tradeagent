@@ -265,3 +265,47 @@ class TestDutyIsolation(unittest.TestCase):
             ]
             self.assertTrue(all(duty_flags),
                             f"All three duties must run; invocations={invocations}")
+
+
+class TestPrDecisionLogging(unittest.TestCase):
+    """Every PR decision must reach the journal, one line each (recommend mode was invisible:
+    tick.sh logged only the PR duty's exit code, so a skipped PR left no trace)."""
+
+    def test_each_pr_decision_is_logged_on_its_own_line(self):
+        with tempfile.TemporaryDirectory() as tmp_config, \
+             tempfile.TemporaryDirectory() as tmp_state, \
+             tempfile.TemporaryDirectory() as tmp_bin:
+            bin_dir = pathlib.Path(tmp_bin)
+            fake_python = bin_dir / "python3"
+            fake_python.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--decide' in args:\n"
+                "    print('{\"runs\": []}')\n"
+                "elif '--verify' in args:\n"
+                "    print('{\"verifications\": []}')\n"
+                "elif '--plan' in args:\n"
+                "    print('{\"prs\": [{}, {}]}')\n"
+                "    sys.stderr.write('PR #7 [READY] merge: all checks green\\n')\n"
+                "    sys.stderr.write('PR #8 [NOT_REVIEWED] ping: workflow PR\\n')\n"
+                "sys.exit(0)\n"
+            )
+            fake_python.chmod(fake_python.stat().st_mode | 0o755)
+            fake_gh = bin_dir / "gh"
+            fake_gh.write_text("#!/bin/sh\necho '{}'\nexit 0\n")
+            fake_gh.chmod(fake_gh.stat().st_mode | 0o755)
+            env = {
+                **os.environ,
+                "XDG_CONFIG_HOME": tmp_config,
+                "XDG_STATE_HOME": tmp_state,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "DISCORD_DRY_RUN": "1",
+            }
+            result = subprocess.run(["bash", str(TICK_SH)], capture_output=True, text=True,
+                                    timeout=30, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr[:300])
+            lines = [l for l in result.stderr.splitlines() if " pr: PR #" in l]
+            self.assertEqual(len(lines), 2, result.stderr)
+            self.assertTrue(lines[0].endswith("pr: PR #7 [READY] merge: all checks green"), lines)
+            self.assertTrue(lines[1].endswith("pr: PR #8 [NOT_REVIEWED] ping: workflow PR"), lines)
