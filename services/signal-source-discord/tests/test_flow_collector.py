@@ -865,3 +865,54 @@ def test_trade_to_archive_row_without_quote():
     assert row["bs"] is None
     assert row["as"] is None
     assert row["qt"] is None
+
+
+# ---------------------------------------------------------------------------
+# Finding 7 (TEST): Real write fail — archive path is a file (not a dir)
+# Asserts: no raise from write_flush, disk_write_error recorded, archive stop
+# still open at session close → gap with to: null.
+# ---------------------------------------------------------------------------
+
+
+def test_archiver_write_fail_on_file_path_records_disk_write_error(tmp_path):
+    """archive_dir is a FILE → mkdir raises FileExistsError (OSError).
+    write_flush must NOT raise; it records disk_write_error and returns cleanly."""
+    # Create archive_dir as a regular file (not a directory).
+    archive_dir = tmp_path / "archive"
+    archive_dir.write_text("not a directory")
+
+    arch = TapeArchiver(archive_dir)
+    flush_ts = ts("2026-10-29T14:00:00Z")
+
+    # Must not raise
+    arch.write_flush(_make_rows(3), flush_ts)
+
+    assert arch._disk_stopped is True
+    assert arch._disk_stop_reason == "disk_write_error"
+    # No data was written
+    assert arch.trades_today == 0
+
+
+def test_archiver_open_disk_stop_at_session_close_records_gap_with_null_to(tmp_path):
+    """If the archive is disk-stopped when close_session is called, the gap's 'to' is null."""
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    # Write a small file so close_session has something to manifest
+    arch = TapeArchiver(archive_dir, cap_bytes=10_000_000_000, free_floor_bytes=0)
+    flush_ts = ts("2026-10-29T14:00:00Z")
+    arch.write_flush(_make_rows(2), flush_ts)
+
+    # Manually simulate a disk stop AFTER the first flush (e.g. disk filled mid-session)
+    arch._disk_stopped = True
+    arch._disk_stop_ts = "2026-10-29T14:30:00Z"
+    arch._disk_stop_reason = "disk_cap"
+
+    # Session closes while disk is still stopped
+    manifest = arch.close_session("2026-10-29", "09:25-16:20", "dev")
+
+    assert manifest is not None
+    # The gap should be present and have to=null
+    open_gaps = [g for g in arch.gaps if g.get("to") is None]
+    assert len(open_gaps) >= 1, f"expected a gap with to=null; gaps={arch.gaps}"
+    assert open_gaps[0]["reason"] == "disk_cap"

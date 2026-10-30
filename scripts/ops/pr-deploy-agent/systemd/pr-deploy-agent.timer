@@ -1,0 +1,13 @@
+[Unit]
+Description=pr-deploy-agent — fire every 5 minutes
+
+[Timer]
+# First fire at most 30 s after boot/enable so the first tick does not wait 5 min.
+OnBootSec=30s
+# Then every 5 minutes.
+OnUnitActiveSec=5min
+# AccuracySec widens the fire window slightly to reduce system wakeups.
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

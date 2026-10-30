@@ -31,6 +31,7 @@ import logging
 import pathlib
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -57,6 +58,10 @@ FLOW_ARCHIVE_FREE_FLOOR_BYTES = 15_000_000_000  # 15 GB
 FLOW_UNIVERSE_MONEYNESS_PCT = 0.05
 # Max DTE for universe contracts.
 FLOW_UNIVERSE_MAX_DTE = 14
+# RollingPremiumMap: minimum premium to admit a contract (plan spec: ≥ $10k).
+FLOW_ROLLING_PREMIUM_MIN = 10_000.0
+# Disk check: throttle the rglob dir-size scan to at most every 30 s.
+_DISK_CHECK_INTERVAL = 30.0
 
 # Condition-code labels (from the plan's "Implementation Decisions").
 _SWEEP_CODES: frozenset[str] = frozenset({"S", "b", "d"})
@@ -300,14 +305,12 @@ class Order:
     strike: float
     right: str
     first_ts: datetime
-    first_ts_raw: str
     last_ts: datetime
     side: str
     side_source: str
     bid: float | None
     ask: float | None
     quote_ts: datetime | None
-    quote_ts_raw: str | None
     sweep: bool
     auction: bool
     cross: bool
@@ -466,14 +469,12 @@ class OrderAggregator:
                 strike=trade.strike,
                 right=trade.right,
                 first_ts=trade.ts,
-                first_ts_raw=trade.ts_raw,
                 last_ts=trade.ts,
                 side=labels["side"],
                 side_source=labels["side_source"],
                 bid=q.bid if q else None,
                 ask=q.ask if q else None,
                 quote_ts=q.ts if q else None,
-                quote_ts_raw=q.ts_raw if q else None,
                 sweep=labels["sweep"],
                 auction=labels["auction"],
                 cross=labels["cross"],
@@ -517,8 +518,9 @@ class QuoteSet:
     ``choose(universe_contracts, rolling_premium, cap, universe_share)`` selects up to
     ``cap`` contracts: first the near-money universe (interleaved across names, sorted by
     |moneyness| then DTE) filling ``universe_share`` of the cap, then top rolling-premium
-    contracts for the remainder.  Returns (chosen, subscribe_list, unsubscribe_list) as
-    a diff against the previous ``choose`` result.
+    contracts of the last 15 min; cap ``FLOW_QUOTE_CAP`` (950); re-chosen every 5 min;
+    returns (chosen, subscribe_list, unsubscribe_list) as a diff against the previous
+    ``choose`` result.
     """
 
     def __init__(self) -> None:
@@ -595,6 +597,9 @@ class TapeArchiver:
     When the archive dir exceeds ``FLOW_ARCHIVE_CAP_BYTES`` or free space falls under
     ``FLOW_ARCHIVE_FREE_FLOOR_BYTES``, writes are refused (classifying continues), a gap is
     recorded, and the next ``write_flush`` re-checks.
+
+    The dir-size rglob and free-space check are throttled to at most every 30 s
+    (``_DISK_CHECK_INTERVAL``) to avoid CPU overhead on every second of the receive loop.
     """
 
     def __init__(
@@ -621,6 +626,11 @@ class TapeArchiver:
         self._disk_stopped: bool = False
         self._disk_stop_ts: str | None = None
         self._disk_stop_reason: str = ""
+        # Disk-check throttle: cache dir size and free space for up to 30 s.
+        self._cached_dir_size: int = 0
+        self._last_size_check_mono: float = 0.0
+        self._cached_free: int = 0
+        self._last_free_check_mono: float = 0.0
 
     def _et_date_str(self, ts: datetime) -> str:
         return ts.astimezone(ET).strftime("%Y-%m-%d")
@@ -629,28 +639,44 @@ class TapeArchiver:
         """Return ``""`` if disk is OK, else the stop reason (``"disk_cap"`` or
         ``"disk_free_floor"``).  Fails CLOSED: an OSError on the free-space query
         is treated as unknown free space → stop archiving.
+
+        Dir-size and free-space lookups are each throttled to at most every
+        ``_DISK_CHECK_INTERVAL`` (30 s) to avoid rglob on every recv-loop tick.
         """
-        try:
-            probe_dir = self._dir if self._dir.exists() else self._dir.parent
-            free = shutil.disk_usage(probe_dir).free
-        except OSError:
-            free = 0  # unknown → fail closed
-        try:
-            dir_size = sum(
-                f.stat().st_size
-                for f in self._dir.rglob("*")
-                if f.is_file()
-            ) if self._dir.exists() else 0
-        except OSError:
-            dir_size = 0
-        if dir_size >= self._cap_bytes:
+        now_mono = time.monotonic()
+
+        # Throttled dir-size scan.
+        if now_mono - self._last_size_check_mono >= _DISK_CHECK_INTERVAL:
+            try:
+                self._cached_dir_size = (
+                    sum(f.stat().st_size for f in self._dir.rglob("*") if f.is_file())
+                    if self._dir.is_dir()
+                    else 0
+                )
+            except OSError:
+                self._cached_dir_size = 0
+            self._last_size_check_mono = now_mono
+
+        # Throttled free-space check.
+        if now_mono - self._last_free_check_mono >= _DISK_CHECK_INTERVAL:
+            try:
+                probe_dir = self._dir if self._dir.exists() else self._dir.parent
+                self._cached_free = shutil.disk_usage(probe_dir).free
+            except OSError:
+                self._cached_free = 0  # unknown → fail closed
+            self._last_free_check_mono = now_mono
+
+        if self._cached_dir_size >= self._cap_bytes:
             return "disk_cap"
-        if free <= self._free_floor_bytes:
+        if self._cached_free <= self._free_floor_bytes:
             return "disk_free_floor"
         return ""
 
-    def _disk_ok(self) -> bool:
-        return self._disk_check() == ""
+    def _force_disk_check(self) -> str:
+        """Bypass throttle; used on first write of a session."""
+        self._last_size_check_mono = 0.0
+        self._last_free_check_mono = 0.0
+        return self._disk_check()
 
     def write_flush(self, rows: list[dict], flush_ts: datetime) -> None:
         """Append one gzip member of NDJSON rows to today's archive file.
@@ -667,8 +693,11 @@ class TapeArchiver:
             self._date_str = date_str
             self._path = self._dir / f"{date_str}.trades.ndjson.gz"
             self._bytes_today = self._path.stat().st_size if self._path.exists() else 0
+            # Force a fresh disk check on the first write of each session.
+            stop_reason = self._force_disk_check()
+        else:
+            stop_reason = self._disk_check()
 
-        stop_reason = self._disk_check()
         if stop_reason:
             if not self._disk_stopped:
                 self._disk_stopped = True
@@ -711,21 +740,32 @@ class TapeArchiver:
                 )
             return
 
+        # Invalidate cached dir size so the next check re-scans.
+        self._cached_dir_size += len(data)
         self._bytes_today += len(data)
         self._trades_written += len(rows)
         if self._first_t is None:
             self._first_t = rows[0].get("t")
         self._last_t = rows[-1].get("t")
 
-    def record_gap(self, from_ts: str, to_ts: str, reason: str) -> None:
+    def record_gap(self, from_ts: str, to_ts: str | None, reason: str) -> None:
         """Record a non-disk gap (reconnect, window closed, etc.)."""
         self._gaps_append(from_ts, to_ts, reason)
 
-    def _gaps_append(self, from_ts: str, to_ts: str, reason: str) -> None:
+    def _gaps_append(self, from_ts: str, to_ts: str | None, reason: str) -> None:
         self.gaps.append({"from": from_ts, "to": to_ts, "reason": reason})
 
     def close_session(self, date_str: str, window: str = "09:25-16:20", build: str = "") -> dict | None:
-        """Write the manifest for today's session and return it, or None if no file was written."""
+        """Write the manifest for today's session and return it, or None if no file was written.
+
+        If a disk stop is still open at session close, it is recorded as a gap with
+        ``to: null`` (the session ended before the disk guard lifted).
+        """
+        # Record an open disk stop as a gap with to=null.
+        if self._disk_stopped and self._disk_stop_ts:
+            self._gaps_append(self._disk_stop_ts, None, self._disk_stop_reason or "disk_write_error")
+            # Do not clear _disk_stopped: it's still open.
+
         if self._path is None or not self._path.exists():
             return None
         sha256 = _sha256_file(self._path)
