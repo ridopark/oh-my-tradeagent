@@ -59,7 +59,7 @@ def _make_jobs(*service_names):
 
 
 def _pending_env(env_id=_ENV_ID):
-    return [{"id": env_id, "current_user_can_approve": True}]
+    return [{"environment": {"id": env_id, "name": "production-homelab"}, "current_user_can_approve": True, "wait_timer": 0}]
 
 
 def _write_fake_gh(bin_dir: pathlib.Path, fixture: dict, allow_writes: bool = True) -> None:
