@@ -114,7 +114,13 @@ PR_STDERR="$(cat "$_PR_STDERR_FILE")"
 rm -f "$_PR_STDERR_FILE"
 
 echo "$TS $LOG_TAG pr_duty --plan exit=$PR_EXIT" >&2
-[[ -n "$PR_STDERR" ]] && echo "$TS $LOG_TAG pr stderr: $PR_STDERR" >&2
+# One journal line per stderr line: pr_duty writes one "PR #N [VERDICT] action: reason" line per
+# decision there, so every merge, skip and hold is visible in `journalctl --user -u pr-deploy-agent`.
+if [[ -n "$PR_STDERR" ]]; then
+  while IFS= read -r _line; do
+    echo "$TS $LOG_TAG pr: $_line" >&2
+  done <<< "$PR_STDERR"
+fi
 
 if [[ "$PR_STDOUT" == '{"prs": []}' ]] || [[ "$PR_STDOUT" == '{"prs":[]}' ]]; then
   echo "$TS $LOG_TAG no PRs to act on" >&2

@@ -1112,3 +1112,38 @@ class TestNotifyPostCatchesOsError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDecisionLinesOnStderr(unittest.TestCase):
+    """--json keeps stdout pure JSON and writes one readable decision line per PR to stderr."""
+
+    def test_one_stderr_line_per_decision(self):
+        pr_ready = _make_pr(number=30, head_sha="sha_log_ready", rollup=_make_green_rollup())
+        with tempfile.TemporaryDirectory() as tb, tempfile.TemporaryDirectory() as ts:
+            bin_dir = pathlib.Path(tb)
+            _make_fake_gh(
+                bin_dir,
+                {
+                    "pr list --state open": [pr_ready],
+                    "commits/sha_log_ready/status": _make_verdict_status("READY", "ok"),
+                },
+                allow_writes=False,
+            )
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "REPO": "ridopark/oh-my-tradeagent",
+                "PR_MODE": "recommend",
+                "STATE_DIR": ts,
+                "REPO_ROOT": str(AGENT_DIR.parents[2]),
+                "DISCORD_DRY_RUN": "1",
+                "PYTHONPATH": str(AGENT_DIR),
+            }
+            result = subprocess.run([sys.executable, str(SCRIPT), "--plan", "--json"],
+                                    capture_output=True, text=True, timeout=15, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = json.loads(result.stdout)  # stdout stays pure JSON
+            self.assertEqual([d["pr_number"] for d in out["prs"]], [30])
+            lines = [l for l in result.stderr.splitlines() if l.startswith("PR #")]
+            self.assertEqual(len(lines), 1, result.stderr)
+            self.assertTrue(lines[0].startswith("PR #30 [READY] "), lines[0])
