@@ -26,6 +26,7 @@ import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.enums.v1.EventType;
 import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
@@ -1127,6 +1128,30 @@ class PositionWorkflowImplContinueAsNewTest {
     assertThat(auditKinds("ExitDuplicateSuppressed"))
         .filteredOn(e -> "sig-x".equals(e.getSubject().get("signal_id")))
         .hasSize(2);
+
+    // Marker-absence: the new drain-dedupe gate is never read on this path (redeliveries reach the
+    // handler, not the drain as a second pre-init copy), so no preinit-stc-drain-dedupe-v1 marker
+    // appears in the history.
+    WorkflowExecutionHistory histNoMarker = env.getWorkflowClient().fetchHistory(wfId);
+    long drainDedupeMarkersAbsent =
+        histNoMarker.getEvents().stream()
+            .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+            .filter(
+                e ->
+                    e.getMarkerRecordedEventAttributes().getDetailsMap().entrySet().stream()
+                        .anyMatch(
+                            kv ->
+                                "changeId".equals(kv.getKey())
+                                    && kv.getValue().getPayloadsList().stream()
+                                        .anyMatch(
+                                            p ->
+                                                p.getData()
+                                                    .toStringUtf8()
+                                                    .contains("preinit-stc-drain-dedupe-v1"))))
+            .count();
+    assertThat(drainDedupeMarkersAbsent)
+        .as("no preinit-stc-drain-dedupe-v1 marker (gate only read on drain duplicate branch)")
+        .isEqualTo(0L);
   }
 
   /**
@@ -1196,6 +1221,29 @@ class PositionWorkflowImplContinueAsNewTest {
         .filteredOn(e -> "sig-y".equals(e.getSubject().get("signal_id")))
         .hasSize(2);
     assertThat(stub.positionState().remainingQty()).isEqualTo(3L);
+
+    // Marker-presence: the drain-dedupe gate IS read on this path (two copies are drain
+    // duplicates), so at least one preinit-stc-drain-dedupe-v1 marker must appear with version 1.
+    WorkflowExecutionHistory postHistory = client.fetchHistory(wfId);
+    long drainDedupeMarkersPresent =
+        postHistory.getEvents().stream()
+            .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+            .filter(
+                e ->
+                    e.getMarkerRecordedEventAttributes().getDetailsMap().entrySet().stream()
+                        .anyMatch(
+                            kv ->
+                                "changeId".equals(kv.getKey())
+                                    && kv.getValue().getPayloadsList().stream()
+                                        .anyMatch(
+                                            p ->
+                                                p.getData()
+                                                    .toStringUtf8()
+                                                    .contains("preinit-stc-drain-dedupe-v1"))))
+            .count();
+    assertThat(drainDedupeMarkersPresent)
+        .as("preinit-stc-drain-dedupe-v1 marker present (gate read on drain duplicate branch)")
+        .isGreaterThanOrEqualTo(1L);
   }
 
   /**

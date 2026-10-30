@@ -302,6 +302,18 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Issue #1023: pins the drain-dedupe gate literal. A renamed string re-resolves to
+   * DEFAULT_VERSION for legacy histories, silently reverting the suppression on in-flight workflows
+   * and placing a duplicate sell order — the exact bug this gate was added to prevent.
+   */
+  @Test
+  void versionPreinitStcDrainDedupeConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_PREINIT_STC_DRAIN_DEDUPE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("preinit-stc-drain-dedupe-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that
@@ -521,7 +533,17 @@ class PositionWorkflowImplLegacyReplayTest {
    * Step 2, defeating the {@code VERSION_PREINIT_STC_DRAIN_DEDUPE} gate (setting {@code >= 1} to
    * {@code >= DEFAULT_VERSION}) causes replay to fail with a {@code NonDeterministicException}
    * because the new gate replaces one {@code placeOrder} ScheduleActivityTask with an {@code
-   * audit.log} ScheduleActivityTask — a command-shape divergence the SDK catches.
+   * audit.log} ScheduleActivityTask — a command-shape divergence the SDK catches:
+   *
+   * <pre>
+   * io.temporal.worker.NonDeterministicException: [TMPRL1100] Failure handling event 93 of type
+   * 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' during replay. [TMPRL1100] Command
+   * COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK doesn't match event
+   * EVENT_TYPE_ACTIVITY_TASK_SCHEDULED with EventId=93 on check activityId with an expected
+   * value '600b75e1-1e43-3e48-8d99-163991e497dc' and an actual value
+   * '6f153761-bd67-3545-95e5-bfad25214cdc'. {WorkflowTaskStartedEventId=9223372036854775807,
+   * CurrentStartedEventId=91}
+   * </pre>
    *
    * <p>NEVER re-record this fixture after merge: a change that breaks it needs a version gate.
    */

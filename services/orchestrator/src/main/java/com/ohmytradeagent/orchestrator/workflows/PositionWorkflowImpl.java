@@ -893,6 +893,24 @@ public class PositionWorkflowImpl implements PositionWorkflow {
   private static final String VERSION_PREINIT_STC_DEDUPE = "preinit-stc-dedupe-v1";
 
   /**
+   * Issue #1023: when two or more copies of the same STC signal id all arrive before {@code run()}
+   * assigns {@code input} (all land in the first workflow task), the drain's {@code
+   * preInitBuffered.remove()} returns {@code true} for every copy and {@code processOne} is called
+   * for each — placing duplicate sell orders under the same intent key. Now: if the drained copy's
+   * signal id was already recorded as processed (the first copy's drain added it), the copy is
+   * suppressed with an {@code ExitDuplicateSuppressed} audit instead of being placed.
+   *
+   * <p>Read ONLY on the duplicate branch (after the {@code processedSignalIds.contains} check), so
+   * a history that never had a drain duplicate carries no marker and a legacy history that did
+   * (recorded before this fix) resolves {@code DEFAULT_VERSION} and falls through to {@code
+   * processOne} — reproducing the recorded double placement byte-identically.
+   *
+   * <p>Read in the main loop only (never inside a handler) per the repo's gate-ordering rule; see
+   * the {@code VERSION_BUFFERED_OPERATOR_AUDIT} javadoc.
+   */
+  private static final String VERSION_PREINIT_STC_DRAIN_DEDUPE = "preinit-stc-drain-dedupe-v1";
+
+  /**
    * Issue #762: an AUTOMATED daily-loss breach must not liquidate a position whose horizon outlives
    * the breaker's.
    *
@@ -2194,12 +2212,28 @@ public class PositionWorkflowImpl implements PositionWorkflow {
                   "deferred_until_init",
                   true));
         } else {
-          if (preInitBuffered.remove(req)
-              && Workflow.getVersion(VERSION_PREINIT_STC_DEDUPE, Workflow.DEFAULT_VERSION, 1)
+          boolean preInit = preInitBuffered.remove(req);
+          if (preInit
+              && processedSignalIds.contains(req.getSignalId())
+              && Workflow.getVersion(VERSION_PREINIT_STC_DRAIN_DEDUPE, Workflow.DEFAULT_VERSION, 1)
                   >= 1) {
-            processedSignalIds.add(req.getSignalId());
+            auditLog(
+                KIND_EXIT_DUPLICATE_SUPPRESSED,
+                subject(
+                    "signal_id",
+                    req.getSignalId(),
+                    "note",
+                    "preinit_drain_duplicate",
+                    "deferred_until_init",
+                    true));
+          } else {
+            if (preInit
+                && Workflow.getVersion(VERSION_PREINIT_STC_DEDUPE, Workflow.DEFAULT_VERSION, 1)
+                    >= 1) {
+              processedSignalIds.add(req.getSignalId());
+            }
+            processOne(req);
           }
-          processOne(req);
         }
       }
     }
