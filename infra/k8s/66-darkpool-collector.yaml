@@ -147,8 +147,9 @@ spec:
                 name: alpaca-credentials-data
           env:
             # Dark switch — see the header. "true" = log the cycle summary, post nothing.
+            # Flipped to "false" (live) on 2026-10-29 after one end-to-end cycle posted to the BFF.
             - name: DARKPOOL_DRY_RUN
-              value: "true"
+              value: "false"
             - name: DARKPOOL_POLL_SECS
               value: "60"
             # A print is kept individually iff off-exchange AND (notional >= MIN_NOTIONAL OR
