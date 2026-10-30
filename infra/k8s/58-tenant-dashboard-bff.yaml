@@ -104,6 +104,11 @@ spec:
             # accepting it.
             - name: SPRING_PROFILES_ACTIVE
               value: prod
+            # Dark-pool prints: `/internal/darkpool/ingest` (fed by 66-darkpool-collector.yaml) and the
+            # `/api/darkpool/*` reads behind the /dark-pool page. Flipped on 2026-10-29 (phase 4 of
+            # docs/plans/PLAN-2026-10-29-darkpool-prints.md); unset = both routes 404.
+            - name: DARKPOOL_ENABLED
+              value: "true"
             # Shared Temporal (matches api-gateway): the BFF queries positions and starts the
             # short-lived AccountSnapshotWorkflow on the orchestrator task queue.
             - name: TEMPORAL_TARGET
