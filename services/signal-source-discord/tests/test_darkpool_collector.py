@@ -158,6 +158,62 @@ def test_side_unknown_when_the_quote_is_stale_or_after_the_print():
 
 
 # ---------------------------------------------------------------------------
+# side — off-NBBO band guard (issue #1013)
+# ---------------------------------------------------------------------------
+
+
+def test_side_issue_1013_three_spy_prints_far_above_ask_are_unknown():
+    """SPY 126,311 sh @ 771.8561 while NBBO 768.19/768.20 must be unknown.
+    Band: spread=0.01, mid=768.195, 10 bp of mid=0.768195, D=0.768195,
+    upper bound=768.968195; 771.8561 >> 768.968195 -> unknown (issue #1013)."""
+    nbbo = Quote(bid=768.19, ask=768.20, ts=P - timedelta(seconds=1))
+    # three prints at the same off-NBBO price (different instants / IDs)
+    assert side(771.8561, nbbo, P) == "unknown"
+    assert side(771.8561, nbbo, P + timedelta(seconds=1)) == "unknown"
+    assert side(771.8561, nbbo, P + timedelta(seconds=2)) == "unknown"
+
+
+def test_side_within_nbbo_band_still_classifies_buy_and_sell():
+    """A print at ask + half a spread is within D (D ≈ 10 bp >> half-spread) -> buy.
+    A print at bid - half a spread -> sell. Neither must become unknown."""
+    nbbo = Quote(bid=499.98, ask=500.00, ts=P - timedelta(seconds=1))
+    # spread=0.02, half-spread=0.01; D=max(0.02, 0.49999)=0.49999
+    assert side(500.01, nbbo, P) == "buy"   # ask + half-spread, well within D
+    assert side(499.97, nbbo, P) == "sell"  # bid - half-spread, well within D
+
+
+def test_side_at_nbbo_band_boundary():
+    """Price exactly at the upper/lower edge of D stays classified;
+    one float-epsilon outside -> unknown."""
+    nbbo = Quote(bid=499.98, ask=500.00, ts=P - timedelta(seconds=1))
+    # spread=0.02, mid=499.99, 10bp=0.49999; D=0.49999
+    # upper = 500.00 + 0.49999 = 500.49999; lower = 499.98 - 0.49999 = 499.48001
+    assert side(500.49999, nbbo, P) == "buy"      # at upper bound (inclusive)
+    assert side(500.50001, nbbo, P) == "unknown"  # just outside upper bound
+    assert side(499.48001, nbbo, P) == "sell"     # at lower bound (inclusive)
+    assert side(499.47999, nbbo, P) == "unknown"  # just outside lower bound
+
+
+def test_aggregate_off_nbbo_print_counts_in_dp_and_large_but_not_buy_sell():
+    """An off-band KEPT print (side='unknown') must appear in dp_volume / large_count /
+    large_volume but NOT in buy_volume / sell_volume (issue #1013: only the buy/sell
+    split changes, totals are unchanged)."""
+    # 126311 @ 771.8561 notional ≈ 97.6 M >> 200 k -> KEPT and large
+    t = trade("2026-10-29T13:30:10Z", 771.8561, 126311, x="D", i=1013, symbol="SPY")
+    nbbo = Quote(bid=768.19, ask=768.20, ts=parse_ts("2026-10-29T13:30:09Z"))
+    nbbo_side = side(771.8561, nbbo, parse_ts("2026-10-29T13:30:10Z"))
+    assert nbbo_side == "unknown"
+    accs: dict = {}
+    aggregate([t], {1013: nbbo_side}, accs, min_notional=200_000, min_size=10_000)
+    (bar,) = [acc.to_wire() for acc in accs.values()]
+    assert bar["dp_volume"] == 126311
+    assert bar["large_count"] == 1
+    assert bar["large_volume"] == 126311
+    assert bar["buy_volume"] == 0
+    assert bar["sell_volume"] == 0
+
+
+# ---------------------------------------------------------------------------
 # bucket5m / format_ts
 # ---------------------------------------------------------------------------
 
