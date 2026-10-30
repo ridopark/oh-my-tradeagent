@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tick.sh — pr-deploy-agent tick (called by the systemd timer every 5 minutes)
 #
-# Checks the kill switch, acquires a non-blocking lock, loads config, and runs
-# the deploy gate (Step 1).  Exits 0 in all non-error paths so systemd does
-# not spam failure notifications.
+# Checks the kill switch, acquires a non-blocking lock, loads config, runs
+# the deploy gate (--decide), and checks post-roll verification (--verify).
+# Exits 0 in all non-error paths so systemd does not spam failure notifications.
 #
 # Env (loaded from ~/.config/pr-deploy-agent/env; also settable directly):
 #   REPO          GitHub repo slug   (default ridopark/oh-my-tradeagent)
@@ -64,15 +64,25 @@ export REPO HOMELAB_SSH DEPLOY_MODE PR_MODE STATE_DIR
 
 echo "$TS $LOG_TAG tick start (DEPLOY_MODE=$DEPLOY_MODE)" >&2
 
-# ── Deploy gate ─────────────────────────────────────────────────────────────
+# ── Deploy gate — decide ────────────────────────────────────────────────────
 cd "$REPO_ROOT"
-RESULT="$(python3 "$SCRIPT_DIR/deploy_gate.py" --decide --json 2>&1)"
-GATE_EXIT=$?
+DECIDE_RESULT="$(python3 "$SCRIPT_DIR/deploy_gate.py" --decide --json 2>&1)"
+DECIDE_EXIT=$?
 
-echo "$TS $LOG_TAG deploy_gate exit=$GATE_EXIT result=$RESULT" >&2
+echo "$TS $LOG_TAG deploy_gate --decide exit=$DECIDE_EXIT result=$DECIDE_RESULT" >&2
 
-if [[ "$RESULT" == '{"runs": []}' ]] || [[ "$RESULT" == '{"runs":[]}' ]]; then
+if [[ "$DECIDE_RESULT" == '{"runs": []}' ]] || [[ "$DECIDE_RESULT" == '{"runs":[]}' ]]; then
   echo "$TS $LOG_TAG nothing waiting" >&2
+fi
+
+# ── Deploy gate — verify ─────────────────────────────────────────────────────
+VERIFY_RESULT="$(python3 "$SCRIPT_DIR/deploy_gate.py" --verify --json 2>&1)"
+VERIFY_EXIT=$?
+
+echo "$TS $LOG_TAG deploy_gate --verify exit=$VERIFY_EXIT result=$VERIFY_RESULT" >&2
+
+if [[ "$VERIFY_RESULT" == '{"verifications": []}' ]] || [[ "$VERIFY_RESULT" == '{"verifications":[]}' ]]; then
+  echo "$TS $LOG_TAG nothing to verify" >&2
 fi
 
 echo "$TS $LOG_TAG tick done" >&2
