@@ -73,7 +73,7 @@ def post(repo_root: Path, title: str, body: str, color: str = "yellow") -> None:
     )
     try:
         urllib.request.urlopen(req, timeout=15)
-    except urllib.error.URLError:
+    except OSError:  # covers URLError, TimeoutError, and any network error
         pass  # best-effort; a Discord outage should not block the tick
 
 

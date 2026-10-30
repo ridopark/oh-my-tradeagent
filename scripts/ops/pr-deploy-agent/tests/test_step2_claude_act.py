@@ -615,9 +615,17 @@ class TestHumanOverrideDetection(unittest.TestCase):
 # Test: post-roll verification
 # ---------------------------------------------------------------------------
 
-def _build_deploy_json(svc: str, ready_replicas: int = 1, replicas: int = 1) -> dict:
+def _build_deploy_json(svc: str, ready_replicas: int = 1, replicas: int = 1,
+                        image: str = "ghcr.io/ridopark/test:latest") -> dict:
     """Build kubectl get deploy -o json style output."""
     return {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{"image": image}]
+                }
+            }
+        },
         "status": {
             "readyReplicas": ready_replicas,
             "replicas": replicas,
@@ -905,6 +913,137 @@ class TestWaitedTwoHours(unittest.TestCase):
             state2 = _sf.load(state_dir / "state.json")
             ts2 = state2["notified"].get(f"run:{run_id}:waited-2h")
             self.assertEqual(ts1, ts2, "Timestamp should not be updated on second tick")
+
+
+class TestVerifyUsesDeploySpecImageTag(unittest.TestCase):
+    """Item 1: post-roll check passes the tag from Deployment spec, not the pod imageID."""
+
+    def _setup_verify_with_tag_capture(
+        self, bin_dir: pathlib.Path, state_dir: pathlib.Path,
+        run_id: int, svc: str, tag: str,
+    ) -> pathlib.Path:
+        """Set up state/fakes.  Returns path where check script logs its argv."""
+        state_dir.mkdir(exist_ok=True)
+        state = {
+            "notified": {},
+            "approved_runs": {
+                str(run_id): {
+                    "services": [svc],
+                    "approved_at": "2026-10-29T10:00:00+00:00",
+                    "comment": "pr-deploy-agent: safe",
+                }
+            },
+        }
+        _sf = sys.modules["statefile"]
+        _sf.save(state_dir / "state.json", state)
+
+        run_info = {"id": run_id, "status": "completed", "conclusion": "success"}
+        fixture = {
+            "workflows/deploy.yml/runs": {"workflow_runs": []},
+            f"actions/runs/{run_id}": run_info,
+        }
+        _write_fake_gh(bin_dir, fixture)
+
+        # ssh returns deployment with tag ref in spec + healthy pods with imageID.
+        deploy_j = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{"image": tag}]
+                    }
+                }
+            },
+            "status": {"readyReplicas": 1, "replicas": 1},
+        }
+        pods_j = _build_pods_json(svc)
+        ssh_fixture = {
+            f"get deploy {svc}": {"stdout": json.dumps(deploy_j)},
+            "get pods": {"stdout": json.dumps(pods_j)},
+        }
+        _write_fake_ssh(bin_dir, ssh_fixture)
+
+        # check_image_current.py: records argv[1] and exits 0.
+        args_log = bin_dir / "check_image_args.txt"
+        fake_repo_scripts = bin_dir / "scripts" / "ops"
+        fake_repo_scripts.mkdir(parents=True, exist_ok=True)
+        fake_check = fake_repo_scripts / "check_image_current.py"
+        fake_check.write_text(
+            f"#!/usr/bin/env python3\n"
+            f"import sys\n"
+            f"with open({str(args_log)!r}, 'w') as f:\n"
+            f"    f.write(sys.argv[1] if len(sys.argv) > 1 else '')\n"
+            f"sys.exit(0)\n"
+        )
+        fake_check.chmod(fake_check.stat().st_mode | stat.S_IEXEC)
+        return args_log
+
+    def test_check_script_receives_tag_not_imageid(self):
+        """check_image_current.py must receive the tag ref, not the pod imageID."""
+        tag = "ghcr.io/ridopark/oh-my-tradeagent/dashboard:sha-deadbeef"
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            state_dir = pathlib.Path(tmp_state)
+            run_id = 98060
+            svc = "dashboard"
+
+            args_log = self._setup_verify_with_tag_capture(
+                bin_dir, state_dir, run_id, svc, tag,
+            )
+
+            _run_gate(bin_dir, state_dir,
+                      extra_env={"REPO_ROOT": str(bin_dir)},
+                      cmd=[sys.executable, str(SCRIPT), "--verify", "--json"])
+
+            self.assertTrue(args_log.exists(),
+                            "check_image_current.py was not called at all")
+            called_with = args_log.read_text().strip()
+            self.assertNotIn("@sha256:", called_with,
+                             f"Must NOT pass imageID (digest ref); got {called_with!r}")
+            self.assertEqual(called_with, tag,
+                             f"Must pass the tag ref from Deployment spec; got {called_with!r}")
+
+
+class TestDeferredRunIdsPruning(unittest.TestCase):
+    """Item 4: statefile.prune removes deferred runs older than 14 days; keeps others."""
+
+    def test_run_with_old_timestamp_is_pruned(self):
+        """A deferred run tracked for >14 days must be removed by prune."""
+        cutoff = datetime.now(tz=_UTC) - timedelta(days=15)
+        state = {
+            "deferred_run_ids": [12345],
+            "deferred_run_timestamps": {
+                "12345": cutoff.isoformat(),
+            },
+        }
+        _sf.prune(state)
+        self.assertNotIn(12345, state.get("deferred_run_ids", []),
+                         "Run older than 14 days must be pruned")
+
+    def test_run_with_no_timestamp_is_kept(self):
+        """A deferred run with no timestamp entry must NOT be pruned.
+
+        This covers pre-existing state from before timestamp tracking was added,
+        and new runs that have not yet been timestamped.
+        """
+        state = {
+            "deferred_run_ids": [99999],
+            # No deferred_run_timestamps entry for 99999
+        }
+        _sf.prune(state)
+        self.assertIn(99999, state.get("deferred_run_ids", []),
+                      "Run without a timestamp must not be pruned")
+
+    def test_run_with_recent_timestamp_is_kept(self):
+        """A deferred run tracked for <14 days must be kept."""
+        recent = (datetime.now(tz=_UTC) - timedelta(days=1)).isoformat()
+        state = {
+            "deferred_run_ids": [55555],
+            "deferred_run_timestamps": {"55555": recent},
+        }
+        _sf.prune(state)
+        self.assertIn(55555, state.get("deferred_run_ids", []),
+                      "Run younger than 14 days must be kept")
 
 
 if __name__ == "__main__":

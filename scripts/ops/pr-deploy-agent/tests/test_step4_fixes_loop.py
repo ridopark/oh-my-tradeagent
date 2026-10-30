@@ -635,7 +635,8 @@ class TestFixRoundWithGit(unittest.TestCase):
 
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("12", 0)
-        self.assertEqual(rounds, 0, f"Round should NOT increment when push is rejected; got {rounds}")
+        # Item-2 spec: count the round once Sonnet commits, regardless of push outcome.
+        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed (even if push rejected); got {rounds}")
 
     def test_recommend_mode_no_push(self):
         """PR_MODE=recommend → action='would-fix', no git push."""
@@ -744,10 +745,10 @@ class TestFixRoundWithGit(unittest.TestCase):
         self.assertIn("skip-review", d.get("reason", "").lower(),
                       f"reason must mention skip-review; got: {d.get('reason')}")
 
-        # Round must NOT increment
+        # Item-2 spec: round increments when Sonnet committed (push blocked counts).
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("14", 0)
-        self.assertEqual(rounds, 0, f"Round must not increment when push is blocked; got {rounds}")
+        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed even if push blocked; got {rounds}")
 
     def test_test_file_deletion_aborts_push(self):
         """Finding 8b: if the Sonnet fix deletes a test file, the push is refused.
@@ -836,10 +837,10 @@ class TestFixRoundWithGit(unittest.TestCase):
         self.assertIn("test", d.get("reason", "").lower(),
                       f"reason must mention test file; got: {d.get('reason')}")
 
-        # Round must NOT increment
+        # Item-2 spec: round increments when Sonnet committed (push blocked counts).
         state = _sf.load(self._state_dir / "state.json")
         rounds = state.get("pr_rounds", {}).get("15", 0)
-        self.assertEqual(rounds, 0, f"Round must not increment when push is blocked; got {rounds}")
+        self.assertEqual(rounds, 1, f"Round must increment when Sonnet committed even if push blocked; got {rounds}")
 
     def test_timeout_expired_but_committed_returns_true(self):
         """Finding 9: when _run_sonnet_fix times out but a commit was made before the
@@ -885,6 +886,104 @@ class TestFixRoundWithGit(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: statefile round functions (unit)
 # ---------------------------------------------------------------------------
+
+class TestAttemptKeyIdempotency(unittest.TestCase):
+    """Item 2: the per-(pr, head_sha) attempt key prevents re-acting on the same SHA."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._tmp_bin = tempfile.TemporaryDirectory()
+        self._tmp_state = tempfile.TemporaryDirectory()
+        self._bin = pathlib.Path(self._tmp_bin.name)
+        self._state_dir = pathlib.Path(self._tmp_state.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+        self._tmp_bin.cleanup()
+        self._tmp_state.cleanup()
+
+    def _setup(self, branch: str = "feat/idem") -> tuple[pathlib.Path, str]:
+        _, local, sha = _setup_git_repos(
+            pathlib.Path(self._tmpdir.name), branch=branch,
+        )
+        return local, sha
+
+    def test_second_tick_same_sha_skipped(self):
+        """Two ticks with the same (pr, head_sha): only the first acts, second is skip."""
+        local, sha = self._setup(branch="feat/idem-once")
+
+        pr = _make_needs_fixes_pr(number=31, head_sha=sha, head_ref="feat/idem-once")
+        _make_fake_gh(
+            self._bin,
+            {
+                "pr list --state open": [pr],
+                **_make_needs_fixes_status(sha),
+                **_make_bot_comment(31),
+            },
+            allow_writes=True,
+        )
+        _make_fake_claude(self._bin, should_commit=True)
+
+        # First tick — should act.
+        result1 = _run_pr_duty(
+            self._bin, self._state_dir,
+            extra_env={"PR_MODE": "act"}, repo_root=local,
+        )
+        d1 = result1["prs"][0]
+        # action is "fixed" (push succeeded) or "skip" (push failed): either is fine,
+        # the important thing is that it did NOT skip due to attempt key.
+        self.assertNotEqual(d1.get("reason"), "already attempted this head",
+                            "First tick must not be blocked by attempt key")
+
+        rounds_after_1 = _sf.load(self._state_dir / "state.json").get("pr_rounds", {}).get("31", 0)
+        self.assertEqual(rounds_after_1, 1, "Round must be 1 after first tick")
+
+        # Second tick — same SHA; must be skipped without touching rounds.
+        result2 = _run_pr_duty(
+            self._bin, self._state_dir,
+            extra_env={"PR_MODE": "act"}, repo_root=local,
+        )
+        d2 = result2["prs"][0]
+        self.assertEqual(d2["action"], "skip",
+                         "Second tick with same SHA must be skipped")
+        self.assertEqual(d2.get("reason"), "already attempted this head",
+                         f"Reason must say 'already attempted this head'; got {d2.get('reason')!r}")
+
+        rounds_after_2 = _sf.load(self._state_dir / "state.json").get("pr_rounds", {}).get("31", 0)
+        self.assertEqual(rounds_after_2, 1,
+                         "Round must not increment on second tick with same SHA")
+
+
+class TestSetupWorktreeTimeout(unittest.TestCase):
+    """Item 5: _setup_worktree TimeoutExpired → returns False, PR is skipped."""
+
+    def test_setup_worktree_timeout_returns_false(self):
+        """When git fetch times out, _setup_worktree must return False (not raise)."""
+        import unittest.mock
+        # Load pr_duty as a module so we can call _setup_worktree directly.
+        spec = importlib.util.spec_from_file_location("pr_duty_wt", SCRIPT)
+        assert spec and spec.loader
+        m = importlib.util.module_from_spec(spec)
+        # Inject deps
+        for dep in ("statefile", "notify"):
+            m.__dict__[dep] = sys.modules[dep]
+        sys.modules["pr_duty_wt"] = m
+        try:
+            spec.loader.exec_module(m)  # type: ignore[union-attr]
+        except Exception:
+            pass  # module-level side effects (e.g. missing env vars) are OK to ignore
+
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["git", "fetch"], timeout=60)
+            import tempfile as _tmp
+            with _tmp.TemporaryDirectory() as td:
+                result = m._setup_worktree(
+                    pathlib.Path(td) / "wt",
+                    "feat/some-branch",
+                    pathlib.Path(td),
+                )
+        self.assertFalse(result, "_setup_worktree must return False on TimeoutExpired")
+
 
 class TestStatefileRounds(unittest.TestCase):
     """Unit tests for get/set/reset_rounds in statefile.py."""

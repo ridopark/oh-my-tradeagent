@@ -6,8 +6,7 @@ Description=pr-deploy-agent — fire every 5 minutes
 OnBootSec=30s
 # Then every 5 minutes.
 OnUnitActiveSec=5min
-# Fire even if the previous tick is still running (it will exit immediately on the
-# flock; Type=oneshot means the service is "active" until the ExecStart exits).
+# AccuracySec widens the fire window slightly to reduce system wakeups.
 AccuracySec=10s
 
 [Install]

@@ -144,7 +144,6 @@ class RunDecision:
     verdict: str  # "safe" | "unsafe"
     reasons: list[str]
     created_at: str
-    pending: bool  # production-homelab env is still waiting for approval
 
 
 @dataclass
@@ -315,7 +314,6 @@ def decide_run(
             verdict="unsafe",
             reasons=["no waiting Roll jobs"],
             created_at=created_at,
-            pending=True,
         )
 
     for svc, cls in service_classes.items():
@@ -324,7 +322,10 @@ def decide_run(
         elif cls == "signal-watcher" and market_open:
             reasons.append(f"market open, signal-watcher service: {svc}")
         elif cls == "trading-path":
-            assert live is not None, "live state must be provided for trading-path runs"
+            if live is None:
+                raise RuntimeError(
+                    "live state must be provided for trading-path runs"
+                )
             unsafe, reason = is_trading_path_unsafe(live, market_open)
             if unsafe:
                 reasons.append(reason)
@@ -338,7 +339,6 @@ def decide_run(
         verdict=verdict,
         reasons=reasons,
         created_at=created_at,
-        pending=True,
     )
 
 
@@ -362,11 +362,29 @@ def _check_human_overrides(
     deferred = state.get("deferred_run_ids", [])
     to_remove: list[int] = []
     for run_id in list(deferred):
+        # Already fully handled.
         key = f"run:{run_id}:human-override"
         if _sf.is_notified(state, key):
-            # Already notified — remove from deferred so we don't keep checking
             to_remove.append(run_id)
             continue
+
+        # Also remove when the agent itself approved this run.
+        if str(run_id) in state.get("approved_runs", {}):
+            to_remove.append(run_id)
+            continue
+
+        # Remove runs that are no longer waiting (completed, cancelled, or 404).
+        try:
+            run_info = _get_run_info(repo, run_id)
+            run_status = run_info.get("status", "")
+            if run_status in ("completed", "cancelled"):
+                to_remove.append(run_id)
+                continue
+        except RuntimeError as exc:
+            if "404" in str(exc) or "Not Found" in str(exc):
+                to_remove.append(run_id)
+                continue
+
         try:
             approvals = _get_run_approvals(repo, run_id)
         except RuntimeError:
@@ -387,7 +405,11 @@ def _check_human_overrides(
                     )
                     to_remove.append(run_id)
                     break
-    # Remove notified/overridden runs from deferred list.
+                else:
+                    # Agent's own approval seen — remove from deferred.
+                    to_remove.append(run_id)
+                    break
+    # Remove handled runs from deferred list.
     for run_id in to_remove:
         try:
             deferred.remove(run_id)
@@ -414,8 +436,10 @@ def decide_all(
     try:
         runs = _list_waiting_runs(repo)
     except Exception as exc:
-        _notify.post(
-            repo_root,
+        # Use an hourly key so repeated failures produce at most one message per hour.
+        hour_key = f"list-runs-failed:{datetime.now(tz=_UTC).strftime('%Y-%m-%dT%H')}"
+        _notify.notify_once(
+            state, hour_key, repo_root,
             "[pr-deploy-agent] list-runs failed",
             str(exc),
             "red",
@@ -581,29 +605,73 @@ def _live_summary(live: "_live.LiveState | _live.LiveStateError | None") -> str:
 
 
 def _record_deferred(state: dict, run_id: int) -> None:
-    """Add run_id to state's deferred_run_ids list (idempotent)."""
+    """Add run_id to state's deferred_run_ids list (idempotent).
+
+    Also records the timestamp in deferred_run_timestamps so statefile.prune()
+    can age out entries older than 14 days.
+    """
     deferred = state.setdefault("deferred_run_ids", [])
     if run_id not in deferred:
         deferred.append(run_id)
+        state.setdefault("deferred_run_timestamps", {})[str(run_id)] = (
+            datetime.now(tz=_UTC).isoformat()
+        )
 
 
 # ---------------------------------------------------------------------------
 # Post-roll verification
 # ---------------------------------------------------------------------------
-def _ssh_cmd(homelab_ssh: str, remote_cmd: str, timeout: int = 30) -> str:
-    """Run a command on the homelab; raise RuntimeError on failure."""
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", homelab_ssh, remote_cmd],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ssh exit {result.returncode}: {result.stderr.strip()[:200]}")
-    return result.stdout
 
 
 _TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+def _resolve_tag_digest(tag_ref: str) -> str | None:
+    """Resolve the current registry digest for a tag reference via anonymous GHCR token.
+
+    Returns the Docker-Content-Digest (e.g. 'sha256:abc…'), or None on any error.
+    Only handles ghcr.io references; other registries return None.
+    """
+    import urllib.parse
+    import urllib.request
+
+    try:
+        registry, _, rest = tag_ref.partition("/")
+        if not rest or registry != "ghcr.io":
+            return None
+        repo, _, tag = rest.partition(":")
+        if not repo:
+            return None
+        tag = tag or "latest"
+        scope = urllib.parse.quote(f"repository:{repo}:pull")
+        req = urllib.request.Request(
+            f"https://ghcr.io/token?scope={scope}",
+            headers={"User-Agent": "pr-deploy-agent"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            token_data = json.loads(resp.read())
+        auth = f"Bearer {token_data['token']}"
+        manifest_url = f"https://ghcr.io/v2/{repo}/manifests/{tag}"
+        manifest_types = ",".join([
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        ])
+        req2 = urllib.request.Request(
+            manifest_url,
+            headers={"Authorization": auth, "Accept": manifest_types},
+            method="HEAD",
+        )
+        with urllib.request.urlopen(req2, timeout=15) as resp2:
+            digest = (
+                resp2.headers.get("Docker-Content-Digest")
+                or resp2.headers.get("docker-content-digest")
+                or ""
+            )
+        return digest or None
+    except Exception:
+        return None
 
 
 def _verify_service(
@@ -620,9 +688,9 @@ def _verify_service(
                 f"unsafe {label} token for ssh interpolation: {tok!r}"
             )
 
-    # 1. Deployment readiness
+    # 1. Deployment readiness — also extract the image tag from the spec.
     try:
-        deploy_json = _ssh_cmd(
+        deploy_json = _live._run_ssh(
             homelab_ssh,
             f"kubectl -n {copytrade_ns} get deploy {svc} -o json",
         )
@@ -636,9 +704,17 @@ def _verify_service(
     if ready < desired:
         return False, f"{svc}: readyReplicas {ready} < replicas {desired}"
 
-    # 2. Pod restart counts and image ID
+    # Extract the image tag ref from the Deployment spec (not the pod's imageID).
+    deploy_image: str = ""
+    for c in (deploy.get("spec") or {}).get("template", {}).get("spec", {}).get("containers", []):
+        img = c.get("image") or ""
+        if img and "@" not in img:  # skip digest-pinned refs
+            deploy_image = img
+            break
+
+    # 2. Pod restart counts and imageID digest
     try:
-        pods_json = _ssh_cmd(
+        pods_json = _live._run_ssh(
             homelab_ssh,
             f"kubectl -n {copytrade_ns} get pods -l app={svc} -o json",
         )
@@ -646,21 +722,24 @@ def _verify_service(
     except (RuntimeError, json.JSONDecodeError) as exc:
         return False, f"get pods {svc} failed: {exc}"
 
-    image_id: str = ""
+    pod_image_digest: str = ""
     for pod in pods_data.get("items", []):
         for cs in pod.get("status", {}).get("containerStatuses", []):
             restarts = cs.get("restartCount", 0) or 0
             if restarts > 0:
                 return False, f"{svc}: pod restart count {restarts}"
-            if not image_id:
+            if not pod_image_digest:
                 image_id = cs.get("imageID", "")
+                # imageID is "registry/repo@sha256:…" — extract the digest part.
+                if "@" in image_id:
+                    pod_image_digest = image_id.split("@", 1)[1]
 
-    # 3. Image currency check
-    if image_id:
+    # 3. Image currency check — pass the tag ref (not the imageID).
+    if deploy_image:
         check_script = repo_root / "scripts" / "ops" / "check_image_current.py"
         try:
             proc = subprocess.run(
-                ["python3", str(check_script), image_id],
+                ["python3", str(check_script), deploy_image],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -669,6 +748,15 @@ def _verify_service(
                 return False, f"{svc}: image STALE (check_image_current exit {proc.returncode})"
         except Exception as exc:
             return False, f"{svc}: image check failed: {exc}"
+
+        # 3b. Verify the pod is running the registry's current digest for the tag.
+        # If GHCR is unreachable the digest check is skipped (best-effort).
+        registry_digest = _resolve_tag_digest(deploy_image)
+        if registry_digest and pod_image_digest and registry_digest != pod_image_digest:
+            return False, (
+                f"{svc}: pod digest {pod_image_digest[:19]} does not match "
+                f"registry digest {registry_digest[:19]} for {deploy_image}"
+            )
 
     return True, ""
 

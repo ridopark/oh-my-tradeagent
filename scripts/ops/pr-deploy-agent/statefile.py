@@ -123,6 +123,26 @@ def prune(state: dict, days: int = 14) -> None:
     for k in merged_to_delete:
         del merged[k]
 
+    # Prune deferred_run_ids entries older than cutoff (tracked in deferred_run_timestamps).
+    deferred = state.get("deferred_run_ids", [])
+    timestamps = state.get("deferred_run_timestamps", {})
+    deferred_to_remove = []
+    for run_id in list(deferred):
+        ts = timestamps.get(str(run_id), "")
+        if not ts:
+            continue  # no timestamp yet — keep in list (recently added or pre-existing)
+        try:
+            if datetime.fromisoformat(ts) < cutoff:
+                deferred_to_remove.append(run_id)
+        except (ValueError, TypeError):
+            pass  # malformed timestamp — keep, don't prune
+    for run_id in deferred_to_remove:
+        try:
+            deferred.remove(run_id)
+        except ValueError:
+            pass
+        timestamps.pop(str(run_id), None)
+
 
 # ---------------------------------------------------------------------------
 # Round counter for the NEEDS_FIXES fix loop

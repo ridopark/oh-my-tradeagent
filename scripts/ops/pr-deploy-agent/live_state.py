@@ -18,7 +18,6 @@ CLI:  python3 live_state.py [--json]
       Exit 1: live-state read failed; JSON contains {"error": "<which>"}.
 
 Env:  HOMELAB_SSH   (default ridopark@192.168.10.123)
-      COPYTRADE_NS  (default copytrade)
 """
 from __future__ import annotations
 

@@ -4,8 +4,7 @@ Description=pr-deploy-agent tick
 
 [Service]
 Type=oneshot
-# Resolve the repo root relative to this unit's ConditionPathExists file.
-# tick.sh finds REPO_ROOT itself; we just need to point at the script.
+# tick.sh auto-detects REPO_ROOT from its own location; no ConditionPathExists needed.
 ExecStart=%h/src/oh-my-tradeagent/scripts/ops/pr-deploy-agent/tick.sh
 # Forward stdout+stderr to the journal under the unit name.
 StandardOutput=journal

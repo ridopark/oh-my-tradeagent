@@ -187,21 +187,13 @@ def _get_run_id_from_check(check: dict) -> int | None:
 def _get_failing_test_class(run_id: int, repo: str) -> str | None:
     """Return the first failing Java test class from `gh run view --log-failed`."""
     try:
-        result = subprocess.run(
-            ["gh", "run", "view", str(run_id), "--log-failed", "--repo", repo],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return None
-        text = result.stdout + result.stderr
-        # Match Java test class names (uppercase, ends with Test or Tests)
-        m = re.search(r"\b([A-Z][A-Za-z0-9_$]*(?:Test|Tests)[A-Za-z0-9_$]*)\b", text)
-        if m:
-            return m.group(1)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+        text = _gh("run", "view", str(run_id), "--log-failed", "--repo", repo, timeout=30)
+    except (RuntimeError, FileNotFoundError, OSError):
+        return None
+    # Match Java test class names (uppercase, ends with Test or Tests)
+    m = re.search(r"\b([A-Z][A-Za-z0-9_$]*(?:Test|Tests)[A-Za-z0-9_$]*)\b", text)
+    if m:
+        return m.group(1)
     return None
 
 
@@ -302,7 +294,14 @@ def _merge_pr(repo: str, pr_number: int, title: str, body: str, head_sha: str = 
 
     head_sha: the SHA the claude/verdict status was read on; passed as
     --match-head-commit so the merge is refused if the head has since moved.
+    Returns None (without calling gh) if head_sha is empty.
     """
+    if not head_sha:
+        import logging
+        logging.getLogger(__name__).warning(
+            "PR #%s: refusing to merge without a head SHA", pr_number
+        )
+        return None
     use_merge_commit = bool(_MERGE_COMMIT_RE.search(title) or _MERGE_COMMIT_RE.search(body))
     strategy = "--merge" if use_merge_commit else "--squash"
     cmd = ["pr", "merge", str(pr_number), strategy, "--delete-branch", "--repo", repo]
@@ -348,7 +347,7 @@ _VERIFY_SCHEMA = json.dumps({
 })
 
 
-_FINDINGS_CONTENT_RE = re.compile(r"^\s*[-*]|\d+\.", re.MULTILINE)
+_FINDINGS_CONTENT_RE = re.compile(r"^\s*(?:[-*]|\d+\.)", re.MULTILINE)
 
 
 def _get_findings_comment(repo: str, pr_number: int, verdict_created_at: str) -> str | None:
@@ -404,19 +403,25 @@ def _setup_worktree(
         )
 
     # Fetch the branch.
-    r = subprocess.run(
-        ["git", "fetch", "origin", head_ref],
-        cwd=str(repo_root), capture_output=True, text=True, timeout=60,
-    )
+    try:
+        r = subprocess.run(
+            ["git", "fetch", "origin", head_ref],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     if r.returncode != 0:
         return False
 
     # Create worktree.
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        ["git", "worktree", "add", str(worktree_path), f"origin/{head_ref}"],
-        cwd=str(repo_root), capture_output=True, text=True, timeout=30,
-    )
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "add", str(worktree_path), f"origin/{head_ref}"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return r.returncode == 0
 
 
@@ -449,7 +454,7 @@ def _worktree_is_clean(worktree_path: Path) -> bool:
 def _run_fable_verify(
     worktree_path: Path,
     findings_text: str,
-    timeout: int = 120,
+    timeout: int = 600,
 ) -> dict | None:
     """Run Fable 5.1 in the worktree to verify findings.
 
@@ -470,7 +475,7 @@ def _run_fable_verify(
                 "--max-turns", "20",
                 "--allowedTools",
                 "Read,Grep,Glob,"
-                "Bash(git log:*),Bash(git diff:*),Bash(mvn:*),Bash(uv run pytest:*)",
+                "Bash(git log:*),Bash(git diff:*),Bash(uv run pytest:*)",
                 full_prompt,
             ],
             cwd=str(worktree_path),
@@ -589,6 +594,15 @@ def _run_needs_fixes_round(
     head_sha: str = pr.get("headRefOid") or ""
     head_ref: str = pr.get("headRefName") or ""
 
+    # At most one attempt per (pr, head_sha).  A new push will produce a new head_sha,
+    # resetting this guard (the key is different).
+    attempt_key = f"pr:{pr_number}:{head_sha}:attempt"
+    if _sf.is_notified(state, attempt_key):
+        return PRDecision(
+            pr_number, title, head_sha, "NEEDS_FIXES", "skip",
+            "already attempted this head",
+        )
+
     rounds = _sf.get_rounds(state, pr_number)
 
     # Cap: 3 rounds exhausted, apply needs-input label and ping once.
@@ -623,12 +637,18 @@ def _run_needs_fixes_round(
         )
 
     # Act mode: run a full fix round.
+    # Mark this (pr, head) attempt immediately so the same SHA is not retried on the
+    # next tick.  Increment the round count only when Sonnet actually commits something
+    # (regardless of whether the subsequent push succeeds).
+    _sf.mark_notified(state, attempt_key)
+
     worktree_path = state_dir / "worktrees" / f"pr-{pr_number}"
 
     # 1. Set up worktree.
     if not _setup_worktree(worktree_path, head_ref, repo_root):
-        _notify.post(
-            repo_root,
+        wt_key = f"pr:{pr_number}:{head_sha}:worktree-failed"
+        _notify.notify_once(
+            state, wt_key, repo_root,
             f"[pr-deploy-agent] PR #{pr_number} worktree setup failed",
             f"PR #{pr_number} \"{title}\": could not fetch/create worktree for {head_ref}",
             "red",
@@ -644,6 +664,13 @@ def _run_needs_fixes_round(
         # 3. Run Fable verify.
         verify_result = _run_fable_verify(worktree_path, findings_text)
         if verify_result is None:
+            vf_key = f"pr:{pr_number}:{head_sha}:verify-failed"
+            _notify.notify_once(
+                state, vf_key, repo_root,
+                f"[pr-deploy-agent] PR #{pr_number} verify failed",
+                f"PR #{pr_number} \"{title}\": Fable verify returned no result (round {rounds + 1})",
+                "red",
+            )
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "verify failed")
 
         confirmed = verify_result.get("confirmed") or []
@@ -651,8 +678,9 @@ def _run_needs_fixes_round(
         out_of_scope = verify_result.get("out_of_scope") or []
 
         if not confirmed:
-            # Nothing to fix — post rejection comment and stop.
-            _post_rejected_findings_comment(repo, pr_number, wrong, out_of_scope)
+            # Nothing to fix — only post comment if there is something to say.
+            if wrong or out_of_scope:
+                _post_rejected_findings_comment(repo, pr_number, wrong, out_of_scope)
             return PRDecision(
                 pr_number, title, head_sha, "NEEDS_FIXES", "skip",
                 "no confirmed findings",
@@ -661,13 +689,17 @@ def _run_needs_fixes_round(
         # 4. Run Sonnet fix.
         committed = _run_sonnet_fix(worktree_path, confirmed)
         if not committed:
-            _notify.post(
-                repo_root,
+            fn_key = f"pr:{pr_number}:{head_sha}:fix-nothing"
+            _notify.notify_once(
+                state, fn_key, repo_root,
                 f"[pr-deploy-agent] PR #{pr_number} fix produced nothing",
                 f"PR #{pr_number} \"{title}\": Sonnet made no commit on round {rounds + 1}",
                 "yellow",
             )
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", "fix produced nothing")
+
+        # Sonnet committed something — count the round regardless of what happens next.
+        _sf.set_rounds(state, pr_number, rounds + 1)
 
         # 5. Refuse if worktree is dirty after Sonnet.
         if not _worktree_is_clean(worktree_path):
@@ -713,20 +745,18 @@ def _run_needs_fixes_round(
         if push_result.returncode != 0:
             err = push_result.stderr.strip()
             reason = "remote head moved" if ("non-fast-forward" in err or "rejected" in err) else "push failed"
-            _notify.post(
-                repo_root,
+            pf_key = f"pr:{pr_number}:{head_sha}:push-failed"
+            _notify.notify_once(
+                state, pf_key, repo_root,
                 f"[pr-deploy-agent] PR #{pr_number} push failed",
                 f"PR #{pr_number} \"{title}\": {reason} — {err[:120]}",
                 "red",
             )
             return PRDecision(pr_number, title, head_sha, "NEEDS_FIXES", "skip", reason)
 
-        # 7. Post rejected-findings comment.
+        # 7. Post rejected-findings comment (only when there is content).
         if wrong or out_of_scope:
             _post_rejected_findings_comment(repo, pr_number, wrong, out_of_scope)
-
-        # 8. Increment round counter.
-        _sf.set_rounds(state, pr_number, rounds + 1)
 
         return PRDecision(
             pr_number, title, head_sha, "NEEDS_FIXES", "fixed",
@@ -852,7 +882,18 @@ def plan_all(
     # Post operator steps for previously merged PRs.
     _post_operator_steps(repo, state, repo_root)
 
-    prs = _list_prs(repo)
+    try:
+        prs = _list_prs(repo)
+    except Exception as exc:
+        # Use an hourly key so repeated failures produce at most one message per hour.
+        hour_key = f"list-prs-failed:{datetime.now(tz=_UTC).strftime('%Y-%m-%dT%H')}"
+        _notify.notify_once(
+            state, hour_key, repo_root,
+            "[pr-deploy-agent] list-prs failed",
+            str(exc),
+            "red",
+        )
+        return []
     decisions: list[PRDecision] = []
 
     for pr in prs:
@@ -1014,10 +1055,11 @@ def plan_all(
         if pr_mode == "act":
             merge_commit = _merge_pr(repo, pr_number, title, body, head_sha=head_sha)
             if merge_commit is not None:
+                strategy = "merge-commit" if _MERGE_COMMIT_RE.search(title) or _MERGE_COMMIT_RE.search(body) else "squash"
                 _notify.post(
                     repo_root,
                     f"[pr-deploy-agent] PR #{pr_number} merged",
-                    f"PR #{pr_number} \"{title}\" squash-merged: `{merge_commit}`",
+                    f"PR #{pr_number} \"{title}\" merged ({strategy}): `{merge_commit}`",
                     "green",
                 )
                 # Remember for operator-steps tracking.

@@ -873,5 +873,141 @@ class TestPlanJsonSubprocess(unittest.TestCase):
                         "Body with bullet points must match the findings content regex")
 
 
+class TestMergePrRefusesEmptyHeadSha(unittest.TestCase):
+    """Item 3: _merge_pr must return None (no gh call) when head_sha is empty."""
+
+    def test_empty_head_sha_returns_none_no_gh_call(self):
+        """_merge_pr(head_sha='') must return None without invoking gh."""
+        calls: list = []
+        original = pd._gh
+
+        def _fake_gh(*args):
+            calls.append(args)
+            return original(*args)
+
+        pd._gh = _fake_gh
+        try:
+            result = pd._merge_pr("owner/repo", 99, "fix: something", "body", head_sha="")
+            self.assertIsNone(result, "_merge_pr must return None when head_sha is empty")
+            self.assertEqual(calls, [], "gh must not be called when head_sha is empty")
+        finally:
+            pd._gh = original
+
+
+class TestFindingsContentRegex(unittest.TestCase):
+    """Item 9: _FINDINGS_CONTENT_RE must require the list marker at the line start."""
+
+    RE = pd._FINDINGS_CONTENT_RE
+
+    def test_bullet_dash_matches(self):
+        self.assertTrue(self.RE.search("- finding 1: missing import"),
+                        "dash bullet must match")
+
+    def test_bullet_star_matches(self):
+        self.assertTrue(self.RE.search("* finding 2: bad import"),
+                        "star bullet must match")
+
+    def test_numbered_list_matches(self):
+        self.assertTrue(self.RE.search("1. fix the type"),
+                        "numbered item must match")
+
+    def test_indented_bullet_matches(self):
+        self.assertTrue(self.RE.search("  - indented item"),
+                        "indented bullet must match")
+
+    def test_version_number_in_prose_does_not_match(self):
+        """'see v1.2 of the docs' must NOT match — '1.' is mid-line."""
+        text = "see v1.2 of the docs"
+        self.assertFalse(self.RE.search(text),
+                         f"prose with mid-line number must not match; text={text!r}")
+
+    def test_multiline_finds_bullet_in_second_line(self):
+        """MULTILINE flag: bullet on a later line is found."""
+        text = "Summary\n- item one\n"
+        self.assertTrue(self.RE.search(text),
+                        "MULTILINE mode must find bullet in second line")
+
+
+class TestListPrsFailureExitsZero(unittest.TestCase):
+    """Item 5: _list_prs failure → log + notify_once red (hourly key) + exit 0."""
+
+    def test_gh_pr_list_failure_script_exits_zero(self):
+        """If gh pr list exits non-zero, pr_duty.py must still exit 0."""
+        with tempfile.TemporaryDirectory() as tmp_bin, \
+             tempfile.TemporaryDirectory() as tmp_state:
+            bin_dir = pathlib.Path(tmp_bin)
+            state_dir = pathlib.Path(tmp_state)
+            # Fake gh that always exits 1 (simulates gh auth failure)
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if len(sys.argv) >= 2 and sys.argv[1] == 'pr':\n"
+                "    sys.stderr.write('gh: not logged in\\n')\n"
+                "    sys.exit(1)\n"
+                "sys.exit(0)\n"
+            )
+            gh.chmod(gh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "REPO": "ridopark/oh-my-tradeagent",
+                "PR_MODE": "recommend",
+                "STATE_DIR": str(state_dir),
+                "REPO_ROOT": str(AGENT_DIR.parents[2]),
+                "DISCORD_DRY_RUN": "1",
+                "PYTHONPATH": str(AGENT_DIR),
+            }
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--plan", "--json"],
+                capture_output=True, text=True, timeout=15, env=env,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"pr_duty.py must exit 0 on _list_prs failure; stderr={result.stderr!r}")
+
+
+class TestNotifyPostCatchesOsError(unittest.TestCase):
+    """Item 6: notify.post must swallow OSError (covers URLError and TimeoutError)."""
+
+    def test_post_swallows_oserror_from_urlopen(self):
+        """notify.post must not propagate OSError when urlopen raises."""
+        import urllib.error
+        import importlib
+
+        # Load notify as a module so we can test it directly.
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "notify_test_item6",
+            AGENT_DIR / "notify.py",
+        )
+        assert spec and spec.loader
+        m = importlib.util.module_from_spec(spec)
+        # Inject statefile dep
+        m.statefile = sys.modules.get("statefile")  # type: ignore[attr-defined]
+        spec.loader.exec_module(m)  # type: ignore[union-attr]
+
+        # Patch urlopen to raise URLError (a subclass of OSError).
+        original = m.urllib.request.urlopen
+
+        def _raise_url_error(req, timeout=None):
+            raise urllib.error.URLError("simulated network failure")
+
+        m.urllib.request.urlopen = _raise_url_error
+        import os as _os
+        env_bak = _os.environ.get("DISCORD_WEBHOOK_URL")
+        _os.environ["DISCORD_WEBHOOK_URL"] = "http://fake.invalid/hook"
+        try:
+            # Must not raise
+            m.post(pathlib.Path("/tmp"), "title", "body", "red")
+        except OSError as exc:
+            self.fail(f"notify.post propagated OSError: {exc}")
+        finally:
+            m.urllib.request.urlopen = original
+            if env_bak is None:
+                _os.environ.pop("DISCORD_WEBHOOK_URL", None)
+            else:
+                _os.environ["DISCORD_WEBHOOK_URL"] = env_bak
+
+
 if __name__ == "__main__":
     unittest.main()
