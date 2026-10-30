@@ -28,7 +28,9 @@ import com.ohmytradeagent.orchestrator.activities.MarketCalendarActivities;
 import com.ohmytradeagent.orchestrator.activities.SubscribePremiumActivity;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.api.enums.v1.EventType;
 import io.temporal.api.enums.v1.IndexedValueType;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -46,8 +48,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -297,6 +302,18 @@ class PositionWorkflowImplLegacyReplayTest {
   }
 
   /**
+   * Issue #1023: pins the drain-dedupe gate literal. A renamed string re-resolves to
+   * DEFAULT_VERSION for legacy histories, silently reverting the suppression on in-flight workflows
+   * and placing a duplicate sell order — the exact bug this gate was added to prevent.
+   */
+  @Test
+  void versionPreinitStcDrainDedupeConstantNameIsStable() throws Exception {
+    Field marker = PositionWorkflowImpl.class.getDeclaredField("VERSION_PREINIT_STC_DRAIN_DEDUPE");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("preinit-stc-drain-dedupe-v1");
+  }
+
+  /**
    * The main replay assertion: replays the pre-#276 history against the current impl and verifies
    * no {@code NonDeterministicWorkflowError}. The recorded {@code PartialExitFilled} subject has no
    * {@code option_symbol} key; the current impl's v=DEFAULT_VERSION branch must reproduce that
@@ -472,6 +489,322 @@ class PositionWorkflowImplLegacyReplayTest {
           WorkflowExecutionHistory.fromJson(new String(in.readAllBytes(), StandardCharsets.UTF_8));
     }
     WorkflowReplayer.replayWorkflowExecution(history, PositionWorkflowImpl.class);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Issue #1023: preinit-drain double-place legacy fixture
+  // ---------------------------------------------------------------------------
+
+  private static final String PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_RESOURCE =
+      "temporal/replay/position-preinit-drain-double-place-legacy-history.json";
+  private static final Path PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_SOURCE_PATH =
+      Path.of(
+          "src/test/resources/temporal/replay/"
+              + "position-preinit-drain-double-place-legacy-history.json");
+  private static final String PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID =
+      "preinit-drain-double-place-recorder";
+  // Must be a FUTURE expiry date so VERSION_EXPIRE_WORTHLESS_NO_TIMER's worthless-close guard
+  // (gated on !eodTimerArmed && !expiryDate.isAfter(currentEtDate())) does not fire after the
+  // entry fill. An expired symbol trips this guard and exits the workflow before the drain runs.
+  private static final String PREINIT_DRAIN_OCC_SYMBOL =
+      "NVDA  "
+          + LocalDate.now(ZoneId.of("America/New_York"))
+              .plusYears(2)
+              .format(DateTimeFormatter.ofPattern("yyMMdd"))
+          + "C00140000";
+
+  /**
+   * Fixture precondition check and replay. The history was recorded on {@code b6ad6321} (before
+   * {@code VERSION_PREINIT_STC_DRAIN_DEDUPE} existed) by driving the REAL {@link
+   * PositionWorkflowImpl} through the all-copies-pre-init ordering: three 0.5 copies of {@code
+   * sig-y} land before any worker polls, so the drain places two orders (copies 1 and 2; copy 3
+   * hits the runner-quantum SKIP), then a {@code sig-full} 1.0 closes the remaining 1 lot.
+   *
+   * <p>Preconditions verified here (toothiness proof):
+   *
+   * <ul>
+   *   <li>Exactly two {@code ActivityTaskScheduled} events whose input contains {@code :exit:sig-y}
+   *       — the double placement the fix removes.
+   *   <li>Zero {@code MarkerRecorded} events with {@code changeId=preinit-stc-drain-dedupe-v1} —
+   *       the marker did not exist when the fixture was recorded.
+   * </ul>
+   *
+   * <p>Replay verifies no {@code NonDeterministicException} on the CURRENT (un-gated) code path. In
+   * Step 2, defeating the {@code VERSION_PREINIT_STC_DRAIN_DEDUPE} gate (setting {@code >= 1} to
+   * {@code >= DEFAULT_VERSION}) causes replay to fail with a {@code NonDeterministicException}
+   * because the new gate replaces one {@code placeOrder} ScheduleActivityTask with an {@code
+   * audit.log} ScheduleActivityTask — a command-shape divergence the SDK catches:
+   *
+   * <pre>
+   * io.temporal.worker.NonDeterministicException: [TMPRL1100] Failure handling event 93 of type
+   * 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' during replay. [TMPRL1100] Command
+   * COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK doesn't match event
+   * EVENT_TYPE_ACTIVITY_TASK_SCHEDULED with EventId=93 on check activityId with an expected
+   * value '600b75e1-1e43-3e48-8d99-163991e497dc' and an actual value
+   * '6f153761-bd67-3545-95e5-bfad25214cdc'. {WorkflowTaskStartedEventId=9223372036854775807,
+   * CurrentStartedEventId=91}
+   * </pre>
+   *
+   * <p>NEVER re-record this fixture after merge: a change that breaks it needs a version gate.
+   *
+   * <p>Not the only tripwire for this gate: {@code position-preinit-redelivery-legacy-history.json}
+   * (recorded pre-#964) also reaches the duplicate branch and fails replay if the gate is defeated.
+   * Both are intended; do not "fix" either as a duplicate test.
+   */
+  @Test
+  void preInitDrainDoublePlaceLegacyHistoryReplaysWithoutNonDeterminism() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_RESOURCE))
+        .as(
+            "Missing fixture %s. Record ONCE with"
+                + " `mvn -pl services/orchestrator test"
+                + " -Dgenerate.preinit.drain.fixture=true"
+                + " -Dtest=PositionWorkflowImplLegacyReplayTest"
+                + "#regeneratePreInitDrainDoublePlaceFixture`",
+            PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    String json;
+    try (var in =
+        getClass()
+            .getClassLoader()
+            .getResourceAsStream(PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_RESOURCE)) {
+      json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    }
+    WorkflowExecutionHistory history = WorkflowExecutionHistory.fromJson(json);
+
+    // Precondition: two :exit:sig-y placements, no drain-dedupe marker.
+    // (Recorded on b6ad6321 before VERSION_PREINIT_STC_DRAIN_DEDUPE existed.)
+    long sigYPlacements =
+        history.getEvents().stream()
+            .filter(HistoryEvent::hasActivityTaskScheduledEventAttributes)
+            .filter(
+                e ->
+                    e
+                        .getActivityTaskScheduledEventAttributes()
+                        .getInput()
+                        .getPayloadsList()
+                        .stream()
+                        .anyMatch(p -> p.getData().toStringUtf8().contains(":exit:sig-y")))
+            .count();
+    long drainDedupeMarkers =
+        history.getEvents().stream()
+            .filter(HistoryEvent::hasMarkerRecordedEventAttributes)
+            .filter(
+                e ->
+                    e.getMarkerRecordedEventAttributes().getDetailsMap().entrySet().stream()
+                        .anyMatch(
+                            kv ->
+                                "changeId".equals(kv.getKey())
+                                    && kv.getValue().getPayloadsList().stream()
+                                        .anyMatch(
+                                            p ->
+                                                p.getData()
+                                                    .toStringUtf8()
+                                                    .contains("preinit-stc-drain-dedupe-v1"))))
+            .count();
+    assertThat(sigYPlacements)
+        .as("fixture has the double placement: two :exit:sig-y ActivityTaskScheduled events")
+        .isEqualTo(2L);
+    assertThat(drainDedupeMarkers)
+        .as("fixture has no preinit-stc-drain-dedupe-v1 marker (recorded before the fix)")
+        .isEqualTo(0L);
+
+    WorkflowReplayer.replayWorkflowExecution(history, PositionWorkflowImpl.class);
+  }
+
+  /**
+   * One-shot fixture generator. Drives the REAL {@link PositionWorkflowImpl} through the
+   * all-copies-pre-init ordering: three 0.5 copies of {@code sig-y} are sent before any worker
+   * polls (forced by rebuilding the env without starting), then the three placements / skips are
+   * filled in order, then a {@code sig-full} (fraction 1.0) closes the remaining 1 lot.
+   *
+   * <p>The history precondition (3 {@code WorkflowExecutionSignaled}, 0 {@code
+   * WorkflowTaskStarted}) is asserted before {@code env.start()} — if it cannot be met, stop; the
+   * recorder relies on the in-memory service starting in {@code newInstance()}, with {@code
+   * start()} only starting the worker factory.
+   *
+   * <p>Run ONCE on unmodified production code ({@code b6ad6321}) via:
+   *
+   * <pre>
+   * mvn -pl services/orchestrator test -Dgenerate.preinit.drain.fixture=true \
+   *   -Dtest=PositionWorkflowImplLegacyReplayTest#regeneratePreInitDrainDoublePlaceFixture
+   * </pre>
+   *
+   * <p>NEVER re-record after merge.
+   */
+  @Test
+  @EnabledIfSystemProperty(named = "generate.preinit.drain.fixture", matches = "true")
+  void regeneratePreInitDrainDoublePlaceFixture() throws Exception {
+    TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    String json;
+    try {
+      env.registerSearchAttribute("TenantStrategy", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      env.registerSearchAttribute("ContractSymbol", IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD);
+      Worker coreWorker = env.newWorker(CORE_QUEUE);
+      coreWorker.registerWorkflowImplementationTypes(PositionWorkflowImpl.class);
+
+      AuditActivities audit = Mockito.mock(AuditActivities.class);
+      MarketCalendarActivities calendar = Mockito.mock(MarketCalendarActivities.class);
+      ExecActivities exec = Mockito.mock(ExecActivities.class);
+      SubscribePremiumActivity marketData = Mockito.mock(SubscribePremiumActivity.class);
+      GetOptionQuoteActivity optionQuote = Mockito.mock(GetOptionQuoteActivity.class);
+
+      when(calendar.durationUntilEodEt()).thenReturn(Duration.ofHours(8));
+      when(calendar.durationUntilExpiryCloseEt(any(), any())).thenReturn(Duration.ZERO);
+      when(calendar.durationUntilExpiryFlattenEt(any(), Mockito.anyLong(), any()))
+          .thenReturn(Duration.ZERO);
+      when(exec.placeOrder(any())).thenReturn(submitted());
+
+      SubscribePremiumResult subscribed = new SubscribePremiumResult();
+      subscribed.setSchemaVersion(1L);
+      subscribed.setSubscriptionId("sub-preinit-drain");
+      subscribed.setSubscribedAt(OffsetDateTime.now());
+      subscribed.setStatus(SubscribePremiumResult.Status.SUBSCRIBED);
+      when(marketData.subscribePremium(any())).thenReturn(subscribed);
+
+      OptionQuoteResult quote = new OptionQuoteResult();
+      quote.setSchemaVersion(1L);
+      quote.setContractSymbol(PREINIT_DRAIN_OCC_SYMBOL);
+      quote.setBid(new BigDecimal("2.50"));
+      quote.setMid(new BigDecimal("2.55"));
+      quote.setAsk(new BigDecimal("2.60"));
+      quote.setRetrievedAt(OffsetDateTime.now());
+      quote.setStatus(OptionQuoteResult.Status.OK);
+      when(optionQuote.getOptionQuote(any())).thenReturn(quote);
+
+      coreWorker.registerActivitiesImplementations(audit, calendar);
+      env.newWorker(CopytradeSignalWorkflowImpl.EXEC_TASK_QUEUE_ALPACA_PAPER)
+          .registerActivitiesImplementations(exec);
+      env.newWorker(PositionWorkflowImpl.MARKET_DATA_TASK_QUEUE)
+          .registerActivitiesImplementations(marketData, optionQuote);
+      // Do NOT call env.start() yet — forced ordering requires all signals in history first.
+
+      WorkflowClient client = env.getWorkflowClient();
+      PositionWorkflow wf =
+          client.newWorkflowStub(
+              PositionWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setTaskQueue(CORE_QUEUE)
+                  .setWorkflowId(PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID)
+                  .setTypedSearchAttributes(
+                      SearchAttributes.newBuilder()
+                          .set(
+                              SearchAttributeKey.forKeyword("TenantStrategy"),
+                              "t-dev/s-copytrade-v1")
+                          .set(
+                              SearchAttributeKey.forKeyword("ContractSymbol"),
+                              PREINIT_DRAIN_OCC_SYMBOL)
+                          .build())
+                  .build());
+
+      // Send all three copies before any worker polls.
+      WorkflowStub.fromTyped(wf)
+          .signalWithStart(
+              "partialExit",
+              new Object[] {preinitDrainPartialExitRequest("sig-y", 0.5)},
+              new Object[] {preinitDrainInput()});
+      wf.partialExit(preinitDrainPartialExitRequest("sig-y", 0.5));
+      wf.partialExit(preinitDrainPartialExitRequest("sig-y", 0.5));
+
+      // History precondition: all three copies in history before any task starts.
+      WorkflowExecutionHistory preHistory =
+          client.fetchHistory(PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID);
+      long signalCount =
+          preHistory.getEvents().stream()
+              .filter(e -> e.getEventType() == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
+              .count();
+      long taskStartedCount =
+          preHistory.getEvents().stream()
+              .filter(e -> e.getEventType() == EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED)
+              .count();
+      assertThat(signalCount).as("3 WorkflowExecutionSignaled before any task").isEqualTo(3L);
+      assertThat(taskStartedCount).as("0 WorkflowTaskStarted before env.start()").isEqualTo(0L);
+
+      // Now start workers.
+      env.start();
+
+      // Entry fill: sent after workers start. The 90-second entry-fill TTL is a SIMULATED timer;
+      // TestWorkflowEnvironment does not auto-advance past it while the test thread is active and
+      // the signal is in flight, so delivering it after env.start() is safe here.
+      wf.onFill(fill("brk-entry", 6L, "2.30"));
+
+      // Wait for copy-1 placement (ceil(6 * 0.5) = 3 lots).
+      long placeOrderDeadline = System.currentTimeMillis() + 50_000;
+      while (System.currentTimeMillis() < placeOrderDeadline) {
+        try {
+          Mockito.verify(exec, Mockito.atLeast(1)).placeOrder(Mockito.any());
+          break;
+        } catch (AssertionError ignored) {
+          Thread.sleep(50);
+        }
+      }
+      Mockito.verify(exec, Mockito.atLeast(1)).placeOrder(Mockito.any());
+      wf.onFill(fill("brk-exit-1", 3L, "2.60"));
+
+      // Wait for copy-2 placement (ceil(3 * 0.5) = 2 lots).
+      awaitCondition(
+          () ->
+              Mockito.mockingDetails(exec).getInvocations().stream()
+                      .filter(i -> i.getMethod().getName().equals("placeOrder"))
+                      .count()
+                  >= 2,
+          "second placement (copy 2)");
+      wf.onFill(fill("brk-exit-2", 2L, "2.60"));
+
+      // Copy 3: remainingQty=1, fraction=0.5 → runner-quantum SKIP (no placeOrder). Send sig-full
+      // to drain remaining 1 lot and complete the workflow.
+      wf.partialExit(preinitDrainPartialExitRequest("sig-full", 1.0));
+
+      // Wait for sig-full placement (1 lot).
+      awaitCondition(
+          () ->
+              Mockito.mockingDetails(exec).getInvocations().stream()
+                      .filter(i -> i.getMethod().getName().equals("placeOrder"))
+                      .count()
+                  >= 3,
+          "third placement (sig-full)");
+      wf.onFill(fill("brk-exit-full", 1L, "2.60"));
+
+      // Wait for workflow completion.
+      client.newUntypedWorkflowStub(PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID).getResult(String.class);
+
+      json = client.fetchHistory(PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID).toJson(true);
+    } finally {
+      env.close();
+    }
+
+    assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
+    Files.createDirectories(PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_SOURCE_PATH.getParent());
+    Files.writeString(PREINIT_DRAIN_DOUBLE_PLACE_FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+  }
+
+  private static PositionWorkflowInput preinitDrainInput() {
+    PositionWorkflowInput in = new PositionWorkflowInput();
+    in.setSchemaVersion(1L);
+    in.setTenantId("dev");
+    in.setStrategyId("copytrade-v1");
+    in.setEntrySignalId("preinit-drain-entry-1");
+    in.setContractSymbol(PREINIT_DRAIN_OCC_SYMBOL);
+    in.setQty(6L);
+    in.setEntryPremium(new BigDecimal("2.30"));
+    return in;
+  }
+
+  private static PartialExitRequest preinitDrainPartialExitRequest(
+      String signalId, double fraction) {
+    PartialExitRequest req = new PartialExitRequest();
+    req.setSchemaVersion(1L);
+    req.setTenantId("dev");
+    req.setStrategyId("copytrade-v1");
+    req.setSignalId(signalId);
+    req.setPositionWorkflowId(PREINIT_DRAIN_DOUBLE_PLACE_WORKFLOW_ID);
+    req.setFraction(BigDecimal.valueOf(fraction));
+    req.setRefPremium(new BigDecimal("2.85"));
+    req.setReason("stc_signal");
+    req.setAuthor("acme_trader");
+    req.setRawLine("STC NVDA 5/16 140C @ 2.85");
+    req.setOccurredAt(OffsetDateTime.of(2026, 5, 13, 17, 45, 0, 0, ZoneOffset.UTC));
+    return req;
   }
 
   /**
