@@ -32,6 +32,8 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 
@@ -551,7 +553,33 @@ class AlpacaPaperBrokerTest {
     assertThat(req.getRequestUrl().queryParameter("timeframe")).isEqualTo("1D");
     // date_end is null → the param must be omitted entirely.
     assertThat(req.getRequestUrl().queryParameter("date_end")).isNull();
+    // Daily timeframe → extended_hours is not sent (Alpaca ignores it above intraday).
+    assertThat(req.getRequestUrl().queryParameter("extended_hours")).isNull();
     assertThat(req.getHeader("APCA-API-KEY-ID")).isEqualTo("key-id-for-test");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"1Min", "5Min", "15Min", "1H"})
+  void getPortfolioHistory_intradayTimeframe_sendsExtendedHoursTrue(String timeframe)
+      throws Exception {
+    // Alpaca defaults extended_hours=false for intraday timeframes, so the series stops at the
+    // 16:00 ET bar. prod_real 2026-10-29: puts bought 16:00 and sold 16:02-16:09 moved the account
+    // from -$5,203.83 (the 16:00 bar) to +$6,758.59, but /live's 1D range showed -$5,203.83.
+    server.enqueue(
+        new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"timestamp\":[1719446400],\"equity\":[10000.00],\"profit_loss\":[0.00],"
+                    + "\"profit_loss_pct\":[0.0],\"base_value\":10000.00,"
+                    + "\"base_value_asof\":\"2026-06-17\",\"timeframe\":\""
+                    + timeframe
+                    + "\"}"));
+
+    broker.getPortfolioHistory("1D", timeframe, null);
+
+    RecordedRequest req = server.takeRequest();
+    assertThat(req.getRequestUrl().queryParameter("extended_hours")).isEqualTo("true");
   }
 
   @Test
