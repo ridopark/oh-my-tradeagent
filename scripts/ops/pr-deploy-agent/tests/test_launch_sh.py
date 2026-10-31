@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for launch.sh — bootstrap, fast-forward, no-op, fetch-failure,
-kill-switch and lock behaviour; no network, no real GitHub.
+kill-switch, lock, refusals (dirty/diverged/not-on-main), notify CLI
+dedupe, launcher drift and webhook warning; no network, no real GitHub.
 
 Run:  python3 -m unittest discover -s scripts/ops/pr-deploy-agent/tests -v
 """
@@ -177,6 +178,23 @@ class _Fixture:
         tick_path.write_text(_STUB_TICK + f"# {message}\n")
         _git(self.seed, ["add", "."], self.git_env)
         _git(self.seed, ["commit", "-m", message], self.git_env)
+        _git(self.seed, ["push", "origin", "main"], self.git_env)
+        return _git(self.seed, ["rev-parse", "HEAD"], self.git_env)
+
+    def push_file_to_origin(
+        self,
+        rel_path: str,
+        content: str,
+        executable: bool = False,
+    ) -> str:
+        """Add or replace a file in seed and push to origin; return new SHA."""
+        target = self.seed / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        if executable:
+            target.chmod(0o755)
+        _git(self.seed, ["add", rel_path], self.git_env)
+        _git(self.seed, ["commit", "-m", f"add {rel_path}"], self.git_env)
         _git(self.seed, ["push", "origin", "main"], self.git_env)
         return _git(self.seed, ["rev-parse", "HEAD"], self.git_env)
 
@@ -391,3 +409,245 @@ class TestLock(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("another tick holds the lock", result.stderr)
         self.assertLess(elapsed, 2.0, f"expected fast exit, took {elapsed:.2f}s")
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Refusal tests (dirty / diverged / not-on-main)
+# ---------------------------------------------------------------------------
+
+class TestRefusal(unittest.TestCase):
+    """Clones that are dirty, diverged, or off main must be left untouched and
+    produce exactly one alert call (via the stub notify.py log)."""
+
+    def setUp(self) -> None:
+        self.f = _Fixture()
+        self.f.setup_origin()
+        boot = self.f.run_launch()
+        self.assertEqual(boot.returncode, 0, boot.stderr[-300:])
+
+    def tearDown(self) -> None:
+        self.f.cleanup()
+
+    def _notify_keys(self) -> list[str]:
+        """Parse keys passed to stub notify.py via --once flag."""
+        if not self.f.notify_log.exists():
+            return []
+        keys = []
+        for line in self.f.notify_log.read_text().splitlines():
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == "--once" and i + 1 < len(parts):
+                    keys.append(parts[i + 1])
+        return keys
+
+    def test_dirty_clone_untouched_and_alerted(self) -> None:
+        """Tracked file modified: HEAD and contents unchanged, no tick, alert sent."""
+        clone = self.f.clone_path()
+        tick_path = clone / "scripts" / "ops" / "pr-deploy-agent" / "tick.sh"
+        original = tick_path.read_text()
+        head_before = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+
+        # Make clone dirty (tracked file modified, not staged)
+        tick_path.write_text(original + "# dirty\n")
+
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertIn("dirty", result.stderr)
+        self.assertNotIn("STUB TICK", result.stdout)
+
+        # Clone state is byte-for-byte unchanged (HEAD and file)
+        head_after = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        self.assertEqual(head_before, head_after)
+        self.assertEqual(tick_path.read_text(), original + "# dirty\n")
+
+        # Alert was requested with the right key prefix
+        keys = self._notify_keys()
+        self.assertTrue(
+            any(k.startswith(f"clone-refused:dirty:{head_before}") for k in keys),
+            f"expected clone-refused:dirty key, got {keys}",
+        )
+
+    def test_untracked_is_dirty_env_is_not(self) -> None:
+        """Untracked non-.env file = dirty; ignored .env does NOT count."""
+        clone = self.f.clone_path()
+        head_sha = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+
+        # Phase 1: untracked file → refuse
+        (clone / "stray.txt").write_text("untracked\n")
+        result1 = self.f.run_launch()
+        self.assertIn("dirty", result1.stderr)
+        self.assertNotIn("STUB TICK", result1.stdout)
+
+        # Phase 2: remove untracked file, add .env (gitignored) → NOT dirty → tick runs
+        (clone / "stray.txt").unlink()
+        (clone / ".env").write_text("DISCORD_WEBHOOK_URL=https://fake.example\n")
+        result2 = self.f.run_launch()
+        self.assertNotIn("dirty", result2.stderr)
+        self.assertIn(f"STUB TICK {head_sha}", result2.stdout)
+
+    def test_diverged_untouched(self) -> None:
+        """Clone has a local commit + origin advanced: local commit stays HEAD, no tick."""
+        clone = self.f.clone_path()
+
+        # Make a local commit in the clone
+        (clone / "local_change.txt").write_text("local\n")
+        _git(clone, ["add", "local_change.txt"], self.f.git_env)
+        _git(clone, ["commit", "-m", "local commit"], self.f.git_env)
+        local_head = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+
+        # Advance origin independently
+        self.f.add_origin_commit("origin advance")
+
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertIn("diverged", result.stderr)
+        self.assertNotIn("STUB TICK", result.stdout)
+
+        # Clone is still at the local commit
+        head_after = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        self.assertEqual(local_head, head_after)
+
+        # Alert key present
+        keys = self._notify_keys()
+        self.assertTrue(
+            any(k.startswith(f"clone-refused:diverged:{local_head}") for k in keys),
+            f"expected clone-refused:diverged key, got {keys}",
+        )
+
+    def test_not_on_main_refused(self) -> None:
+        """Clone on a non-main branch: refuses, no tick, alert sent."""
+        clone = self.f.clone_path()
+        head_sha = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+
+        # Switch clone to a different branch
+        _git(clone, ["checkout", "-b", "other-branch"], self.f.git_env)
+
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertIn("not on main", result.stderr)
+        self.assertNotIn("STUB TICK", result.stdout)
+
+        keys = self._notify_keys()
+        self.assertTrue(
+            any(k.startswith(f"clone-refused:not-on-main:{head_sha}") for k in keys),
+            f"expected clone-refused:not-on-main key, got {keys}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Notify CLI dedupe (Seam B — real notify.py, no HTTP)
+# ---------------------------------------------------------------------------
+
+class TestNotifyCli(unittest.TestCase):
+    """python3 notify.py --once KEY ... deduplicates via the real statefile."""
+
+    def test_once_dedupes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = pathlib.Path(tmp_str)
+            state_dir = tmp / "state"
+            state_dir.mkdir()
+            real_notify = AGENT_DIR / "notify.py"
+            key = "test-key:abc123"
+
+            def run_cli() -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [
+                        sys.executable, str(real_notify),
+                        "--once", key,
+                        "--title", "Test title",
+                        "--body", "Test body",
+                        "--state-dir", str(state_dir),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env={**os.environ, "DISCORD_DRY_RUN": "1"},
+                )
+
+            # First call: should succeed, key recorded in state.json
+            r1 = run_cli()
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            self.assertNotIn("already notified", r1.stdout)
+
+            state_path = state_dir / "state.json"
+            self.assertTrue(state_path.exists(), "state.json not created")
+            import json as _json
+            state = _json.loads(state_path.read_text())
+            self.assertIn(key, state.get("notified", {}),
+                          f"key not in state.json: {state}")
+
+            # Second call: same key → already notified
+            r2 = run_cli()
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertIn("already notified", r2.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Launcher drift check
+# ---------------------------------------------------------------------------
+
+class TestDrift(unittest.TestCase):
+    """When clone's launch.sh differs from the running launcher: warn + tick runs."""
+
+    def setUp(self) -> None:
+        self.f = _Fixture()
+        self.f.setup_origin()
+        # Add an old (different) launch.sh to origin before bootstrapping
+        self.f.push_file_to_origin(
+            "scripts/ops/pr-deploy-agent/launch.sh",
+            "#!/bin/sh\n# old launcher version\n",
+            executable=True,
+        )
+        boot = self.f.run_launch()
+        self.assertEqual(boot.returncode, 0, boot.stderr[-300:])
+
+    def tearDown(self) -> None:
+        self.f.cleanup()
+
+    def test_drift_warns_and_runs(self) -> None:
+        """Clone has a different launch.sh: drift logged, alert sent, tick still runs."""
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertIn("installed launcher differs from main", result.stderr)
+        # Tick still ran despite drift
+        self.assertIn("STUB TICK", result.stdout)
+
+        # Alert key starts with 'launcher-drift:'
+        if self.f.notify_log.exists():
+            logged = self.f.notify_log.read_text()
+            self.assertIn("launcher-drift:", logged)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Webhook presence warning
+# ---------------------------------------------------------------------------
+
+class TestWebhookWarning(unittest.TestCase):
+    """Without a Discord webhook the launcher logs a warning each tick."""
+
+    def setUp(self) -> None:
+        self.f = _Fixture()
+        self.f.setup_origin()
+        boot = self.f.run_launch()
+        self.assertEqual(boot.returncode, 0, boot.stderr[-300:])
+
+    def tearDown(self) -> None:
+        self.f.cleanup()
+
+    def test_no_webhook_logs_warning(self) -> None:
+        """No env var and no .env in clone → webhook warning in stderr."""
+        result = self.f.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr[-200:])
+        self.assertIn("no Discord webhook configured", result.stderr)
+
+    def test_with_dotenv_no_warning(self) -> None:
+        """Clone .env with DISCORD_WEBHOOK_URL set → no webhook warning."""
+        clone = self.f.clone_path()
+        (clone / ".env").write_text("DISCORD_WEBHOOK_URL=https://fake.example\n")
+        result = self.f.run_launch()
+        self.assertEqual(result.returncode, 0, result.stderr[-200:])
+        self.assertNotIn("no Discord webhook configured", result.stderr)
