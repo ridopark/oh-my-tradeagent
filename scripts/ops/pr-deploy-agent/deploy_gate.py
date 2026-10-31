@@ -214,28 +214,26 @@ def _approve_run(repo: str, run_id: int, comment: str) -> None:
 # ---------------------------------------------------------------------------
 # Claude second-opinion call
 # ---------------------------------------------------------------------------
-def _call_claude_second_opinion(bundle: dict, timeout: int = 120) -> tuple[str, str]:
-    """Ask Fable 5.1 for a second opinion on a run the script assessed as SAFE.
+# Models asked for the second opinion, in order. The next model is tried ONLY when the previous
+# one is unavailable (usage limit, rate limit, overloaded) — never because it deferred or gave a
+# malformed answer, so the fallback can never be used to shop for an approval.
+_SECOND_OPINION_MODELS = ("claude-fable-5-1", "claude-opus-5-5")
 
-    Returns (verdict, reason) where verdict is "approve" or "defer".
-    Rule: Claude can only TIGHTEN (safe → defer), never loosen (unsafe → approve).
-    A Claude failure (non-zero exit, bad JSON, timeout) returns ("defer", <error>).
-    This function should only be called when the script verdict is "safe".
-    """
-    prompt_file = Path(__file__).parent / "prompts" / "deploy-second-opinion.md"
-    system_prompt = ""
-    if prompt_file.exists():
-        system_prompt = prompt_file.read_text()
+# How the CLI reports an unavailable model. A usage limit is printed on STDOUT with exit 0
+# ("You've reached your Fable limit. Switch to another model…"), so this is matched on the text.
+_UNAVAILABLE_RE = re.compile(
+    r"reached your .{0,40}limit|rate.?limit|usage limit|overloaded|\b429\b|\b529\b",
+    re.IGNORECASE,
+)
 
-    user_prompt = (
-        f"{system_prompt}\n\n---\n\nDecision bundle:\n{json.dumps(bundle, indent=2)}"
-    )
 
+def _ask_model(model: str, user_prompt: str, timeout: int) -> tuple[str, str, bool]:
+    """One second-opinion call. Returns (verdict, reason, unavailable)."""
     try:
         result = subprocess.run(
             [
                 "claude", "-p",
-                "--model", "claude-fable-5-1",
+                "--model", model,
                 "--output-format", "json",
                 "--json-schema", _SECOND_OPINION_SCHEMA,
                 "--tools", "",
@@ -247,27 +245,60 @@ def _call_claude_second_opinion(bundle: dict, timeout: int = 120) -> tuple[str, 
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return "defer", "claude second-opinion timeout"
+        return "defer", f"{model}: second-opinion timeout", False
     except FileNotFoundError:
-        return "defer", "claude not found on PATH"
+        return "defer", "claude not found on PATH", False
 
+    text = f"{result.stdout}\n{result.stderr}"
+    parsed = _parse_claude_json(result.stdout, key="verdict") if result.returncode == 0 else None
+    if parsed is None and _UNAVAILABLE_RE.search(text):
+        return "defer", f"{model} unavailable: {text.strip()[:100]}", True
     if result.returncode != 0:
-        return "defer", f"claude exit {result.returncode}: {result.stderr.strip()[:100]}"
-
-    parsed = _parse_claude_json(result.stdout, key="verdict")
+        return "defer", f"claude exit {result.returncode}: {result.stderr.strip()[:100]}", False
     if parsed is None:
-        return "defer", f"claude bad JSON: {result.stdout[:100]}"
+        return "defer", f"claude bad JSON: {result.stdout[:100]}", False
 
     try:
         claude_verdict = str(parsed["verdict"])
         reason = str(parsed.get("reason", ""))
     except (KeyError, TypeError) as exc:
-        return "defer", f"claude output missing verdict ({exc}): {result.stdout[:100]}"
+        return "defer", f"claude output missing verdict ({exc}): {result.stdout[:100]}", False
 
     if claude_verdict not in ("approve", "defer"):
-        return "defer", f"claude unknown verdict: {claude_verdict!r}"
+        return "defer", f"claude unknown verdict: {claude_verdict!r}", False
 
-    return claude_verdict, reason
+    return claude_verdict, reason, False
+
+
+def _call_claude_second_opinion(bundle: dict, timeout: int = 120) -> tuple[str, str]:
+    """Ask Claude for a second opinion on a run the script assessed as SAFE.
+
+    Returns (verdict, reason) where verdict is "approve" or "defer".
+    Rule: Claude can only TIGHTEN (safe → defer), never loosen (unsafe → approve).
+    Tries `_SECOND_OPINION_MODELS` in order, moving on ONLY when a model is unavailable; any other
+    failure (non-zero exit, bad JSON, timeout) or a "defer" ends the chain with "defer". The reason
+    names the model that answered when it was not the first, so the approval comment shows it.
+    This function should only be called when the script verdict is "safe".
+    """
+    prompt_file = Path(__file__).parent / "prompts" / "deploy-second-opinion.md"
+    system_prompt = ""
+    if prompt_file.exists():
+        system_prompt = prompt_file.read_text()
+
+    user_prompt = (
+        f"{system_prompt}\n\n---\n\nDecision bundle:\n{json.dumps(bundle, indent=2)}"
+    )
+
+    unavailable: list[str] = []
+    for model in _SECOND_OPINION_MODELS:
+        verdict, reason, is_unavailable = _ask_model(model, user_prompt, timeout)
+        if is_unavailable:
+            unavailable.append(model)
+            continue
+        if unavailable:
+            reason = f"[{model}; {', '.join(unavailable)} unavailable] {reason}"
+        return verdict, reason
+    return "defer", "all second-opinion models unavailable: " + ", ".join(unavailable)
 
 
 # ---------------------------------------------------------------------------
