@@ -356,6 +356,12 @@ that branch, because its test asserts every `deploy.yml` service is classified.
 
 ### Step 2 — Storage + BFF: migration, ingest, reads, retention; collector posts
 
+**Amended 2026-10-31: Step 2 split; collector half waits for the Step 1 measurement.**
+The BFF half (migration, repository, ingest controller, read controllers, retention, `flow.enabled`
+flag) is built now and shipped dark. The collector half (`FlowIngestClient`, REST reference lookups,
+300 Mi memory limit, watchlist union, health alerts) is deferred until after the 2026-11-02 Step 1
+measurement session confirms `rss_peak_mb`, the storage floor, and the go/no-go thresholds.
+
 **Goal:** orders ≥ the confirmed floor and per-ticker daily summaries flow from the live collector into
 the dashboard DB and out through tenant-session reads; retention bounds both tables; collector-health
 alerts exist. Stories 29, 31–32, 35, plus 22–23 with the day's watchlist. Dark until the operator sets
