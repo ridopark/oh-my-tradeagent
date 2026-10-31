@@ -229,6 +229,72 @@ class ServiceTokenFilterTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // flow ingest: the THIRD prefix on the SAME ingest token. The flow-collector pod is a sibling of
+  // the dark-pool and mirror pods (same image, same secret), so it holds the ingest token and must
+  // get exactly what that token already gives — never the shared token's tenant reads.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void flowIngestRoute_withTheIngestToken_passesThrough() throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/flow/ingest");
+    req.addHeader("Authorization", "Bearer " + INGEST_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
+  void flowIngestRoute_withTheSharedToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/flow/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus())
+        .as("holding BFF_SHARED_TOKEN must NOT open the flow ingest")
+        .isEqualTo(401);
+  }
+
+  @Test
+  void flowIngestRoute_withoutBearer_is401() throws Exception {
+    assertThat(run("/internal/flow/ingest", null).getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void flowWatchlistRoute_withTheIngestToken_passesThrough() throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/internal/flow/watchlist");
+    req.addHeader("Authorization", "Bearer " + INGEST_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req);
+  }
+
+  @Test
+  void flowWatchlistRoute_withTheSharedToken_is401() throws Exception {
+    MockHttpServletResponse res = run("/internal/flow/watchlist", "Bearer " + TOKEN);
+    assertThat(res.getStatus())
+        .as("holding BFF_SHARED_TOKEN must NOT open the flow watchlist")
+        .isEqualTo(401);
+  }
+
+  @Test
+  void flowPrefixWithEncodedDots_cannotSmuggleTheIngestTokenIntoATenantRead() throws Exception {
+    MockHttpServletResponse res =
+        run("/internal/flow/%2e%2e/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void doubledSlashes_cannotSlipTheSharedTokenIntoTheFlowIngest() throws Exception {
+    MockHttpServletResponse res = run("/internal//flow/ingest", "Bearer " + TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Path-traversal guard. getRequestURI() is the RAW request line; Spring dispatches on the DECODED
   // and NORMALIZED path. Without this guard the two disagree and every path-based decision this
   // filter makes can be aimed at a different handler than the one it authorized.

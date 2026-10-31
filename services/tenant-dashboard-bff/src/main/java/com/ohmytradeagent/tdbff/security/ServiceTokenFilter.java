@@ -38,11 +38,12 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // The application.yml fallback used for local dev. Accepting it in production would mean a pod
   // started without BFF_SHARED_TOKEN silently trusts a value anyone can read from this repo.
   private static final String INSECURE_DEFAULT_TOKEN = "dev-shared-token";
-  // The routes gated on the INGEST token rather than the shared one. Both callers are sidecar pods
-  // (the Discord mirror and the dark-pool collector) that must never hold a tenant-reading
-  // credential. A new prefix here is a new holder of that token — keep the list short.
+  // The routes gated on the INGEST token rather than the shared one. All callers are sidecar pods
+  // (the Discord mirror, the dark-pool collector, and the flow-collector) that must never hold a
+  // tenant-reading credential. A new prefix here is a new holder of that token — keep the list
+  // short.
   private static final String[] INGEST_PREFIXES = {
-    "/internal/options-chat/", "/internal/darkpool/"
+    "/internal/options-chat/", "/internal/darkpool/", "/internal/flow/"
   };
   // Percent-encodings the container decodes into a dot, a separator, or a path parameter — each
   // would change which handler runs after this filter has already chosen a token. See
