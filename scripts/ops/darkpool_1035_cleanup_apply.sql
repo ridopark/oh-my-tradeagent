@@ -37,7 +37,8 @@ INSERT INTO _cleanup_params VALUES (:expected_delete, :expected_relabel);
 
 -- ---------------------------------------------------------------------------
 -- Guard 1: abort if the DELETE count changed since the dry run.
--- The predicate below is IDENTICAL to the dry run's Section 1c predicate.
+-- The predicate below selects exactly the rows of the dry run's Section 1c (written with EXISTS on
+-- another row of the same (symbol, trade_id) instead of a GROUP BY twins join; same rows, same count).
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -67,7 +68,7 @@ END $$;
 
 -- ---------------------------------------------------------------------------
 -- Guard 2: abort if the RELABEL count changed since the dry run.
--- The predicate below is IDENTICAL to the dry run's Section 2b predicate.
+-- The predicate below selects exactly the rows of the dry run's Section 2b (same rows, same count).
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE

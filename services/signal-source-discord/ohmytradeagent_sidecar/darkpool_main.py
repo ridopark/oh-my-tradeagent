@@ -66,6 +66,7 @@ from .darkpool_collector import (
     BarKey,
     BudgetExhausted,
     Cursor,
+    Quote,
     Trade,
     aggregate,
     format_ts,
@@ -392,7 +393,7 @@ class DarkpoolCollector:
             key=lambda t: t.ts,
         )
         sides: dict[Trade, str] = {}
-        quotes: dict[Trade, object] = {}
+        quotes: dict[Trade, Quote | None] = {}
         for i, t in enumerate(fresh):
             if keep(t, min_notional=self._min_notional, min_size=self._min_size):
                 try:

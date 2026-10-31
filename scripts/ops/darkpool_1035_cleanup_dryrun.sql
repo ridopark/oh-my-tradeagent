@@ -108,7 +108,7 @@ WHERE  exchange = 'D'
 -- =============================================================================
 -- 3.  BAR adjustment candidates: relabelled rows whose stored side was 'buy' or
 --     'sell'.  The apply script subtracts their size from darkpool_bar_5m.
---     Expected 0 today: the 2 relabelled kept D rows are labelled 'mid'/'unknown'.
+--     Expected 0 today: the 2 relabelled kept D rows are already labelled 'unknown'.
 -- =============================================================================
 
 -- 3a. Individual rows requiring bar adjustment (detail).

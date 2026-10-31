@@ -164,7 +164,7 @@ between the dry run and the apply.
 
 ### Alternative: leave history as-is
 
-The 1,831 bad rows age out under the 90-day retention sweep (introduced in the same
-migration) by **2027-01-28**. The `/dark-pool` page shows inflated large-print levels
+The 1,831 bad rows age out under the BFF's 90-day print retention sweep
+(`DarkpoolRetention.PRINT_RETENTION_DAYS`) by **2027-01-28**. The `/dark-pool` page shows inflated large-print levels
 until then but no bar totals are wrong. The 2 mis-quoted rows are relabelled
 `unknown` by the apply; leaving them as `unknown` (they already are) is also fine.

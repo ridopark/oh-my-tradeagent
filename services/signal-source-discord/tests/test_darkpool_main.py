@@ -402,7 +402,7 @@ async def test_budget_hit_mid_symbol_commits_the_prefix_and_resumes_from_it():
     cur = collector.cursors["QQQ"]
     assert cur.last_t == parse_ts("2026-10-29T13:38:00Z")
     assert {t.trade_id for t in cur.seen_at_last_t} == {1}
-    # Next cycle: trades from 13:38:00 (the lit trade is dropped by id), the print's NBBO fits.
+    # Next cycle: trades from 13:38:00 (the lit trade, already seen at last_t, is dropped), the print's NBBO fits.
     alpaca.requests.clear()
     collector._data.max_requests = 2
     stats = await collector.cycle()
