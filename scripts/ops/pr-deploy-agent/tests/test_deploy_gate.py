@@ -126,7 +126,7 @@ class TestServiceClassTable(unittest.TestCase):
             self.assertEqual(dg.SERVICE_CLASS[svc], "trading-path")
 
     def test_signal_watcher_services(self):
-        for svc in ("signal-source-discord", "discord-lotto-mirror"):
+        for svc in ("signal-source-discord", "discord-lotto-mirror", "flow-collector"):
             self.assertEqual(dg.SERVICE_CLASS[svc], "signal-watcher")
 
     def test_any_time_services(self):

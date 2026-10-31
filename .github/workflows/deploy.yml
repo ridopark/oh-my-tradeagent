@@ -110,6 +110,7 @@ on:
           - discord-lotto-mirror
           - lotto-signal
           - darkpool-collector
+          - flow-collector
           - tenant-dashboard-bff
           - dashboard
           - stc-intent-service
@@ -140,7 +141,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector tenant-dashboard-bff dashboard stc-intent-service"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector flow-collector tenant-dashboard-bff dashboard stc-intent-service"
 
 jobs:
   preflight:
@@ -277,8 +278,8 @@ jobs:
             for s in $SERVICES; do want["$s"]=1; done
           fi
           add_all_java() { for s in orchestrator exec-alpaca-paper market-data api-gateway tenant-dashboard-bff; do want["$s"]=1; done; }
-          # ONE sidecar image, SIX Deployments — see the services/signal-source-discord case below.
-          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector; do want["$s"]=1; done; }
+          # ONE sidecar image, SEVEN Deployments — see the services/signal-source-discord case below.
+          add_sidecar() { for s in signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector flow-collector; do want["$s"]=1; done; }
           add_all() { for s in $SERVICES; do want["$s"]=1; done; }
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -298,7 +299,8 @@ jobs:
                                                         want[discord-signals-mirror]=1
                                                         want[discord-lotto-mirror]=1
                                                         want[lotto-signal]=1
-                                                        want[darkpool-collector]=1 ;;
+                                                        want[darkpool-collector]=1
+                                                        want[flow-collector]=1 ;;
               services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
@@ -342,6 +344,7 @@ jobs:
               infra/k8s/64-discord-lotto-mirror.yaml)   want[discord-lotto-mirror]=1 ;;
               infra/k8s/65-lotto-signal.yaml)           want[lotto-signal]=1 ;;
               infra/k8s/66-darkpool-collector.yaml)     want[darkpool-collector]=1 ;;
+              infra/k8s/67-flow-collector.yaml)         want[flow-collector]=1 ;;
               infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
@@ -426,25 +429,31 @@ jobs:
 
       - name: Bootstrap guard for ${{ matrix.service }}
         id: bootstrap
-        # darkpool-collector ONLY (infra/k8s/66-darkpool-collector.yaml). This workflow cannot
-        # create a Deployment — the verify step below reads the live one and fails without it —
-        # so until the operator hand-applies that manifest once, every sidecar merge would turn
-        # this matrix job RED for darkpool-collector alone. Skip (notice, exit 0) instead of
-        # failing, for that service and no other: for every other service a missing Deployment
-        # is still the error it always was. The later steps are gated on `skip`.
+        # darkpool-collector (66) and flow-collector (67): both must be hand-applied once before
+        # this workflow can roll them. Until then, every sidecar merge would turn the matrix job
+        # RED for those services. Skip (notice, exit 0) instead of failing, for those two services
+        # and no other: for every other service a missing Deployment is still the error it always was.
+        # Skip ONLY on NotFound — any other kubectl failure (expired kubeconfig, API timeout, RBAC)
+        # is a real deploy failure and must stay red.
         run: |
           set -euo pipefail
           skip=false
-          if [ "${{ matrix.service }}" = "darkpool-collector" ]; then
-            # Skip ONLY on NotFound. Any other kubectl failure (expired kubeconfig, API timeout,
-            # RBAC) is a real deploy failure and must stay red, not a green "not bootstrapped".
-            if out=$(kubectl -n "$NAMESPACE" get deployment/darkpool-collector 2>&1 >/dev/null); then
+          case "${{ matrix.service }}" in
+            darkpool-collector)
+              manifest="infra/k8s/66-darkpool-collector.yaml" ;;
+            flow-collector)
+              manifest="infra/k8s/67-flow-collector.yaml" ;;
+            *)
+              manifest="" ;;
+          esac
+          if [ -n "$manifest" ]; then
+            if out=$(kubectl -n "$NAMESPACE" get deployment/${{ matrix.service }} 2>&1 >/dev/null); then
               :
             elif grep -q 'NotFound' <<<"$out"; then
-              echo "::notice::darkpool-collector is not bootstrapped yet — apply infra/k8s/66-darkpool-collector.yaml by hand once (kubectl -n $NAMESPACE apply -f infra/k8s/66-darkpool-collector.yaml); skipping this roll."
+              echo "::notice::${{ matrix.service }} is not bootstrapped yet — apply ${manifest} by hand once (kubectl -n $NAMESPACE apply -f ${manifest}); skipping this roll."
               skip=true
             else
-              echo "::error::kubectl get deployment/darkpool-collector failed for a reason other than NotFound: $out"
+              echo "::error::kubectl get deployment/${{ matrix.service }} failed for a reason other than NotFound: $out"
               exit 1
             fi
           fi

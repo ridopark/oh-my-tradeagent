@@ -75,7 +75,7 @@ A name not listed is treated as `unknown` and the run is **never** approved.
 
 | Class | Services | Roll rule |
 |---|---|---|
-| `signal-watcher` | `signal-source-discord`, `discord-lotto-mirror` | SAFE only while NYSE market is **CLOSED** (09:00–16:30 ET Mon–Fri, NYSE holidays) |
+| `signal-watcher` | `signal-source-discord`, `discord-lotto-mirror`, `flow-collector` | SAFE only while NYSE market is **CLOSED** (09:00–16:30 ET Mon–Fri, NYSE holidays) |
 | `trading-path` | `orchestrator`, `exec-alpaca-paper`, `market-data`, `lotto-signal` | Market **OPEN**: any running `PositionWorkflow` or non-terminal order → UNSAFE. Market **CLOSED**: only non-terminal orders (RECORDED/SUBMITTED in last 48 h) block; sleeping positions do not. |
 | `any-time` | `dashboard`, `tenant-dashboard-bff`, `api-gateway`, `discord-chat-mirror`, `discord-signals-mirror`, `darkpool-collector`, `stc-intent-service` | Always SAFE |
 

@@ -36,7 +36,7 @@ ALL_JAVA = {
     "orchestrator", "exec-alpaca-paper", "market-data",
     "api-gateway", "tenant-dashboard-bff",
 }
-SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror", "discord-lotto-mirror", "lotto-signal", "darkpool-collector"}
+SIDECAR = {"signal-source-discord", "discord-chat-mirror", "discord-signals-mirror", "discord-lotto-mirror", "lotto-signal", "darkpool-collector", "flow-collector"}
 SERVICES = " ".join(sorted(ALL_JAVA | SIDECAR | {"stc-intent-service", "dashboard"}))
 
 
@@ -147,6 +147,17 @@ class DeployRoutingTest(unittest.TestCase):
         """Which is why the routing fix itself is safe to merge during market hours."""
         self.assertEqual(rolls([".github/workflows/deploy.yml"]), set())
 
+    def test_sidecar_change_rolls_flow_collector(self):
+        """A change under services/signal-source-discord/* must roll flow-collector."""
+        got = rolls(["services/signal-source-discord/ohmytradeagent_sidecar/flow_main.py"])
+        self.assertIn("flow-collector", got)
+        self.assertEqual(got, SIDECAR)
+
+    def test_67_manifest_rolls_only_flow_collector(self):
+        """infra/k8s/67-flow-collector.yaml rolls only flow-collector."""
+        got = rolls(["infra/k8s/67-flow-collector.yaml"])
+        self.assertEqual(got, {"flow-collector"})
+
 
 def _bootstrap_guard_step() -> str:
     d = yaml.safe_load(WORKFLOW.read_text())
@@ -164,7 +175,9 @@ def _bootstrap_guard_step() -> str:
     return steps[0]
 
 
-NOT_FOUND = 'Error from server (NotFound): deployments.apps "darkpool-collector" not found'
+NOT_FOUND_DARKPOOL = 'Error from server (NotFound): deployments.apps "darkpool-collector" not found'
+NOT_FOUND_FLOW = 'Error from server (NotFound): deployments.apps "flow-collector" not found'
+NOT_FOUND = NOT_FOUND_DARKPOOL  # kept for existing tests
 
 
 def bootstrap_guard(service: str, deployment_exists: bool, kubectl_error: str | None = None) -> tuple:
@@ -241,6 +254,34 @@ class DeployBootstrapGuardTest(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertEqual(skip, "false", service)
             self.assertEqual(calls, "", service)
+
+    def test_missing_flow_collector_skips_with_a_notice(self):
+        """infra/k8s/67-flow-collector.yaml has the same bootstrap guard as darkpool-collector:
+        until the operator hand-applies that manifest once, the roll must SKIP, not fail."""
+        code, skip, out, _ = bootstrap_guard("flow-collector", deployment_exists=False,
+                                             kubectl_error=NOT_FOUND_FLOW)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(skip, "true")
+        self.assertIn("::notice::", out)
+        self.assertIn("infra/k8s/67-flow-collector.yaml", out)
+
+    def test_existing_flow_collector_rolls_normally(self):
+        code, skip, out, calls = bootstrap_guard("flow-collector", deployment_exists=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(skip, "false")
+        self.assertIn("get deployment/flow-collector", calls)
+
+    def test_flow_collector_kubectl_failure_other_than_not_found_fails_the_job(self):
+        """Same check as for darkpool-collector: an RBAC / timeout error must stay red."""
+        for err in (
+            "Unable to connect to the server: dial tcp 192.168.10.123:6443: i/o timeout",
+            'Error from server (Forbidden): deployments.apps "flow-collector" is forbidden',
+        ):
+            code, skip, out, _ = bootstrap_guard("flow-collector", deployment_exists=False,
+                                                  kubectl_error=err)
+            self.assertNotEqual(code, 0, err)
+            self.assertNotEqual(skip, "true", err)
+            self.assertIn("::error::", out, err)
 
 
 def baseline_candidates(api_response: dict) -> list:
