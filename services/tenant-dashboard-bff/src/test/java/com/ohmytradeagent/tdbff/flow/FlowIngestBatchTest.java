@@ -121,14 +121,31 @@ class FlowIngestBatchTest {
         .hasMessageContaining("order.premium");
   }
 
+  @Test
+  void fits_valueThatRoundsUpIntoOverflow_isFalse() {
+    // Postgres rounds 9999.99995 to 10000.0000 on insert into NUMERIC(8,4): overflow (22003).
+    assertThat(FlowIngestBatch.fits(new BigDecimal("9999.99995"), 8, 4)).isFalse();
+    assertThat(FlowIngestBatch.fits(new BigDecimal("9999.99994"), 8, 4)).isTrue();
+    assertThat(FlowIngestBatch.fits(new BigDecimal("-9999.99995"), 8, 4)).isFalse();
+  }
+
+  @Test
+  void tickerDay_callPremium_overBound_throwsIAE() {
+    TickerDay t = tickerDay(new BigDecimal("10000000000000000"));
+    assertThatThrownBy(() -> new FlowIngestBatch(List.of(), List.of(t)).validate())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("ticker_day.call_premium");
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
   /**
-   * Constructs a fully valid {@link Order} overriding the given fields; null means use the
-   * base-fixture value. Parameters: strike, premium, bid, ask, underlyingPrice, moneynessPct,
-   * blockPremiumThreshold.
+   * Constructs a fully valid {@link Order} overriding the given fields. A null strike, premium or
+   * blockPremiumThreshold uses the base-fixture value; a null bid, ask, underlyingPrice or
+   * moneynessPct stays null (stored as SQL NULL). Parameters: strike, premium, bid, ask,
+   * underlyingPrice, moneynessPct, blockPremiumThreshold.
    */
   private static Order orderWith(
       BigDecimal strike,

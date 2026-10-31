@@ -291,6 +291,18 @@ class FlowControllerWebMvcTest {
   }
 
   @Test
+  void orders_cursorPaging_blankBeforeWithBeforeId_is400() throws Exception {
+    // ?before= binds as "" not null; it must count as absent, not silently drop the cursor.
+    mvc.perform(
+            get("/api/flow/orders")
+                .header("X-Tenant-Id", "t")
+                .param("before", "")
+                .param("before_id", "42"))
+        .andExpect(status().isBadRequest());
+    verifyNoInteractions(repo);
+  }
+
+  @Test
   void orders_cursorPaging_beforeIdWithoutBefore_is400() throws Exception {
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t").param("before_id", "42"))
         .andExpect(status().isBadRequest());

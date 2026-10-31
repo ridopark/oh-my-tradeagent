@@ -30,7 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * The tenant-session reads behind the {@code /flow} page: {@code GET
- * /api/flow/orders?date=&ticker=&min_premium=&labels=&right=&side=&dte_min=&dte_max=&before=&limit=}
+ * /api/flow/orders?date=&ticker=&min_premium=&labels=&right=&side=&dte_min=&dte_max=&before=&before_id=&limit=}
  * (newest first) and {@code GET /api/flow/summary?date=&ticker=} (per-ticker daily totals).
  *
  * <p>TENANT-INDEPENDENT, like {@code DarkpoolController}: every session sees identical bytes.
@@ -101,12 +101,15 @@ public class FlowController {
 
     Set<String> labelSet = parseLabels(labels);
     // before and before_id must come together: one without the other is a malformed cursor.
+    // A blank before (?before=) counts as absent, or it would silently drop the cursor.
+    if (before != null && before.isBlank()) {
+      before = null;
+    }
     if ((before == null) != (beforeId == null)) {
       throw new IllegalArgumentException(
           "cursor params 'before' and 'before_id' must be supplied together");
     }
-    OffsetDateTime beforeTs =
-        before == null || before.isBlank() ? null : OffsetDateTime.parse(before);
+    OffsetDateTime beforeTs = before == null ? null : OffsetDateTime.parse(before);
 
     OrderQuery query =
         new OrderQuery(

@@ -138,21 +138,16 @@ public record FlowIngestBatch(List<Order> orders, List<TickerDay> tickerDays) {
   }
 
   /**
-   * Returns true when {@code value} fits in a NUMERIC(precision, scale) column: the integer portion
-   * has at most {@code precision - scale} digits. Null always fits (stored as NULL).
-   *
-   * <p>Example: fits(new BigDecimal("9999.9999"), 8, 4) → true (4 int digits = max). fits(new
-   * BigDecimal("10000"), 8, 4) → false (5 int digits > 4 max).
+   * Returns true when {@code value} fits in a NUMERIC(precision, scale) column. Postgres first
+   * ROUNDS the value to {@code scale} (half away from zero), then checks the integer digits, so a
+   * value just under the bound can round up into overflow (22003): 9999.99995 into NUMERIC(8,4)
+   * becomes 10000.0000. Null always fits (stored as NULL).
    */
   static boolean fits(BigDecimal value, int precision, int scale) {
     if (value == null) {
       return true;
     }
-    int maxIntDigits = precision - scale;
-    BigDecimal intPart = value.abs().setScale(0, java.math.RoundingMode.DOWN);
-    if (intPart.signum() == 0) {
-      return true;
-    }
-    return intPart.precision() <= maxIntDigits;
+    BigDecimal rounded = value.setScale(scale, java.math.RoundingMode.HALF_UP);
+    return rounded.precision() - rounded.scale() <= precision - scale;
   }
 }
