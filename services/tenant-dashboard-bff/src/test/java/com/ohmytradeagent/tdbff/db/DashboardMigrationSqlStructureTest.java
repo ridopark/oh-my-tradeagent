@@ -483,9 +483,10 @@ class DashboardMigrationSqlStructureTest {
     assertThat(sql)
         .as("side_source is a closed enum")
         .containsPattern(Pattern.compile("CHECK \\(side_source IN \\('quote', 'none'\\)\\)"));
+    // option_right: `right` is a RESERVED keyword in PostgreSQL 16; column renamed.
     assertThat(sql)
-        .as("right is a closed enum")
-        .containsPattern(Pattern.compile("CHECK \\(right IN \\('C', 'P'\\)\\)"));
+        .as("option_right is a closed enum")
+        .containsPattern(Pattern.compile("CHECK \\(option_right IN \\('C', 'P'\\)\\)"));
 
     // IDENTITY, not BIGSERIAL — the V9 rule.
     assertThat(sql).doesNotContainIgnoringCase("BIGSERIAL");

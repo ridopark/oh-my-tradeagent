@@ -21,13 +21,13 @@ public record FlowIngestBatch(List<Order> orders, List<TickerDay> tickerDays) {
   public static final int MAX_ROWS = 5000;
 
   /** Mirrors the V16 CHECK constraint on {@code flow_order.side}. */
-  static final Set<String> SIDES = Set.of("buy", "sell", "mid", "unknown");
+  public static final Set<String> SIDES = Set.of("buy", "sell", "mid", "unknown");
 
   /** Mirrors the V16 CHECK constraint on {@code flow_order.side_source}. */
   static final Set<String> SIDE_SOURCES = Set.of("quote", "none");
 
-  /** Mirrors the V16 CHECK constraint on {@code flow_order.right}. */
-  static final Set<String> RIGHTS = Set.of("C", "P");
+  /** Mirrors the V16 CHECK constraint on {@code flow_order.option_right} (wire name: right). */
+  public static final Set<String> RIGHTS = Set.of("C", "P");
 
   private static final Pattern TICKER = Pattern.compile("[A-Z0-9.\\-]{1,16}");
 

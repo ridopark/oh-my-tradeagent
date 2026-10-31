@@ -69,45 +69,17 @@ public class FlowRetention {
   int runOnce() {
     OffsetDateTime now = OffsetDateTime.now(clock);
     LocalDate today = now.atZoneSameInstant(ZoneOffset.UTC).toLocalDate();
-    int orders =
-        sweepOrders("orders", now.minusDays(ORDER_RETENTION_DAYS), repo::deleteOrdersOlderThan);
+    int orders = sweep("orders", now.minusDays(ORDER_RETENTION_DAYS), repo::deleteOrdersOlderThan);
     int days =
-        sweepDays(
+        sweep(
             "ticker_days",
             today.minusDays(TICKER_DAY_RETENTION_DAYS),
             repo::deleteTickerDaysOlderThan);
     return orders + days;
   }
 
-  private static int sweepOrders(
-      String what, OffsetDateTime cutoff, BiFunction<OffsetDateTime, Integer, Integer> delete) {
-    int total = 0;
-    try {
-      for (int i = 0; i < MAX_BATCHES; i++) {
-        int deleted = delete.apply(cutoff, BATCH);
-        total += deleted;
-        if (deleted < BATCH) {
-          break;
-        }
-      }
-    } catch (Exception e) { // noqa - housekeeping must never take the BFF down
-      log.error("flow {} retention failed after {} row(s); will retry tomorrow", what, total, e);
-      return total;
-    }
-    if (total > 0) {
-      log.info("flow retention removed {} {} before {}", total, what, cutoff);
-      if (total >= BATCH * MAX_BATCHES) {
-        log.warn(
-            "flow {} retention hit its per-run cap ({}); the backlog drains on later nights",
-            what,
-            BATCH * MAX_BATCHES);
-      }
-    }
-    return total;
-  }
-
-  private static int sweepDays(
-      String what, LocalDate cutoff, BiFunction<LocalDate, Integer, Integer> delete) {
+  /** Generic bounded sweep. Identical logic regardless of the cutoff type. Never throws. */
+  private static <T> int sweep(String what, T cutoff, BiFunction<T, Integer, Integer> delete) {
     int total = 0;
     try {
       for (int i = 0; i < MAX_BATCHES; i++) {

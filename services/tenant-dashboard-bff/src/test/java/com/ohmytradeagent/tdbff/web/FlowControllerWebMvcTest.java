@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.ohmytradeagent.tdbff.flow.FlowRepository;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.Order;
+import com.ohmytradeagent.tdbff.flow.FlowRepository.OrderPage;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.OrderQuery;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.TickerDay;
 import java.math.BigDecimal;
@@ -107,7 +108,7 @@ class FlowControllerWebMvcTest {
 
   @Test
   void orders_passesFiltersThrough_andRendersTheRow() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of(order()));
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(order()), null, null));
 
     mvc.perform(
             get("/api/flow/orders")
@@ -155,7 +156,7 @@ class FlowControllerWebMvcTest {
 
   @Test
   void orders_labelsFilter_parsesCommaSeparatedValues() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of());
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
 
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t").param("labels", "sweep,block"))
         .andExpect(status().isOk());
@@ -167,7 +168,7 @@ class FlowControllerWebMvcTest {
 
   @Test
   void orders_labelsFilter_silentlyDropsUnknownValues() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of());
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
 
     mvc.perform(
             get("/api/flow/orders").header("X-Tenant-Id", "t").param("labels", "sweep,badlabel"))
@@ -216,7 +217,7 @@ class FlowControllerWebMvcTest {
             1000,
             1000,
             3000);
-    when(repo.orders(any())).thenReturn(List.of(onTheMinute));
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(onTheMinute), null, null));
 
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t"))
         .andExpect(status().isOk())
@@ -227,14 +228,14 @@ class FlowControllerWebMvcTest {
 
   @Test
   void orders_defaultsAndClampsTheLimit() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of());
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
 
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t")).andExpect(status().isOk());
     ArgumentCaptor<OrderQuery> q1 = ArgumentCaptor.forClass(OrderQuery.class);
     verify(repo).orders(q1.capture());
     assertThat(q1.getValue().limit()).isEqualTo(200);
 
-    when(repo.orders(any())).thenReturn(List.of());
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t").param("limit", "9999"))
         .andExpect(status().isOk());
     ArgumentCaptor<OrderQuery> q2 = ArgumentCaptor.forClass(OrderQuery.class);
@@ -280,7 +281,7 @@ class FlowControllerWebMvcTest {
 
   @Test
   void orders_cursorPaging_passesBeforeThrough() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of());
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
 
     mvc.perform(
             get("/api/flow/orders")
@@ -294,15 +295,49 @@ class FlowControllerWebMvcTest {
   }
 
   @Test
-  void orders_noDateFilter_hasNoDateInResponse() throws Exception {
-    when(repo.orders(any())).thenReturn(List.of());
+  void orders_noDateParam_defaultsToTodayEt_andIncludesDateInResponse() throws Exception {
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
+
+    LocalDate before = LocalDate.now(ZoneId.of("America/New_York"));
+    mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t"))
+        .andExpect(status().isOk())
+        // With no date param, the endpoint defaults to today ET (amended at review 2026-10-31).
+        .andExpect(jsonPath("$.date").isNotEmpty())
+        .andExpect(jsonPath("$.count").value(0))
+        .andExpect(jsonPath("$.items").isArray());
+    LocalDate after = LocalDate.now(ZoneId.of("America/New_York"));
+
+    ArgumentCaptor<OrderQuery> q = ArgumentCaptor.forClass(OrderQuery.class);
+    verify(repo).orders(q.capture());
+    assertThat(q.getValue().date()).isIn(before, after);
+  }
+
+  @Test
+  void orders_compoundCursorPaging_passesBothBeforeAndBeforeIdThrough() throws Exception {
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
+
+    mvc.perform(
+            get("/api/flow/orders")
+                .header("X-Tenant-Id", "t")
+                .param("before", "2026-10-31T15:30:00Z")
+                .param("before_id", "42"))
+        .andExpect(status().isOk());
+
+    ArgumentCaptor<OrderQuery> q = ArgumentCaptor.forClass(OrderQuery.class);
+    verify(repo).orders(q.capture());
+    assertThat(q.getValue().before()).isEqualTo(OffsetDateTime.parse("2026-10-31T15:30:00Z"));
+    assertThat(q.getValue().beforeId()).isEqualTo(42L);
+  }
+
+  @Test
+  void orders_nextCursorPresentWhenPageHasRows() throws Exception {
+    OffsetDateTime ts = OffsetDateTime.parse("2026-10-31T15:00:00Z");
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(order()), ts, 7L));
 
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t"))
         .andExpect(status().isOk())
-        // When no date filter is applied, the date key is absent from the response body.
-        .andExpect(jsonPath("$.date").doesNotExist())
-        .andExpect(jsonPath("$.count").value(0))
-        .andExpect(jsonPath("$.items").isArray());
+        .andExpect(jsonPath("$.next_before").value("2026-10-31T15:00:00Z"))
+        .andExpect(jsonPath("$.next_before_id").value(7));
   }
 
   @Test

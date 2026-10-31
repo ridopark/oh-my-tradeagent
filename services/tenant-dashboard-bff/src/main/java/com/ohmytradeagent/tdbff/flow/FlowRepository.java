@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.flow;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.math.BigDecimal;
@@ -65,6 +66,11 @@ public class FlowRepository {
   /**
    * One option order as posted by the collector and served to the page. Wire names are snake_case,
    * identical to the V16 columns and the GET responses (the plan's binding wire contract).
+   *
+   * <p>NOTE: the DB columns for the option right and the cross label are named {@code option_right}
+   * and {@code is_cross} because {@code right} and {@code cross} are RESERVED keywords in
+   * PostgreSQL 16. The JSON wire names {@code right} and {@code cross} are preserved via explicit
+   * {@code @JsonProperty} annotations on those components.
    */
   @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
   public record Order(
@@ -73,7 +79,7 @@ public class FlowRepository {
       String contract,
       LocalDate expiry,
       BigDecimal strike,
-      String right,
+      @JsonProperty("right") String right,
       OffsetDateTime firstTs,
       OffsetDateTime lastTs,
       Integer tradeCount,
@@ -89,7 +95,7 @@ public class FlowRepository {
       Boolean sweep,
       Boolean multiLeg,
       Boolean auction,
-      Boolean cross,
+      @JsonProperty("cross") Boolean cross,
       Boolean block,
       Boolean unusual,
       Long dayVolume,
@@ -132,7 +138,16 @@ public class FlowRepository {
       Integer dteMin,
       Integer dteMax,
       OffsetDateTime before,
+      Long beforeId,
       int limit) {}
+
+  /**
+   * One page of order results. {@code lastFirstTs} and {@code lastId} are the {@code first_ts} and
+   * {@code id} of the last row returned, or {@code null} when the page is empty. Clients pass them
+   * back as {@code before}/{@code before_id} to fetch the next page without skipping rows that
+   * share the same {@code first_ts} (amended at review 2026-10-31).
+   */
+  public record OrderPage(List<Order> items, OffsetDateTime lastFirstTs, Long lastId) {}
 
   // ---------------------------------------------------------------------------
   // Ingest
@@ -208,12 +223,14 @@ public class FlowRepository {
       binds.add(o.quoteMaxAgeMs());
     }
     // ON CONFLICT DO NOTHING reads the arbiter column (order_id), which is why V16 grants SELECT.
+    // option_right / is_cross: `right` and `cross` are RESERVED keywords in PostgreSQL 16.
     return tx.execute(
-        "INSERT INTO flow_order (order_id, ticker, contract, expiry, strike, right, first_ts,"
-            + " last_ts, trade_count, exchange_count, size, premium, vwap, side, side_source,"
-            + " bid, ask, quote_ts, sweep, multi_leg, auction, cross, block, unusual,"
-            + " day_volume, open_interest, underlying_price, moneyness_pct, dte, conditions,"
-            + " block_premium_threshold, block_size_threshold, order_window_ms, quote_max_age_ms)"
+        "INSERT INTO flow_order (order_id, ticker, contract, expiry, strike, option_right,"
+            + " first_ts, last_ts, trade_count, exchange_count, size, premium, vwap, side,"
+            + " side_source, bid, ask, quote_ts, sweep, multi_leg, auction, is_cross, block,"
+            + " unusual, day_volume, open_interest, underlying_price, moneyness_pct, dte,"
+            + " conditions, block_premium_threshold, block_size_threshold, order_window_ms,"
+            + " quote_max_age_ms)"
             + " VALUES "
             + tuples(
                 chunk.size(),
@@ -270,16 +287,18 @@ public class FlowRepository {
   // ---------------------------------------------------------------------------
 
   /**
-   * Orders matching the query. Newest first by {@code first_ts}. When {@code query.date()} is set,
-   * filters to orders whose {@code first_ts} falls in the ET session window [09:25, 16:20). The
-   * {@code before} cursor enables keyset paging: pass the last row's {@code first_ts} to continue.
+   * Orders matching the query. Newest first by {@code first_ts, id}. When {@code query.date()} is
+   * set, filters to orders whose {@code first_ts} falls in the ET session window [09:25, 16:20).
+   * The compound {@code before}/{@code beforeId} cursor enables keyset paging without skipping rows
+   * that share the same {@code first_ts} (amended at review 2026-10-31).
    */
-  public List<Order> orders(OrderQuery query) {
+  public OrderPage orders(OrderQuery query) {
+    // option_right / is_cross: `right` and `cross` are RESERVED keywords in PostgreSQL 16.
     StringBuilder sql =
         new StringBuilder(
-            "SELECT order_id, ticker, contract, expiry, strike, right, first_ts, last_ts,"
-                + " trade_count, exchange_count, size, premium, vwap, side, side_source,"
-                + " bid, ask, quote_ts, sweep, multi_leg, auction, cross, block, unusual,"
+            "SELECT id, order_id, ticker, contract, expiry, strike, option_right, first_ts,"
+                + " last_ts, trade_count, exchange_count, size, premium, vwap, side, side_source,"
+                + " bid, ask, quote_ts, sweep, multi_leg, auction, is_cross, block, unusual,"
                 + " day_volume, open_interest, underlying_price, moneyness_pct, dte, conditions,"
                 + " block_premium_threshold, block_size_threshold, order_window_ms, quote_max_age_ms"
                 + " FROM flow_order WHERE TRUE");
@@ -324,7 +343,7 @@ public class FlowRepository {
       }
     }
     if (query.right() != null) {
-      sql.append(" AND right = ?");
+      sql.append(" AND option_right = ?");
       binds.add(query.right());
     }
     if (query.side() != null) {
@@ -339,7 +358,12 @@ public class FlowRepository {
       sql.append(" AND dte <= ?");
       binds.add(query.dteMax());
     }
-    if (query.before() != null) {
+    if (query.before() != null && query.beforeId() != null) {
+      // Compound keyset cursor: (first_ts, id) < (?, ?) so rows sharing first_ts are not skipped.
+      sql.append(" AND (first_ts, id) < (?::timestamptz, ?)");
+      binds.add(query.before());
+      binds.add(query.beforeId());
+    } else if (query.before() != null) {
       sql.append(" AND first_ts < ?::timestamptz");
       binds.add(query.before());
     }
@@ -356,7 +380,7 @@ public class FlowRepository {
               r.get("contract", String.class),
               r.get("expiry", LocalDate.class),
               r.get("strike", BigDecimal.class),
-              r.get("right", String.class),
+              r.get("option_right", String.class),
               r.get("first_ts", OffsetDateTime.class),
               r.get("last_ts", OffsetDateTime.class),
               r.get("trade_count", Integer.class),
@@ -372,7 +396,7 @@ public class FlowRepository {
               r.get("sweep", Boolean.class),
               r.get("multi_leg", Boolean.class),
               r.get("auction", Boolean.class),
-              r.get("cross", Boolean.class),
+              r.get("is_cross", Boolean.class),
               r.get("block", Boolean.class),
               r.get("unusual", Boolean.class),
               r.get("day_volume", Long.class),
@@ -386,7 +410,9 @@ public class FlowRepository {
               r.get("order_window_ms", Integer.class),
               r.get("quote_max_age_ms", Integer.class)));
     }
-    return out;
+    OffsetDateTime lastFirstTs = out.isEmpty() ? null : out.get(out.size() - 1).firstTs();
+    Long lastId = out.isEmpty() ? null : rows.get(rows.size() - 1).get("id", Long.class);
+    return new OrderPage(out, lastFirstTs, lastId);
   }
 
   /**

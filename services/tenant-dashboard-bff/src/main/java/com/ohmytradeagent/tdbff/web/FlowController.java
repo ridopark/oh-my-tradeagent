@@ -1,7 +1,9 @@
 package com.ohmytradeagent.tdbff.web;
 
+import com.ohmytradeagent.tdbff.flow.FlowIngestBatch;
 import com.ohmytradeagent.tdbff.flow.FlowRepository;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.Order;
+import com.ohmytradeagent.tdbff.flow.FlowRepository.OrderPage;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.OrderQuery;
 import com.ohmytradeagent.tdbff.flow.FlowRepository.TickerDay;
 import jakarta.servlet.http.HttpServletRequest;
@@ -49,8 +51,9 @@ public class FlowController {
   private static final Set<String> VALID_LABELS = Set.of("sweep", "block", "multi_leg", "unusual");
   // The ticker is a SQL bind; keep it to the ticker charset.
   private static final Pattern TICKER = Pattern.compile("[A-Za-z0-9.\\-]{1,16}");
-  private static final Set<String> VALID_RIGHTS = Set.of("C", "P");
-  private static final Set<String> VALID_SIDES = Set.of("buy", "sell", "mid", "unknown");
+  // Reuse FlowIngestBatch's sets so the accepted values are defined once.
+  private static final Set<String> VALID_RIGHTS = FlowIngestBatch.RIGHTS;
+  private static final Set<String> VALID_SIDES = FlowIngestBatch.SIDES;
 
   private final FlowRepository repo;
   private final TenantContext ctx;
@@ -72,11 +75,16 @@ public class FlowController {
       @RequestParam(value = "dte_min", required = false) Integer dteMin,
       @RequestParam(value = "dte_max", required = false) Integer dteMax,
       @RequestParam(value = "before", required = false) String before,
+      @RequestParam(value = "before_id", required = false) Long beforeId,
       @RequestParam(value = "limit", required = false, defaultValue = "" + DEFAULT_LIMIT)
           int limit) {
     ctx.tenantId(req);
 
+    // Default to today in ET, like /summary does (amended at review 2026-10-31).
     LocalDate sessionDate = parseDate(date);
+    if (sessionDate == null) {
+      sessionDate = LocalDate.now(ET);
+    }
 
     if (ticker != null && !TICKER.matcher(ticker).matches()) {
       throw new IllegalArgumentException("invalid 'ticker'");
@@ -106,9 +114,11 @@ public class FlowController {
             dteMin,
             dteMax,
             beforeTs,
+            beforeId,
             Math.clamp(limit, 1, MAX_LIMIT));
 
-    List<Order> rows = repo.orders(query);
+    OrderPage page = repo.orders(query);
+    List<Order> rows = page.items();
 
     List<Map<String, Object>> items = new ArrayList<>(rows.size());
     for (Order o : rows) {
@@ -151,11 +161,13 @@ public class FlowController {
     }
 
     Map<String, Object> body = new LinkedHashMap<>();
-    if (sessionDate != null) {
-      body.put("date", sessionDate.toString());
-    }
+    body.put("date", sessionDate.toString());
     body.put("count", items.size());
     body.put("items", items);
+    if (page.lastFirstTs() != null) {
+      body.put("next_before", instant(page.lastFirstTs()));
+      body.put("next_before_id", page.lastId());
+    }
     return ResponseEntity.ok(body);
   }
 

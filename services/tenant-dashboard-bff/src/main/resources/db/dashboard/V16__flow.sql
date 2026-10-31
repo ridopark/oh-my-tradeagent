@@ -12,7 +12,10 @@
 
 -- One row per option order the collector assembled.  Immutable: the collector assigns a deterministic
 -- order_id ({contract}:{first_ts_ns}:{side}) so a re-post after a restart dedupes silently.
--- "right" is a non-reserved keyword in PostgreSQL and can be used as a column name without quoting.
+-- NOTE: `right` and `cross` are RESERVED keywords in PostgreSQL 16 (pg_get_keywords() returns
+-- reserved / can-be-function-or-type for both).  Using them bare as column names causes a parse
+-- error.  The columns are therefore named `option_right` and `is_cross`; the JSON wire names
+-- `right` and `cross` are preserved via explicit @JsonProperty annotations in FlowRepository.
 CREATE TABLE flow_order (
   id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   order_id                TEXT          NOT NULL,           -- deterministic dedup key
@@ -20,7 +23,7 @@ CREATE TABLE flow_order (
   contract                TEXT          NOT NULL,           -- full OCC symbol
   expiry                  DATE          NOT NULL,
   strike                  NUMERIC(12,4) NOT NULL,
-  right                   CHAR(1)       NOT NULL CHECK (right IN ('C', 'P')),
+  option_right            CHAR(1)       NOT NULL CHECK (option_right IN ('C', 'P')),
   first_ts                TIMESTAMPTZ   NOT NULL,
   last_ts                 TIMESTAMPTZ   NOT NULL,
   trade_count             INT           NOT NULL,
@@ -36,7 +39,7 @@ CREATE TABLE flow_order (
   sweep                   BOOLEAN       NOT NULL DEFAULT false,
   multi_leg               BOOLEAN       NOT NULL DEFAULT false,
   auction                 BOOLEAN       NOT NULL DEFAULT false,
-  cross                   BOOLEAN       NOT NULL DEFAULT false,
+  is_cross                BOOLEAN       NOT NULL DEFAULT false,
   block                   BOOLEAN       NOT NULL DEFAULT false,
   unusual                 BOOLEAN,                          -- null when REST lookup unavailable
   day_volume              BIGINT,
