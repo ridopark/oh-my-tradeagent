@@ -991,3 +991,15 @@ def test_usable_quote_same_predicate_used_by_classify_and_archive_row():
     assert row["bp"] is None
     assert row["ap"] is None
     assert row["qt"] is None
+
+
+def test_archiver_first_disk_check_runs_on_a_freshly_booted_host(tmp_path, monkeypatch):
+    """CI regression (PR #1030): with time.monotonic() < 30 s the first disk check was skipped,
+    free space stayed 0, and every write was refused as disk_free_floor on a healthy disk."""
+    import ohmytradeagent_sidecar.flow_collector as fc
+
+    monkeypatch.setattr(fc.time, "monotonic", lambda: 5.0)
+    arch = TapeArchiver(tmp_path / "archive", cap_bytes=10_000_000_000, free_floor_bytes=0)
+    arch.write_flush(_make_rows(3), ts("2026-10-29T14:00:00Z"))
+    assert (tmp_path / "archive" / "2026-10-29.trades.ndjson.gz").exists()
+    assert not arch._disk_stopped

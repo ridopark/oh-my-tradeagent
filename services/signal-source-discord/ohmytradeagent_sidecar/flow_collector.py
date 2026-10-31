@@ -643,9 +643,12 @@ class TapeArchiver:
         self._disk_stop_reason: str = ""
         # Disk-check throttle: cache dir size and free space for up to 30 s.
         self._cached_dir_size: int = 0
-        self._last_size_check_mono: float = 0.0
+        # -inf = "never checked": the first check must run whatever time.monotonic() reads. 0.0
+        # skipped it on a host up for < 30 s (fresh CI runners), leaving free space at its initial
+        # 0 and refusing every write on a disk that was never measured.
+        self._last_size_check_mono: float = float("-inf")
         self._cached_free: int = 0
-        self._last_free_check_mono: float = 0.0
+        self._last_free_check_mono: float = float("-inf")
 
     def _et_date_str(self, ts: datetime) -> str:
         return ts.astimezone(ET).strftime("%Y-%m-%d")
@@ -689,8 +692,8 @@ class TapeArchiver:
 
     def _force_disk_check(self) -> str:
         """Bypass throttle; used on first write of a session."""
-        self._last_size_check_mono = 0.0
-        self._last_free_check_mono = 0.0
+        self._last_size_check_mono = float("-inf")
+        self._last_free_check_mono = float("-inf")
         return self._disk_check()
 
     def write_flush(self, rows: list[dict], flush_ts: datetime) -> None:
