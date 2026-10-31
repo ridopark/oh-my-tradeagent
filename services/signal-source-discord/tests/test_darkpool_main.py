@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from ohmytradeagent_sidecar import darkpool_main
-from ohmytradeagent_sidecar.darkpool_collector import AlpacaDataClient, Cursor, bucket5m, parse_ts
+from ohmytradeagent_sidecar.darkpool_collector import AlpacaDataClient, Cursor, bucket5m, format_ts, parse_ts
 from ohmytradeagent_sidecar.darkpool_main import (
     DarkpoolCollector,
     DarkpoolIngestClient,
@@ -588,6 +588,64 @@ async def test_heartbeat_callback_fires_once_per_symbol():
     )
     await collector.cycle()
     assert len(beats) == 3  # the failing symbol beats too
+
+
+async def test_heartbeat_is_touched_between_nbbo_lookups_of_one_symbol():
+    """Each quote lookup takes 20 s (clock advance). With 20 kept D prints the symbol's
+    total quote time is 400 s. Without a per-lookup touch the heartbeat would be silent for
+    those 400 s and the liveness probe (180 s) would kill the container. After the fix the
+    maximum gap between consecutive touches is one lookup (20 s)."""
+    clock = Clock(NOW)
+    alpaca, bff = FakeAlpaca(), FakeBff()
+
+    ts_base = parse_ts("2026-10-29T13:30:00Z")
+    alpaca.trades["QQQ"] = [
+        raw(
+            format_ts(ts_base + timedelta(seconds=i * 10)),
+            i + 1,
+            p=500.0,
+            s=400,
+            x="D",
+        )
+        for i in range(20)
+    ]
+    alpaca.quotes["QQQ"] = [
+        {"t": format_ts(ts_base - timedelta(seconds=1)), "bp": 499.98, "ap": 500.00}
+    ]
+
+    # Advance the simulated clock by 20 s on every quote request, to model a slow NBBO lookup.
+    _original_handler = alpaca.handler
+
+    def _advancing_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/stocks/quotes":
+            clock.now = clock.now + timedelta(seconds=20)
+        return _original_handler(request)
+
+    alpaca.handler = _advancing_handler  # replaced before alpaca.client() is called
+
+    beats: list[datetime] = []
+    collector = make_collector(
+        alpaca,
+        bff,
+        ["QQQ"],
+        clock=clock,
+        heartbeat=lambda: beats.append(clock.now),
+    )
+    await collector.cycle()
+
+    # Must have at least one touch per NBBO lookup (20 lookups -> >= 20 touches).
+    assert len(beats) >= 20, f"expected >= 20 heartbeat touches, got {len(beats)}"
+
+    # Gap from cycle start to first touch must be <= 20 s (one lookup).
+    assert beats[0] - NOW <= timedelta(seconds=20), (
+        f"first touch lagged {beats[0] - NOW} after cycle start"
+    )
+    # Every consecutive gap must also be <= 20 s.
+    for i, (a, b) in enumerate(zip(beats, beats[1:])):
+        gap = b - a
+        assert gap <= timedelta(seconds=20), (
+            f"gap between touches {i} and {i + 1} was {gap} (> 20 s)"
+        )
 
 
 async def test_bar_is_resent_with_cumulative_totals_across_cycles():

@@ -358,6 +358,7 @@ class DarkpoolCollector:
         quotes: dict = {}
         for i, t in enumerate(fresh):
             if keep(t, min_notional=self._min_notional, min_size=self._min_size):
+                self._heartbeat()
                 try:
                     quote = await self._data.quote_before(symbol, t.ts)
                 except BudgetExhausted as exc:
