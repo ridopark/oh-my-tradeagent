@@ -620,12 +620,13 @@ class AuditLogChainWriterIT {
    * <p><b>RED argument without V12:</b> before this migration {@code audit_log.correlation_id} was
    * {@code VARCHAR(96)}; inserting a 111-char value causes Postgres to throw {@code value too long
    * for type character varying(96)}, {@code AuditActivitiesImpl.persist()} catches and swallows it
-   * (best-effort log path), the row is never committed, the {@code @TransactionalEventListener
-   * AFTER_COMMIT} listener never fires, and the read-back below finds no row — the floor-breach
-   * page is silently lost. After V12 widens the column to {@code VARCHAR(256)}, the INSERT
-   * succeeds, the after-commit listener fires, and both assertions below pass. CI confirms this
-   * with {@code RUN_DB_ITS=true} against the Flyway-migrated schema; the schema-parity test in
-   * {@code services/audit} is the local RED carrier (Docker-free).
+   * (best-effort log path), the row is never committed, and the read-back below finds no row — this
+   * is the authoritative RED proof. Whether the {@code @TransactionalEventListener AFTER_COMMIT}
+   * listener also fails to fire in that case is the expected mechanism (consistent with the
+   * production evidence) but is not verified here. After V12 widens the column to {@code
+   * VARCHAR(256)}, the INSERT succeeds and both assertions below pass. CI confirms this with {@code
+   * RUN_DB_ITS=true} against the Flyway-migrated schema; the schema-parity test in {@code
+   * services/audit} is the local RED carrier (Docker-free).
    *
    * <p>The 111-char id is the production {@code staging_paper/copytrade-v1} position workflow id
    * observed in 72 failed floor-breach audit INSERTs in the 24 h before issue #1029 was filed:

@@ -1,18 +1,22 @@
 package com.ohmytradeagent.audit.lint;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Docker-free guard — fails the build at {@code mvn test} time when {@code
@@ -47,13 +51,32 @@ class AuditLogSchemaParityTest {
       Pattern.compile("\\b(\\w+)\\s+VARCHAR\\((\\d+)\\)", Pattern.CASE_INSENSITIVE);
 
   /**
-   * Matches {@code ALTER TABLE audit_log ALTER COLUMN col TYPE VARCHAR(n)} in any Flyway migration
-   * file. Applied in version order to compute the effective width after all migrations.
+   * Matches an entire {@code ALTER TABLE [schema.]audit_log … ;} statement. Group 1 captures the
+   * body between the table name reference and the terminating semicolon, which is then scanned for
+   * per-column {@code ALTER COLUMN} clauses.
    */
-  private static final Pattern ALTER_COLUMN_WIDTH =
+  private static final Pattern ALTER_TABLE_AUDIT_LOG_STMT =
       Pattern.compile(
-          "ALTER\\s+TABLE\\s+audit_log\\s+ALTER\\s+COLUMN\\s+(\\w+)\\s+TYPE\\s+VARCHAR\\((\\d+)\\)",
+          "ALTER\\s+TABLE\\s+(?:\\w+\\.)?audit_log\\b([^;]+);",
+          Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+  /**
+   * Within an {@code ALTER TABLE audit_log} body, matches each {@code ALTER COLUMN col [SET DATA]
+   * TYPE type} clause. Group 1 = column name; group 2 = raw type text up to the next comma or end
+   * of the body.
+   */
+  private static final Pattern ALTER_COLUMN_CLAUSE =
+      Pattern.compile(
+          "ALTER\\s+COLUMN\\s+(\\w+)\\s+(?:SET\\s+DATA\\s+)?TYPE\\s+([^,]+)",
           Pattern.CASE_INSENSITIVE);
+
+  /**
+   * Matches a bounded {@code VARCHAR(n)} or {@code CHARACTER VARYING(n)} type (full string match).
+   * Group 1 = the numeric width.
+   */
+  private static final Pattern VARCHAR_BOUNDED =
+      Pattern.compile(
+          "(?:VARCHAR|CHARACTER\\s+VARYING)\\s*\\((\\d+)\\)\\s*", Pattern.CASE_INSENSITIVE);
 
   @Test
   void correlationIdMatchesWorkflowIdWidthAndMirrorMatchesOrchestrator() throws IOException {
@@ -100,10 +123,203 @@ class AuditLogSchemaParityTest {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Finding 1: sort by parsed integer version, not lexicographic file name
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When migration file names include two-or-more-digit version numbers (V10, V11, V12 …),
+   * lexicographic file-name sort puts them before single-digit versions (V3, V4 …) because {@code
+   * '1' < '3'}. The effective-width computation must use Flyway's integer version order so a V10
+   * widening is not silently overwritten by a lexicographically later V3 narrowing.
+   *
+   * <p><b>RED before fix:</b> lexicographic sort processes V10 before V3, so V3's 128 overwrites
+   * V10's 256 → effective width = 128 ≠ 256 → assertion fails. <b>GREEN after:</b> integer sort
+   * processes V3 (3) before V10 (10), so V10's 256 is the final value → 256.
+   */
+  @Test
+  void orchestratorEffectiveWidths_sortsByParsedVersion(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V10__widen.sql"),
+        "ALTER TABLE audit_log ALTER COLUMN correlation_id TYPE VARCHAR(256);");
+    Files.writeString(
+        tempDir.resolve("V3__narrow.sql"),
+        "ALTER TABLE audit_log ALTER COLUMN correlation_id TYPE VARCHAR(128);");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as(
+            "Integer version order: V3 (3) < V10 (10), so V10 is applied last and the effective"
+                + " width must be 256, not 128 (which lexicographic file-name sort produces).")
+        .isEqualTo(256);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Finding 2: ALTER column-type parser — each accepted and rejected form
+  // ---------------------------------------------------------------------------
+
+  /**
+   * {@code ALTER COLUMN col SET DATA TYPE VARCHAR(n)} — the {@code SET DATA} keyword is optional in
+   * standard SQL and valid in Postgres; the parser must accept it.
+   *
+   * <p><b>RED before fix:</b> the former regex did not include {@code SET DATA}, so this form was
+   * silently skipped and the width stayed at 96 instead of 512.
+   */
+  @Test
+  void alterColumn_setDataType_parsedCorrectly(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V3__widen.sql"),
+        "ALTER TABLE audit_log ALTER COLUMN correlation_id SET DATA TYPE VARCHAR(512);");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as("SET DATA TYPE VARCHAR(512) must be parsed; width must be 512")
+        .isEqualTo(512);
+  }
+
+  /**
+   * {@code ALTER TABLE public.audit_log …} — a schema-qualified table name is valid Postgres and
+   * must be matched the same as the unqualified form.
+   *
+   * <p><b>RED before fix:</b> the former regex required exactly {@code audit_log} with no schema
+   * prefix, so {@code public.audit_log} was silently skipped and the width stayed at 96.
+   */
+  @Test
+  void alterColumn_schemaQualifiedTable_parsedCorrectly(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V3__widen.sql"),
+        "ALTER TABLE public.audit_log ALTER COLUMN correlation_id TYPE VARCHAR(512);");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as("Schema-qualified public.audit_log must be matched; width must be 512")
+        .isEqualTo(512);
+  }
+
+  /**
+   * {@code TYPE TEXT} — an unbounded text column; the parser must treat it as unbounded (i.e.
+   * {@link Integer#MAX_VALUE}) rather than silently skipping it.
+   *
+   * <p><b>RED before fix:</b> the former regex required {@code VARCHAR(\d+)} so {@code TEXT} was
+   * not matched and the width stayed at 96.
+   */
+  @Test
+  void alterColumn_textType_treatedAsUnbounded(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V3__widen.sql"),
+        "ALTER TABLE audit_log ALTER COLUMN correlation_id TYPE TEXT;");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as("TYPE TEXT must be treated as unbounded (Integer.MAX_VALUE)")
+        .isEqualTo(Integer.MAX_VALUE);
+  }
+
+  /**
+   * Two {@code ALTER COLUMN} clauses in a single {@code ALTER TABLE audit_log} statement — both
+   * must be applied to the effective widths.
+   *
+   * <p><b>RED before fix:</b> the former regex required each match to start with {@code ALTER TABLE
+   * audit_log ALTER COLUMN}, so only the first clause was matched; the second clause (which starts
+   * with just {@code ALTER COLUMN}) was silently ignored and the second column's width stayed at
+   * its V2 value.
+   */
+  @Test
+  void alterColumn_multiClause_bothColumnsUpdated(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(96));");
+    Files.writeString(
+        tempDir.resolve("V3__widen.sql"),
+        "ALTER TABLE audit_log"
+            + " ALTER COLUMN correlation_id TYPE VARCHAR(256),"
+            + " ALTER COLUMN workflow_id TYPE VARCHAR(512);");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as("First clause must update correlation_id to 256")
+        .isEqualTo(256);
+    assertThat(widths.get("workflow_id"))
+        .as("Second clause must update workflow_id to 512 (multi-clause must be parsed)")
+        .isEqualTo(512);
+  }
+
+  /**
+   * A commented-out {@code ALTER TABLE audit_log} statement must be ignored — the comment is not a
+   * real migration and must not change any effective width.
+   *
+   * <p><b>RED before fix:</b> the former regex was applied to raw SQL before comment stripping, so
+   * the commented-out ALTER was matched and the width was incorrectly set to 512 instead of staying
+   * at 96.
+   */
+  @Test
+  void alterColumn_commentedOut_ignored(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V3__comment.sql"),
+        "-- ALTER TABLE audit_log ALTER COLUMN correlation_id TYPE VARCHAR(512);\n"
+            + "-- The above is intentionally commented out.\n");
+
+    Map<String, Integer> widths = orchestratorEffectiveWidths(tempDir);
+    assertThat(widths.get("correlation_id"))
+        .as("Commented-out ALTER must be ignored; width must stay at V2's 96")
+        .isEqualTo(96);
+  }
+
+  /**
+   * An {@code ALTER TABLE audit_log ALTER COLUMN col TYPE <unrecognized>} with a type the parser
+   * cannot interpret must fail the test with a clear message — never keep the old width silently.
+   *
+   * <p><b>RED before fix:</b> the former regex required {@code VARCHAR(\d+)} so an unrecognized
+   * type like {@code BIGINT} was silently skipped; no assertion failed and the caller had no idea
+   * the tracked column's type had changed.
+   */
+  @Test
+  void alterColumn_unparseableType_failsWithClearMessage(@TempDir Path tempDir) throws IOException {
+    Files.writeString(
+        tempDir.resolve("V2__audit_log.sql"),
+        "CREATE TABLE audit_log (correlation_id VARCHAR(96), workflow_id VARCHAR(256));");
+    Files.writeString(
+        tempDir.resolve("V3__bad.sql"),
+        "ALTER TABLE audit_log ALTER COLUMN correlation_id TYPE BIGINT;");
+
+    assertThatThrownBy(() -> orchestratorEffectiveWidths(tempDir))
+        .isInstanceOf(AssertionError.class)
+        .hasMessageContaining("BIGINT");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal helpers
+  // ---------------------------------------------------------------------------
+
   /**
    * Computes effective VARCHAR widths for each column by replaying V2 (CREATE TABLE) then applying
-   * any {@code ALTER TABLE audit_log ALTER COLUMN col TYPE VARCHAR(n)} from V3 onward in file-name
-   * order.
+   * any {@code ALTER TABLE [schema.]audit_log ALTER COLUMN col [SET DATA] TYPE …} clauses from V3
+   * onward in <em>integer</em> version order (Flyway order). Comments ({@code --} line comments and
+   * {@code /* … *\/} block comments) are stripped before matching so commented-out ALTER statements
+   * are never applied.
+   *
+   * <p>Type rules:
+   *
+   * <ul>
+   *   <li>{@code VARCHAR(n)} / {@code CHARACTER VARYING(n)} → {@code n}
+   *   <li>{@code TEXT} / unbounded {@code VARCHAR} → {@link Integer#MAX_VALUE}
+   *   <li>Any other type on an {@code audit_log} ALTER COLUMN → fail the test with a clear message
+   * </ul>
    */
   private static Map<String, Integer> orchestratorEffectiveWidths(Path migrationDir)
       throws IOException {
@@ -113,7 +329,7 @@ class AuditLogSchemaParityTest {
         .isRegularFile();
     Map<String, Integer> widths = parseCreateTableWidths(Files.readString(v2));
 
-    // Collect V3+ migration files sorted by file name (Flyway version order).
+    // Collect V3+ migration files sorted by parsed integer version (Flyway order).
     List<Path> laterFiles = new ArrayList<>();
     try (var stream = Files.list(migrationDir)) {
       stream
@@ -126,18 +342,71 @@ class AuditLogSchemaParityTest {
                 int ver = Integer.parseInt(name.substring(1, name.indexOf("__")));
                 return ver >= 3;
               })
-          .sorted()
+          .sorted(
+              Comparator.comparingInt(
+                  (Path p) -> {
+                    String name = p.getFileName().toString();
+                    return Integer.parseInt(name.substring(1, name.indexOf("__")));
+                  }))
           .forEach(laterFiles::add);
     }
 
     for (Path f : laterFiles) {
-      String sql = Files.readString(f);
-      Matcher m = ALTER_COLUMN_WIDTH.matcher(sql);
-      while (m.find()) {
-        widths.put(m.group(1).toLowerCase(), Integer.parseInt(m.group(2)));
+      String sql = stripSqlComments(Files.readString(f));
+      Matcher stmtMatcher = ALTER_TABLE_AUDIT_LOG_STMT.matcher(sql);
+      while (stmtMatcher.find()) {
+        String body = stmtMatcher.group(1);
+        Matcher clauseMatcher = ALTER_COLUMN_CLAUSE.matcher(body);
+        while (clauseMatcher.find()) {
+          String col = clauseMatcher.group(1).toLowerCase();
+          int colWidth = parseAlterColumnType(col, clauseMatcher.group(2));
+          widths.put(col, colWidth);
+        }
       }
     }
     return widths;
+  }
+
+  /**
+   * Strips {@code --} line comments and {@code /* … *\/} block comments from SQL so that
+   * commented-out ALTER statements are not mistaken for live migrations.
+   */
+  private static String stripSqlComments(String sql) {
+    String noLineComments =
+        sql.lines().map(l -> l.replaceAll("--.*$", "")).collect(Collectors.joining("\n"));
+    return noLineComments.replaceAll("(?s)/\\*.*?\\*/", " ");
+  }
+
+  /**
+   * Parses the raw type string from an {@code ALTER COLUMN col TYPE <type>} clause and returns the
+   * declared width:
+   *
+   * <ul>
+   *   <li>{@code VARCHAR(n)} / {@code CHARACTER VARYING(n)} → {@code n}
+   *   <li>{@code TEXT} / unbounded {@code VARCHAR} → {@link Integer#MAX_VALUE}
+   *   <li>anything else → fails the test with a message naming {@code col} and the raw type
+   * </ul>
+   */
+  private static int parseAlterColumnType(String col, String rawType) {
+    String t = rawType.trim();
+    Matcher m = VARCHAR_BOUNDED.matcher(t);
+    if (m.matches()) {
+      return Integer.parseInt(m.group(1));
+    }
+    if (t.equalsIgnoreCase("TEXT")
+        || t.equalsIgnoreCase("VARCHAR")
+        || t.matches("(?i)CHARACTER\\s+VARYING")) {
+      return Integer.MAX_VALUE;
+    }
+    assertThat(false)
+        .as(
+            "ALTER TABLE audit_log ALTER COLUMN %s TYPE %s — unrecognized column type. If this"
+                + " migration does not change a tracked VARCHAR column, update the"
+                + " ALTER_TABLE_AUDIT_LOG_STMT parser to skip it; if it does, add the type to"
+                + " parseAlterColumnType().",
+            col, t)
+        .isTrue();
+    return 0; // unreachable
   }
 
   /**
