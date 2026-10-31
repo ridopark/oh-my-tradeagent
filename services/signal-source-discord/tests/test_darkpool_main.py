@@ -590,6 +590,105 @@ async def test_heartbeat_callback_fires_once_per_symbol():
     assert len(beats) == 3  # the failing symbol beats too
 
 
+async def test_heartbeat_fires_on_every_nbbo_lookup():
+    """#1032: at the open one symbol's lookups can outlast the 180 s liveness probe, so the
+    heartbeat is touched per lookup, not only per symbol."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [
+        raw(f"2026-10-29T13:38:0{i}Z", i, p=500.0, s=400, x="D") for i in range(1, 4)
+    ]
+    alpaca.quotes["QQQ"] = [{"t": "2026-10-29T13:37:59Z", "bp": 499.98, "ap": 500.00}]
+    beats: list[int] = []
+    collector = make_collector(
+        alpaca, bff, ["QQQ"], dry_run=True, heartbeat=lambda: beats.append(1)
+    )
+    await collector.cycle()
+    assert len(beats) == 3 + 1  # three lookups, then the per-symbol beat
+
+
+# ---------------------------------------------------------------------------
+# cursor persistence (#1032)
+# ---------------------------------------------------------------------------
+
+
+def make_persistent(alpaca, bff, state_path, clock, **kw) -> DarkpoolCollector:
+    return DarkpoolCollector(
+        data=alpaca.client(max_requests=2000),
+        ingest=bff.client(),
+        universe=["QQQ"],
+        min_notional=200_000,
+        min_size=10_000,
+        lookback_minutes=10,
+        dry_run=False,
+        log=LOG,
+        clock=clock,
+        state_path=state_path,
+        **kw,
+    )
+
+
+async def test_restart_resumes_from_the_saved_cursor_rewound_to_its_bucket(tmp_path):
+    """A container restart (liveness kill) resumes each symbol at the START of its saved cursor's
+    bucket, not at now - lookback, so a lagging symbol loses nothing and the first re-posted bar
+    is rebuilt whole."""
+    state = tmp_path / "cursors.json"
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:36:00Z", 1), raw("2026-10-29T13:38:00Z", 2)]
+    first = make_persistent(alpaca, bff, state, Clock(NOW))
+    await first.cycle()
+    assert state.exists()
+
+    # 40 minutes later a new process starts: now - lookback would be 14:10, far past 13:38.
+    alpaca.trades["QQQ"].append(raw("2026-10-29T13:52:00Z", 3))
+    later = Clock(NOW + timedelta(minutes=40))
+    second = make_persistent(alpaca, FakeBff(), state, later)
+    await second.cycle()
+    assert alpaca.requests[-1].url.params["start"] == "2026-10-29T13:35:00Z"
+    assert second.floors["QQQ"] == parse_ts("2026-10-29T13:35:00Z")
+
+
+async def test_rebuilt_bucket_after_restart_is_whole(tmp_path):
+    state = tmp_path / "cursors.json"
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:36:00Z", 1, s=100),
+        raw("2026-10-29T13:38:00Z", 2, s=200),
+    ]
+    await make_persistent(alpaca, bff, state, Clock(NOW)).cycle()
+    alpaca.trades["QQQ"].append(raw("2026-10-29T13:39:00Z", 3, s=300))
+    bff2 = FakeBff()
+    await make_persistent(alpaca, bff2, state, Clock(NOW + timedelta(minutes=5))).cycle()
+    (body,) = bff2.bodies()
+    (bar,) = body["bars"]
+    assert bar["bucket"] == "2026-10-29T13:35:00Z"
+    assert (bar["total_trades"], bar["total_volume"]) == (3, 600)  # whole bucket, not just 13:39
+
+
+async def test_failed_post_does_not_advance_the_saved_cursor(tmp_path):
+    """Cursors are saved only after the batch is stored, so a restart re-reads what never landed."""
+    state = tmp_path / "cursors.json"
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:36:00Z", 1)]
+    await make_persistent(alpaca, bff, state, Clock(NOW)).cycle()
+    saved = state.read_text()
+    alpaca.trades["QQQ"].append(raw("2026-10-29T13:46:00Z", 2))
+    bff.fail_next = [500, 500, 500]
+    stats = await make_persistent(alpaca, bff, state, Clock(NOW + timedelta(minutes=7))).cycle()
+    assert stats.posted is False
+    assert state.read_text() == saved
+
+
+async def test_corrupt_state_file_is_ignored(tmp_path, caplog):
+    state = tmp_path / "cursors.json"
+    state.write_text("{not json")
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+    collector = make_persistent(alpaca, bff, state, Clock(NOW))
+    await collector.cycle()
+    assert alpaca.requests[0].url.params["start"] == "2026-10-29T13:30:00Z"  # now - lookback
+    assert "darkpool cursor state" in caplog.text
+
+
 async def test_bar_is_resent_with_cumulative_totals_across_cycles():
     alpaca, bff = FakeAlpaca(), FakeBff()
     alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1, s=100)]
