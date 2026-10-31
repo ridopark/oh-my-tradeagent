@@ -13,6 +13,10 @@ Usage (module):
     # Post only if key has not been posted yet (returns True if posted):
     posted = notify_once(state, key, repo_root, "Title", "Body text", color="yellow")
 
+Usage (CLI — called by launch.sh for launcher-level alerts):
+    python3 notify.py --once KEY --title T --body B [--color C] [--state-dir DIR]
+    Exits 0; prints "already notified" to stdout if the key was already recorded.
+
 Colors: "red" | "yellow" | "green"
 Env:    DISCORD_WEBHOOK_URL  — read from env first, then from {repo_root}/.env
         DISCORD_DRY_RUN=1   — skip the actual HTTP call (for tests that can't use fake webhook)
@@ -91,3 +95,42 @@ def notify_once(
     post(repo_root, title, body, color)
     statefile.mark_notified(state, key)
     return True
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point (used by launch.sh for launcher-level alerts)
+# ---------------------------------------------------------------------------
+
+def _cli_main() -> None:
+    """Handle ``python3 notify.py --once KEY --title T --body B ...``."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Post a once-only Discord alert and record it in state.json.",
+    )
+    parser.add_argument("--once", metavar="KEY", required=True,
+                        help="Dedupe key; if already in state.json, skip the post.")
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--body", required=True)
+    parser.add_argument("--color", default="yellow")
+    parser.add_argument(
+        "--state-dir",
+        required=True,
+        help="State directory containing state.json (always passed by launch.sh).",
+    )
+    args = parser.parse_args()
+
+    # repo_root: three levels up from this script's location (i.e. the clone root)
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    state_path = Path(args.state_dir) / "state.json"
+
+    state = statefile.load(state_path)
+    if not notify_once(state, args.once, repo_root, args.title, args.body, args.color):
+        print("already notified", flush=True)
+        sys.exit(0)
+    statefile.save(state_path, state)
+
+
+if __name__ == "__main__":
+    _cli_main()
