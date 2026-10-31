@@ -457,4 +457,93 @@ class DashboardMigrationSqlStructureTest {
         .as("V15 must not touch the recorder role")
         .doesNotContain("trade_context_writer");
   }
+
+  // --- V16: flow_order + flow_ticker_day (PLAN-2026-10-29-flow-page, Step 2 BFF half) ---
+
+  @Test
+  void v16CreatesTheTwoFlowTablesWithIdempotentKeysAndNamedIndexes() throws IOException {
+    String sql = executableSql("/db/dashboard/V16__flow.sql");
+
+    assertThat(sql).contains("CREATE TABLE flow_order");
+    assertThat(sql).contains("CREATE TABLE flow_ticker_day");
+
+    // Orders dedupe on the deterministic order_id; ticker-days upsert on their PK.
+    assertThat(sql)
+        .as("orders dedupe on the deterministic order_id")
+        .containsPattern(Pattern.compile("UNIQUE \\(order_id\\)"));
+    assertThat(sql)
+        .as("ticker-days upsert on their primary key")
+        .containsPattern(Pattern.compile("PRIMARY KEY \\(ticker, session_date\\)"));
+
+    // side and side_source are closed enums, mirrored by the ingest validator.
+    assertThat(sql)
+        .as("side is a closed enum")
+        .containsPattern(
+            Pattern.compile("CHECK \\(side IN \\('buy', 'sell', 'mid', 'unknown'\\)\\)"));
+    assertThat(sql)
+        .as("side_source is a closed enum")
+        .containsPattern(Pattern.compile("CHECK \\(side_source IN \\('quote', 'none'\\)\\)"));
+    // option_right: `right` is a RESERVED keyword in PostgreSQL 16; column renamed.
+    assertThat(sql)
+        .as("option_right is a closed enum")
+        .containsPattern(Pattern.compile("CHECK \\(option_right IN \\('C', 'P'\\)\\)"));
+
+    // IDENTITY, not BIGSERIAL — the V9 rule.
+    assertThat(sql).doesNotContainIgnoringCase("BIGSERIAL");
+    assertThat(sql)
+        .containsPattern(Pattern.compile("id\\s+BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"));
+
+    // Named indexes matching the two paging shapes and the retention sweep.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX flow_order_first_ts_idx\\s+ON flow_order \\(first_ts DESC\\)",
+                Pattern.DOTALL));
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX flow_order_ticker_first_ts_idx\\s+"
+                    + "ON flow_order \\(ticker, first_ts DESC\\)",
+                Pattern.DOTALL));
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "CREATE INDEX flow_ticker_day_session_date_idx\\s+"
+                    + "ON flow_ticker_day \\(session_date\\)",
+                Pattern.DOTALL));
+  }
+
+  @Test
+  void v16GrantsWriterExactlyWhatTheRepositoryIssues_andReadonlySelectOnly() throws IOException {
+    String sql = executableSql("/db/dashboard/V16__flow.sql");
+
+    // Orders: INSERT ... ON CONFLICT DO NOTHING (needs SELECT — PG16), the page reads, and the
+    // 90-day retention DELETE. Never UPDATE: an order is immutable.
+    assertThat(privilegesGrantedOn(sql, "flow_order")).isEqualTo("SELECT, INSERT, DELETE");
+    // Ticker-days: the same plus UPDATE, because a day is re-posted as it fills.
+    assertThat(privilegesGrantedOn(sql, "flow_ticker_day"))
+        .isEqualTo("SELECT, INSERT, UPDATE, DELETE");
+    assertThat(sql)
+        .as("the writer never gets UPDATE on flow_order")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*UPDATE[A-Z, ]*\\s+ON\\s+flow_order\\b",
+                Pattern.CASE_INSENSITIVE));
+
+    // dashboard_readonly may READ and nothing else.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s+ON\\s+flow_order\\s*,\\s*flow_ticker_day"
+                    + "\\s+TO\\s+dashboard_readonly"));
+    assertThat(sql)
+        .as("readonly never gets a write privilege")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*(INSERT|UPDATE|DELETE|ALL)[^;]*dashboard_readonly",
+                Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V16 must not touch the recorder role")
+        .doesNotContain("trade_context_writer");
+  }
 }

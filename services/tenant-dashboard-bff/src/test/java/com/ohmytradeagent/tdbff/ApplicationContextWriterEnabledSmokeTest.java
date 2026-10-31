@@ -39,7 +39,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
       "options-chat.enabled=true",
       // The dark-pool store (V15) sits behind the same writer DSL; its retention scheduler has the
       // same two-constructor shape that bit OptionsChatRetention.
-      "darkpool.enabled=true"
+      "darkpool.enabled=true",
+      // The flow store (V16) sits behind the same writer DSL; FlowRetention has the same shape.
+      "flow.enabled=true"
     })
 class ApplicationContextWriterEnabledSmokeTest {
 

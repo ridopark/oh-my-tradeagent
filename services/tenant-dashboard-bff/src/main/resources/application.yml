@@ -130,6 +130,17 @@ options-chat:
 darkpool:
   enabled: ${DARKPOOL_ENABLED:false}
 
+# Dark gate for the /flow options-flow data product (V16 store, the collector's ingest, the page's
+# reads, and the nightly retention). Default OFF: every bean behind it is absent (a two-name
+# @ConditionalOnProperty requiring BOTH this flag AND dashboard.writer.enabled, because all of it
+# goes through the dashboard_writer DSL), so the routes 404 until a deployment sets BOTH
+# FLOW_ENABLED=true and DASHBOARD_WRITER_ENABLED=true. The ingest (POST /internal/flow/ingest) and
+# the watchlist route (GET /internal/flow/watchlist) are gated on the SAME options-chat.ingest-token:
+# the flow-collector is a sibling of the dark-pool and mirror pods and holds exactly that credential,
+# never the shared token.
+flow:
+  enabled: ${FLOW_ENABLED:false}
+
 # Read-only application datasources. Credentials are the dedicated bff_readonly role per DB (see the
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:

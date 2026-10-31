@@ -167,13 +167,18 @@ throws (copy `DarkpoolRetention`, including its load-bearing `@Autowired`). The 
 (`/internal/flow/` added to `ServiceTokenFilter.INGEST_PREFIXES`; the traversal guard untouched);
 `GET /internal/flow/watchlist?date=` (same prefix, same token) returns today's watchlist tickers via the
 existing `WatchlistDailyReader` so the collector can quote the day's names without a tenant credential;
-`GET /api/flow/orders?date=&ticker=&min_premium=&labels=sweep,block,multi_leg,unusual&right=C|P&side=&dte_min=&dte_max=&before=&limit=`
-(session date in ET bounds `[09:25, 16:20)`, newest first, limit default 200 max 500, `before` = the last
-row's `first_ts`) and `GET /api/flow/summary?date=&ticker=` (ticker-day rows). All gated on
-`flow.enabled` (`FLOW_ENABLED`, default false) AND `dashboard.writer.enabled`, like dark pool; the live
-BFF env is operator-patched, so enabling is an operator `kubectl set env`.
+`GET /api/flow/orders?date=&ticker=&min_premium=&labels=sweep,block,multi_leg,unusual&right=C|P&side=&dte_min=&dte_max=&before=&before_id=&limit=`
+(session date in ET bounds `[09:25, 16:20)`, defaults to today ET when omitted, newest first, limit
+default 200 max 500; paging uses a compound cursor: `before` = last row's `first_ts` RFC-3339,
+`before_id` = last row's auto-increment `id`; response includes `next_before` + `next_before_id` when
+a further page exists; amended at review 2026-10-31) and `GET /api/flow/summary?date=&ticker=`
+(ticker-day rows). All gated on `flow.enabled` (`FLOW_ENABLED`, default false) AND
+`dashboard.writer.enabled`, like dark pool; the live BFF env is operator-patched, so enabling is an
+operator `kubectl set env`.
 
-**Wire contract (binding between collector and BFF; snake_case = column names; times RFC-3339):**
+**Wire contract (binding between collector and BFF; JSON wire names = snake_case as listed; DB column
+names differ where the wire name is a PostgreSQL 16 RESERVED keyword: `right` maps to column
+`option_right`, `cross` maps to column `is_cross`; times RFC-3339):**
 order: `order_id, ticker, contract, expiry, strike, right, first_ts, last_ts, trade_count,
 exchange_count, size, premium, vwap, side, side_source, bid, ask, quote_ts, sweep, multi_leg, auction,
 cross, block, unusual, day_volume, open_interest, underlying_price, moneyness_pct, dte, conditions
@@ -355,6 +360,12 @@ that branch, because its test asserts every `deploy.yml` service is classified.
 - [ ] The `uv.lock` change pulls in anything beyond `msgpack` and `websockets` (and their own deps).
 
 ### Step 2 — Storage + BFF: migration, ingest, reads, retention; collector posts
+
+**Amended 2026-10-31: Step 2 split; collector half waits for the Step 1 measurement.**
+The BFF half (migration, repository, ingest controller, read controllers, retention, `flow.enabled`
+flag) is built now and shipped dark. The collector half (`FlowIngestClient`, REST reference lookups,
+300 Mi memory limit, watchlist union, health alerts) is deferred until after the 2026-11-02 Step 1
+measurement session confirms `rss_peak_mb`, the storage floor, and the go/no-go thresholds.
 
 **Goal:** orders ≥ the confirmed floor and per-ticker daily summaries flow from the live collector into
 the dashboard DB and out through tenant-session reads; retention bounds both tables; collector-health
