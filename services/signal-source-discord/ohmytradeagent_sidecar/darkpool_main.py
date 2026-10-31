@@ -13,10 +13,12 @@ NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per
 429 ending the cycle after a short sleep.
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
-nothing; flipping that env is the go-live. There is no cursor persistence: a restart starts every
-symbol at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min), i.e. on a 5-minute
-boundary, and no trade before that instant is ever aggregated or posted. That alignment is what
-makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
+nothing; flipping that env is the go-live. Cursors are saved to ``STATE_DIR/cursors.json`` after
+every cycle whose batch was stored (#1032). The state dir is an emptyDir, so this survives a
+CONTAINER restart (a liveness kill) but not a new pod. On start a symbol with a saved cursor resumes
+at ``bucket5m(last_t)``; one without starts at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)``
+(default 10 min). Either way the start is a 5-minute boundary and no trade before it is ever
+aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
 partial window (a restart at 10:07 rebuilding 09:55 from 09:57 on) would OVERWRITE the complete
 row the previous process had stored — one corrupted bucket per symbol on every image roll.
 Prints dedupe on (symbol, ts, trade_id), so re-reading them is harmless.
@@ -45,6 +47,7 @@ re-send is idempotent — because a BFF roll is exactly when coverage would othe
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -64,8 +67,10 @@ from .darkpool_collector import (
     BudgetExhausted,
     Cursor,
     aggregate,
+    format_ts,
     bucket5m,
     keep,
+    parse_ts,
     print_to_wire,
     prune_accumulators,
     read_universe,
@@ -221,6 +226,7 @@ class DarkpoolCollector:
         log: logging.Logger,
         clock: Callable[[], datetime] = now_utc,
         heartbeat: Callable[[], None] | None = None,
+        state_path: pathlib.Path | None = None,
     ) -> None:
         self._data = data
         self._ingest = ingest
@@ -239,6 +245,8 @@ class DarkpoolCollector:
         self._next_start = 0
         # Prints the BFF refused, re-sent with the next batch (bounded, see UNPOSTED_MAX).
         self.unposted: list[dict] = []
+        self._state_path = state_path
+        self._load_cursors()
 
     async def cycle(self) -> CycleStats:
         stats = CycleStats(symbols=len(self._universe))
@@ -315,6 +323,7 @@ class DarkpoolCollector:
         stats.requests = self._data.requests_this_cycle
         stats.kept_prints = len(prints)
         stats.bars = len(bars)
+        stored = True
         if self._dry_run:
             stats.posted = False
         elif prints or bars or self.unposted:
@@ -322,6 +331,10 @@ class DarkpoolCollector:
             stats.posted = await self._ingest.post(to_post, bars)
             # A partial failure re-sends the stored chunks too: ON CONFLICT DO NOTHING on the BFF.
             self.unposted = [] if stats.posted else to_post[-UNPOSTED_MAX:]
+            stored = stats.posted
+        # On a failed post keep the last saved cursors: a restart re-reads what never landed.
+        if stored:
+            self._save_cursors()
         self._log.info(
             "darkpool cycle: symbols=%d requests=%d kept_prints=%d bars=%d dry_run=%s "
             "errors=%d skipped=%d posted=%s unposted=%d",
@@ -336,6 +349,29 @@ class DarkpoolCollector:
             len(self.unposted),
         )
         return stats
+
+    def _load_cursors(self) -> None:
+        """Resume each saved symbol at the START of its cursor's bucket: that bucket is re-read
+        whole, so its re-posted bar cannot overwrite a complete row with a partial one."""
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            saved = json.loads(self._state_path.read_text())
+            starts = {sym: bucket5m(parse_ts(ts)) for sym, ts in saved.items()}
+        except Exception as exc:  # noqa: BLE001 - a bad file means a cold start, never a crash
+            self._log.warning("darkpool cursor state unreadable, starting cold: %r", exc)
+            return
+        for sym, start in starts.items():
+            self.floors[sym] = start
+            self.cursors[sym] = Cursor.start(start)
+        self._log.info("darkpool cursor state loaded for %d symbols", len(starts))
+
+    def _save_cursors(self) -> None:
+        if self._state_path is None:
+            return
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({sym: format_ts(c.last_t) for sym, c in self.cursors.items()}))
+        tmp.replace(self._state_path)
 
     async def _fetch(self, symbol: str, cursor: Cursor, end: datetime):
         """Trades in (cursor, end] in time order plus the NBBO side of every kept print, and the
@@ -364,6 +400,7 @@ class DarkpoolCollector:
                     if i == 0:
                         raise
                     return fresh[:i], sides, quotes, exc
+                self._heartbeat()
                 quotes[t.trade_id] = quote
                 sides[t.trade_id] = side(t.price, quote, t.ts)
         return fresh, sides, quotes, None
@@ -427,6 +464,7 @@ async def _run() -> int:
         dry_run=dry_run,
         log=log,
         heartbeat=heartbeat_path.touch,
+        state_path=state_dir / "cursors.json",
     )
     log.info(
         "darkpool collector starting (dry_run=%s poll=%ss symbols=%d lookback=%smin window=%s-%s ET)",

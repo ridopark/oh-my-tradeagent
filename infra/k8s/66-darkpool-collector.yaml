@@ -167,7 +167,7 @@ spec:
               value: "200000"
             - name: DARKPOOL_MIN_SIZE
               value: "10000"
-            # Restart lookback; no cursor is persisted. Keep >= one 5-minute bucket.
+            # Cold-start lookback (new pod, or no saved cursor in /app/state). Keep >= one 5-minute bucket.
             - name: DARKPOOL_LOOKBACK_MINUTES
               value: "10"
             # Hard per-cycle cap on Alpaca requests (trades pages + one NBBO lookup per kept
