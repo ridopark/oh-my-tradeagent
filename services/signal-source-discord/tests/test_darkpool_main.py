@@ -16,7 +16,13 @@ import httpx
 import pytest
 
 from ohmytradeagent_sidecar import darkpool_main
-from ohmytradeagent_sidecar.darkpool_collector import AlpacaDataClient, Cursor, bucket5m, format_ts, parse_ts
+from ohmytradeagent_sidecar.darkpool_collector import (
+    AlpacaDataClient,
+    Cursor,
+    bucket5m,
+    format_ts,
+    parse_ts,
+)
 from ohmytradeagent_sidecar.darkpool_main import (
     DarkpoolCollector,
     DarkpoolIngestClient,
@@ -886,29 +892,33 @@ async def test_cursor_persist_fallback_on_bad_state(
         state_path.write_text("not json{{{")
     elif setup == "floor_gt_last_t":
         state_path.write_text(
-            json.dumps({
-                "version": 1,
-                "poll_day": "2026-10-29",
-                "symbols": {
-                    "QQQ": {
-                        "last_t": "2026-10-29T13:38:00Z",
-                        "floor": "2026-10-29T13:45:00Z",  # floor > last_t
-                    }
-                },
-            })
+            json.dumps(
+                {
+                    "version": 1,
+                    "poll_day": "2026-10-29",
+                    "symbols": {
+                        "QQQ": {
+                            "last_t": "2026-10-29T13:38:00Z",
+                            "floor": "2026-10-29T13:45:00Z",  # floor > last_t
+                        }
+                    },
+                }
+            )
         )
     elif setup == "old_poll_day":
         state_path.write_text(
-            json.dumps({
-                "version": 1,
-                "poll_day": "2026-10-28",
-                "symbols": {
-                    "QQQ": {
-                        "last_t": "2026-10-28T23:55:00Z",
-                        "floor": "2026-10-28T23:55:00Z",
-                    }
-                },
-            })
+            json.dumps(
+                {
+                    "version": 1,
+                    "poll_day": "2026-10-28",
+                    "symbols": {
+                        "QQQ": {
+                            "last_t": "2026-10-28T23:55:00Z",
+                            "floor": "2026-10-28T23:55:00Z",
+                        }
+                    },
+                }
+            )
         )
     # "missing": no file created
 
@@ -921,7 +931,9 @@ async def test_cursor_persist_fallback_on_bad_state(
     first_trades = next(r for r in alpaca.requests if r.url.path == "/v2/stocks/trades")
     assert first_trades.url.params["start"] == "2026-10-29T14:00:00Z"
 
-    darkpool_records = [r for r in caplog.records if "darkpool" in r.message.lower() or "state" in r.message.lower()]
+    darkpool_records = [
+        r for r in caplog.records if "darkpool" in r.message.lower() or "state" in r.message.lower()
+    ]
     if expect_warning:
         assert any(r.levelno >= logging.WARNING for r in darkpool_records), (
             f"expected a WARNING for setup={setup!r}"
@@ -945,14 +957,16 @@ async def test_cursor_persist_universe_drift(tmp_path):
 
     state_path = tmp_path / "cursors.json"
     state_path.write_text(
-        json.dumps({
-            "version": 1,
-            "poll_day": "2026-10-29",
-            "symbols": {
-                "QQQ": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
-                "OLD": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
-            },
-        })
+        json.dumps(
+            {
+                "version": 1,
+                "poll_day": "2026-10-29",
+                "symbols": {
+                    "QQQ": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
+                    "OLD": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
+                },
+            }
+        )
     )
     collector = make_collector(
         alpaca,
@@ -965,7 +979,8 @@ async def test_cursor_persist_universe_drift(tmp_path):
 
     def start_for(sym: str) -> str:
         req = next(
-            r for r in alpaca.requests
+            r
+            for r in alpaca.requests
             if r.url.path == "/v2/stocks/trades" and r.url.params["symbols"] == sym
         )
         return req.url.params["start"]
@@ -988,7 +1003,168 @@ async def test_cursor_persist_write_failure_does_not_stop_cycle(tmp_path, caplog
     with caplog.at_level(logging.WARNING, logger="test.darkpool_main"):
         stats = await collector.cycle()
     assert stats.posted is True
-    assert any(
-        r.levelno >= logging.WARNING and "darkpool" in r.message
-        for r in caplog.records
+    assert any(r.levelno >= logging.WARNING and "darkpool" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Review fix 1 — cursors written only AFTER a successful BFF post
+# ---------------------------------------------------------------------------
+
+
+async def test_cursors_saved_only_after_successful_post_kill_mid_cycle(tmp_path):
+    """If the cycle is killed after a symbol's fetch but BEFORE the BFF post, the state file
+    must NOT be updated so that a restarted collector re-reads from the OLD cursor and recovers
+    all bars that were never posted.
+
+    Scenario: QQQ has trades in two 5-minute buckets (13:30Z and 13:35Z). The cycle fetches
+    QQQ successfully then raises (simulating a kill) before SPY's request — and therefore
+    before the BFF post. On restart (same clock, same lookback floor), BOTH buckets must reach
+    the BFF."""
+    state = tmp_path / "cursors.json"
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    # QQQ: one trade in the 13:30Z bucket and two trades in the 13:35Z bucket.
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:31:00Z", 1),
+        raw("2026-10-29T13:36:00Z", 2),
+        raw("2026-10-29T13:38:00Z", 3),
+    ]
+    alpaca.trades["SPY"] = []
+
+    # Simulate a "process kill" when SPY's trades are fetched (after QQQ committed, before post).
+    class Killed(BaseException):
+        pass
+
+    original_handler = alpaca.handler
+
+    def dying_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.params.get("symbols") == "SPY" and not getattr(dying_handler, "done", False):
+            dying_handler.done = True
+            raise Killed
+        return original_handler(req)
+
+    alpaca.handler = dying_handler
+    clock_at_kill = Clock(NOW)  # 13:40Z, lookback 10 min -> floor bucket5m(13:30Z) = 13:30Z
+
+    c1 = make_collector(alpaca, bff, ["QQQ", "SPY"], clock=clock_at_kill, state_path=state)
+    with pytest.raises(BaseException):
+        await c1.cycle()
+    # Nothing reached the BFF — the post was never attempted.
+    assert bff.requests == []
+
+    # Container restart: new collector with the same clock and lookback.
+    # Default floor = bucket5m(13:40Z - 10 min) = bucket5m(13:30Z) = 13:30:00Z.
+    # The state file must NOT have advanced QQQ's cursor, so c2 must re-read from 13:30Z.
+    alpaca.handler = original_handler
+    c2 = make_collector(alpaca, bff, ["QQQ", "SPY"], clock=clock_at_kill, state_path=state)
+    await c2.cycle()
+
+    buckets_posted = sorted(
+        {b["bucket"] for body in bff.bodies() for b in body["bars"] if b["symbol"] == "QQQ"}
+    )
+    assert "2026-10-29T13:30:00Z" in buckets_posted, (
+        f"13:30Z bucket lost after mid-cycle kill; posted: {buckets_posted}"
+    )
+    assert "2026-10-29T13:35:00Z" in buckets_posted, (
+        f"13:35Z bucket lost after mid-cycle kill; posted: {buckets_posted}"
+    )
+
+
+async def test_cursors_not_saved_when_post_fails(tmp_path):
+    """If the BFF post fails, the state file must remain unchanged (pre-cycle cursors).
+    A restarted collector then re-reads from the pre-cycle cursor and re-posts the data."""
+    state = tmp_path / "cursors.json"
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca)
+
+    # Cycle 1 succeeds: saves state.
+    c1 = make_collector(alpaca, bff, ["QQQ"], state_path=state)
+    await c1.cycle()
+    assert state.exists()
+    content_after_c1 = state.read_text()
+
+    # Cycle 2: a new print arrives, but every BFF attempt fails.
+    alpaca.trades["QQQ"].append(raw("2026-10-29T13:39:00Z", 3, p=500.0, s=400, x="D"))
+    alpaca.quotes["QQQ"] = [{"t": "2026-10-29T13:38:59Z", "bp": 499.98, "ap": 500.00}]
+    bff.fail_next = [503, 503, 503]  # exhaust all retries of DarkpoolIngestClient
+    c2 = make_collector(alpaca, bff, ["QQQ"], state_path=state)
+    stats = await c2.cycle()
+    assert stats.posted is False
+
+    # State file must be unchanged: still reflects c1's cursors, not c2's.
+    assert state.read_text() == content_after_c1, (
+        "state file was updated even though the BFF post failed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review fix 2 — _load_cursors never raises on wrong-shaped inputs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_bytes,label",
+    [
+        (b"\xff\xfe invalid utf-8", "non_utf8"),
+        (b"null", "top_level_null"),
+        (b"[1, 2, 3]", "top_level_list"),
+        (
+            json.dumps({"version": 1, "poll_day": "2026-10-29", "symbols": "not-a-dict"}).encode(),
+            "symbols_not_dict",
+        ),
+        (
+            json.dumps(
+                {"version": 1, "poll_day": "2026-10-29", "symbols": {"QQQ": "not-a-dict"}}
+            ).encode(),
+            "entry_not_dict",
+        ),
+        (
+            json.dumps(
+                {
+                    "version": 1,
+                    "poll_day": "2026-10-29",
+                    "symbols": {"QQQ": {"last_t": None, "floor": "2026-10-29T13:35:00Z"}},
+                }
+            ).encode(),
+            "last_t_null",
+        ),
+        (
+            json.dumps(
+                {
+                    "version": 1,
+                    "poll_day": "2026-10-29",
+                    "symbols": {"QQQ": {"last_t": 42, "floor": "2026-10-29T13:35:00Z"}},
+                }
+            ).encode(),
+            "last_t_number",
+        ),
+    ],
+    ids=[
+        "non_utf8",
+        "top_level_null",
+        "top_level_list",
+        "symbols_not_dict",
+        "entry_not_dict",
+        "last_t_null",
+        "last_t_number",
+    ],
+)
+def test_load_cursors_never_raises_on_wrong_shape(bad_bytes, label, tmp_path):
+    """Constructor must not raise for any malformed state file.
+    The first cycle must start from the default floor (bucket5m(now - lookback))."""
+    state = tmp_path / "cursors.json"
+    state.write_bytes(bad_bytes)
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+
+    # Must not raise.
+    collector = make_collector(
+        alpaca,
+        bff,
+        ["QQQ"],
+        clock=Clock(parse_ts("2026-10-29T14:10:00Z")),
+        state_path=state,
+    )
+    # Bad file must not pre-load any cursor for QQQ.
+    assert "QQQ" not in collector.cursors, (
+        f"bad state file ({label}) pre-loaded a cursor; constructor must treat it as absent"
     )

@@ -303,7 +303,6 @@ class DarkpoolCollector:
                 min_size=self._min_size,
             )
             self.cursors[symbol] = cursor.advance(fresh)
-            self._save_cursors()
             for t in fresh:
                 if t.trade_id in sides:
                     prints.append(print_to_wire(t, quotes[t.trade_id], sides[t.trade_id]))
@@ -326,11 +325,17 @@ class DarkpoolCollector:
         stats.bars = len(bars)
         if self._dry_run:
             stats.posted = False
+            self._save_cursors()
         elif prints or bars or self.unposted:
             to_post = self.unposted + prints
             stats.posted = await self._ingest.post(to_post, bars)
             # A partial failure re-sends the stored chunks too: ON CONFLICT DO NOTHING on the BFF.
             self.unposted = [] if stats.posted else to_post[-UNPOSTED_MAX:]
+            if stats.posted:
+                self._save_cursors()
+        else:
+            # Nothing to post: cursors may have advanced without generating new data; save anyway.
+            self._save_cursors()
         self._log.info(
             "darkpool cycle: symbols=%d requests=%d kept_prints=%d bars=%d dry_run=%s "
             "errors=%d skipped=%d posted=%s unposted=%d",
@@ -383,14 +388,14 @@ class DarkpoolCollector:
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as exc:
             self._log.warning("darkpool state file unreadable (%r); ignoring: %s", exc, path)
             return
-        if data.get("version") != 1:
+        if not isinstance(data, dict) or data.get("version") != 1:
             self._log.warning(
                 "darkpool state file has unexpected version %r; ignoring: %s",
-                data.get("version"),
+                data.get("version") if isinstance(data, dict) else type(data).__name__,
                 path,
             )
             return
@@ -405,12 +410,18 @@ class DarkpoolCollector:
             )
             return
         try:
-            symbols_data = data.get("symbols") or {}
+            symbols_data = data.get("symbols")
+            if not isinstance(symbols_data, dict):
+                raise TypeError(f"'symbols' must be a dict, got {type(symbols_data).__name__}")
             loaded: dict[str, datetime] = {}  # symbol -> floor to apply
             for symbol in self._universe:
                 if symbol not in symbols_data:
                     continue
                 entry = symbols_data[symbol]
+                if not isinstance(entry, dict):
+                    raise TypeError(
+                        f"entry for {symbol!r} must be a dict, got {type(entry).__name__}"
+                    )
                 last_t = parse_ts(entry["last_t"])
                 floor_saved = parse_ts(entry["floor"])
                 if floor_saved > last_t:
@@ -421,7 +432,7 @@ class DarkpoolCollector:
                     )
                     return
                 loaded[symbol] = bucket5m(last_t)
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
             self._log.warning("darkpool state file malformed (%r); ignoring: %s", exc, path)
             return
         for symbol, floor in loaded.items():
@@ -449,9 +460,7 @@ class DarkpoolCollector:
             tmp.write_text(payload)
             os.replace(tmp, self._state_path)
         except OSError as exc:
-            self._log.warning(
-                "darkpool failed to write state file (%r): %s", exc, self._state_path
-            )
+            self._log.warning("darkpool failed to write state file (%r): %s", exc, self._state_path)
 
 
 async def run_loop(

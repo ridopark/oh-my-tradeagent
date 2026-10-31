@@ -105,11 +105,17 @@ hundreds of lookups.
   "symbols": {"<SYM>": {"last_t": "<RFC-3339 UTC>", "floor": "<RFC-3339 UTC>"}}}`. Use the existing
   `format_ts` and `parse_ts`. `last_ids` is not persisted: the resume restarts at a bucket start,
   before `last_t`, so the ids at `last_t` are re-read and filtered by a fresh cursor anyway.
-- **Write.** After the cursor of a committed symbol advances (both the full commit and the
-  budget-cut prefix commit), serialise the whole cursor map, write it to a temp file in the same
-  directory, then `os.replace` it onto `state_path`. No fsync: the emptyDir does not survive a node
-  crash anyway. Any `OSError` is logged as a warning and the cycle carries on. Symbols whose fetch
-  failed are written with their unchanged cursor, because the whole map is written each time.
+- **Write.** *(amended at review 2026-10-31)* The state file is written only **after** the
+  cycle's BFF post succeeds (or after the cycle ends in dry-run, where nothing is posted). It is
+  NOT written per-symbol during the cycle. Reason: the previous per-symbol write was incorrect —
+  it saved each symbol's advanced cursor before the bars were posted, so a kill mid-cycle lost
+  every bar accumulated after that write. With the corrected order, if the process dies between a
+  symbol's fetch and the end-of-cycle post, the file still holds the pre-cycle cursors; on restart
+  the collector re-fetches from the old bucket start and the BFF receives the complete bars. If
+  the BFF post fails, the file is also left unchanged so the next restart re-fetches the same
+  data. In the "nothing to post" case (all symbols returned empty) the file is written with the
+  unchanged cursors (harmless). No fsync: the emptyDir does not survive a node crash anyway. Any
+  `OSError` is logged as a warning and the cycle carries on.
 - **Load.** At construction, when `state_path` is set and the file exists. If the JSON is invalid,
   the version is wrong, a timestamp does not parse, or `floor > last_t`, treat the file as absent
   and log a warning naming the reason. If `poll_day` is not the ET date of `clock()` at
