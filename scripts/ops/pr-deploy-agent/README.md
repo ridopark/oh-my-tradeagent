@@ -14,24 +14,112 @@ A systemd user timer on the operator's WSL2 workstation that:
 
 ## Install
 
+Fresh install from a local clone on `main`:
+
 ```sh
 # 1. Create config dir and copy env file
 mkdir -p ~/.config/pr-deploy-agent
 cp scripts/ops/pr-deploy-agent/systemd/env.example ~/.config/pr-deploy-agent/env
 # Edit DEPLOY_MODE and HOMELAB_SSH as needed.
 
-# 2. Install systemd user units
+# 2. Install the launcher from origin/main (independent of the current branch)
+git fetch origin main
+git show origin/main:scripts/ops/pr-deploy-agent/launch.sh > /tmp/launch.sh
+install -D -m 0755 /tmp/launch.sh ~/.local/share/pr-deploy-agent/launch.sh
+
+# 3. Run the launcher once with the kill switch set to bootstrap the clone
+touch ~/.config/pr-deploy-agent/DISABLED
+~/.local/share/pr-deploy-agent/launch.sh
+# Verify hooks installed: ls ~/.local/share/pr-deploy-agent/repo/.git/hooks/pre-push
+rm ~/.config/pr-deploy-agent/DISABLED
+
+# 4. Copy the Discord webhook into the clone's .env (one line, mode 600)
+grep '^DISCORD_WEBHOOK_URL=' .env > ~/.local/share/pr-deploy-agent/repo/.env
+chmod 600 ~/.local/share/pr-deploy-agent/repo/.env
+
+# 5. Install systemd user units from the clone
 mkdir -p ~/.config/systemd/user
-cp scripts/ops/pr-deploy-agent/systemd/pr-deploy-agent.{service,timer} \
+cp ~/.local/share/pr-deploy-agent/repo/scripts/ops/pr-deploy-agent/systemd/pr-deploy-agent.{service,timer} \
    ~/.config/systemd/user/
 
-# 3. Reload and enable
+# 6. Reload and enable
 systemctl --user daemon-reload
 systemctl --user enable --now pr-deploy-agent.timer
 
-# 4. Verify
-systemctl --user list-timers pr-deploy-agent.timer
+# 7. Verify
 journalctl --user -u pr-deploy-agent -n 20 -f
+# Expected: "clone at <sha> (up to date)" and "tick done" and no "no Discord webhook configured"
+```
+
+---
+
+## Migrating from the operator checkout
+
+The old unit ran `tick.sh` straight from `~/src/oh-my-tradeagent` (the operator's
+working checkout), which meant agent changes needed a manual pull and switching
+branches accidentally changed which code the agent ran.  The new unit runs
+`launch.sh` from a dedicated clone that fast-forwards itself every tick.
+
+**Pre-conditions:** no deploy gate decision in flight
+(check `journalctl --user -u pr-deploy-agent | grep 'deploy deferred'`).
+
+```sh
+# Step 1 — disable the agent and wait for any running tick to finish
+touch ~/.config/pr-deploy-agent/DISABLED
+# Wait until: systemctl --user is-active pr-deploy-agent.service  →  inactive
+
+# Step 2 — remove any fix-round worktrees registered against the operator checkout
+# (skip if ~/.local/state/pr-deploy-agent/worktrees does not exist)
+if [[ -d ~/.local/state/pr-deploy-agent/worktrees ]]; then
+  for wt in ~/.local/state/pr-deploy-agent/worktrees/*/; do
+    git -C ~/src/oh-my-tradeagent worktree remove --force "$wt" 2>/dev/null || true
+  done
+  git -C ~/src/oh-my-tradeagent worktree prune
+fi
+
+# Step 3 — install the launcher from origin/main
+git -C ~/src/oh-my-tradeagent fetch origin main
+git -C ~/src/oh-my-tradeagent show \
+    origin/main:scripts/ops/pr-deploy-agent/launch.sh > /tmp/launch.sh
+install -D -m 0755 /tmp/launch.sh ~/.local/share/pr-deploy-agent/launch.sh
+
+# Step 4 — bootstrap the clone (kill switch is still set; cloning has no external effect)
+~/.local/share/pr-deploy-agent/launch.sh
+# Verify hooks: ls ~/.local/share/pr-deploy-agent/repo/.git/hooks/pre-push
+# Journal should contain: "cloned ... at <sha>" then "kill switch set"
+
+# Step 5 — copy the Discord webhook into the clone's .env (one line only, not the full .env)
+grep '^DISCORD_WEBHOOK_URL=' ~/src/oh-my-tradeagent/.env \
+    > ~/.local/share/pr-deploy-agent/repo/.env
+chmod 600 ~/.local/share/pr-deploy-agent/repo/.env
+
+# Step 6 — update the installed unit file and reload
+cp ~/.local/share/pr-deploy-agent/repo/scripts/ops/pr-deploy-agent/systemd/pr-deploy-agent.service \
+   ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# Step 7 — re-enable and verify
+rm ~/.config/pr-deploy-agent/DISABLED
+systemctl --user start pr-deploy-agent.service
+journalctl --user -u pr-deploy-agent -n 50
+# Expected: "clone at <sha> (up to date)" and "tick done"
+# and no "no Discord webhook configured"
+```
+
+**Rollback** (restore the old unit):
+```sh
+# Restore ExecStart to point at the operator checkout
+sed -i 's|ExecStart=.*launch.sh|ExecStart=%h/src/oh-my-tradeagent/scripts/ops/pr-deploy-agent/tick.sh|' \
+    ~/.config/systemd/user/pr-deploy-agent.service
+systemctl --user daemon-reload
+```
+
+**Recovery for a refused clone** (dirty / diverged / not-on-main):
+```sh
+# Inspect the state the agent preserved, then fix manually or delete and re-bootstrap:
+git -C ~/.local/share/pr-deploy-agent/repo status
+# Fix: e.g. git -C ~/.local/share/pr-deploy-agent/repo reset --hard origin/main
+# Or:  rm -rf ~/.local/share/pr-deploy-agent/repo  (next tick re-clones automatically)
 ```
 
 ---
@@ -92,6 +180,8 @@ until the next hour window).
 
 | Event | Color | When sent |
 |---|---|---|
+| **clone refused** | yellow | Clone is dirty, diverged, or off `main`; tick does not run; once per (reason, HEAD SHA) |
+| **launcher drift** | yellow | Installed `launch.sh` differs from the clone's; reinstall step needed; once per launcher SHA |
 | **would approve** | green | First tick where a run is SAFE (recommend mode); deduplicated per run |
 | **deploy approved** | green | A run was approved in act mode |
 | **approve failed** | red | The GitHub approve API call failed |
@@ -136,15 +226,17 @@ Tests use fake `gh` and `ssh` executables on PATH — no network required.
 
 ```
 scripts/ops/pr-deploy-agent/
-├── tick.sh          # entry point: kill switch, lock, env, calls duties
+├── launch.sh        # launcher: lock, bootstrap, kill-switch, ff-update, exec tick.sh
+│                    # (installed outside the clone; self-updating via ff)
+├── tick.sh          # tick entry point: env, duties (exec'd by launcher)
 ├── deploy_gate.py   # Steps 1+2: classify services, check live state, decide safe/unsafe
 ├── pr_duty.py       # Steps 3 & 4: merge READY PRs, ping, rerun unrelated checks, NEEDS_FIXES loop
 ├── live_state.py    # live-state reads (temporal + psql) via ssh
 ├── market_hours.py  # NYSE session hours + holiday calendar
-├── notify.py        # Discord webhook, deduplicated via statefile
+├── notify.py        # Discord webhook, deduplicated via statefile; --once CLI for launcher alerts
 ├── statefile.py     # atomic JSON state (dedupe keys, round counts)
 ├── systemd/         # service + timer units + env.example
-└── tests/           # offline unit tests (fake gh/ssh)
+└── tests/           # offline unit tests (fake gh/ssh/git)
 ```
 
 ### PR duty (`PR_MODE`)
