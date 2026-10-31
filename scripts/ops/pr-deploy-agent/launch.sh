@@ -22,14 +22,32 @@
 #
 # Kill switch: touch ${XDG_CONFIG_HOME:-~/.config}/pr-deploy-agent/DISABLED
 
+set -uo pipefail
+
 # ── Alert helpers (send via the CLONE's notify.py) ───────────────────────────
 
 _alert_once() {
   local clone="$1" key="$2" title="$3" body="$4"
   local state_dir="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pr-deploy-agent}"
+  # Do not suppress stderr: a failure must appear in the journal as a warning.
   python3 "$clone/scripts/ops/pr-deploy-agent/notify.py" \
     --once "$key" --title "$title" --body "$body" \
-    --state-dir "$state_dir" 2>/dev/null || true
+    --state-dir "$state_dir" || \
+    echo "$TS $LOG_TAG notify.py exited non-zero for key=$key" >&2
+}
+
+# ── Refuse and alert (four branches collapsed into one helper) ────────────────
+
+_refuse() {
+  # _refuse REASON MSG
+  # Logs MSG to stderr, sends a once-only alert keyed by REASON+HEAD, exits 0.
+  local reason="$1" msg="$2"
+  local head
+  head="$(git -C "$CLONE" rev-parse HEAD 2>/dev/null)" || head="unknown"
+  echo "$TS $LOG_TAG $msg" >&2
+  _alert_once "$CLONE" "clone-refused:$reason:$head" \
+    "pr-deploy-agent: clone refused ($reason)" "$msg"
+  exit 0
 }
 
 # ── Main body ────────────────────────────────────────────────────────────────
@@ -56,7 +74,7 @@ main() {
   # ── 2. Bootstrap the clone if it is absent or not a git repo ─────────────
   if [[ ! -d "$CLONE/.git" ]]; then
     echo "$TS $LOG_TAG bootstrapping clone from $URL" >&2
-    if ! git clone --branch main "$URL" "$CLONE" 2>&1; then
+    if ! timeout 120 git clone --branch main "$URL" "$CLONE" 2>&1; then
       echo "$TS $LOG_TAG clone failed; exiting" >&2
       exit 1
     fi
@@ -81,29 +99,25 @@ main() {
     exit 1
   fi
 
+  # Capture gating git commands; fail closed on any error (finding 1).
   local BRANCH STATUS OLD_SHA7
-  BRANCH="$(git -C "$CLONE" rev-parse --abbrev-ref HEAD)"
-  STATUS="$(git -C "$CLONE" status --porcelain)"
-  OLD_SHA7="$(git -C "$CLONE" rev-parse --short=7 HEAD)"
+  if ! BRANCH="$(git -C "$CLONE" rev-parse --abbrev-ref HEAD 2>&1)"; then
+    _refuse "git-error" "git rev-parse --abbrev-ref HEAD failed; refusing"
+  fi
+  if ! STATUS="$(git -C "$CLONE" status --porcelain 2>&1)"; then
+    _refuse "git-error" "git status --porcelain failed (corrupted index?); refusing"
+  fi
+  OLD_SHA7="$(git -C "$CLONE" rev-parse --short=7 HEAD 2>/dev/null)" || \
+    _refuse "git-error" "git rev-parse --short=7 HEAD failed; refusing"
 
   if [[ "$BRANCH" != "main" ]]; then
-    local OLD_HEAD
-    OLD_HEAD="$(git -C "$CLONE" rev-parse HEAD)"
-    echo "$TS $LOG_TAG clone is not on main (branch=$BRANCH); refusing" >&2
-    _alert_once "$CLONE" "clone-refused:not-on-main:$OLD_HEAD" \
-      "pr-deploy-agent: clone refused (not-on-main)" \
-      "Clone is on branch '$BRANCH'; expected main. Fix manually — the agent never resets."
-    exit 0
+    _refuse "not-on-main" \
+      "clone is not on main (branch=$BRANCH); fix manually — the agent never resets"
   fi
 
   if [[ -n "$STATUS" ]]; then
-    local OLD_HEAD
-    OLD_HEAD="$(git -C "$CLONE" rev-parse HEAD)"
-    echo "$TS $LOG_TAG clone is dirty; refusing" >&2
-    _alert_once "$CLONE" "clone-refused:dirty:$OLD_HEAD" \
-      "pr-deploy-agent: clone refused (dirty)" \
-      "Clone has uncommitted changes. Fix manually — the agent never resets."
-    exit 0
+    _refuse "dirty" \
+      "clone is dirty; fix manually — the agent never resets"
   fi
 
   # Fetch origin/main; failure is non-fatal — run on current HEAD
@@ -122,18 +136,12 @@ main() {
         NEW_SHA7="$(git -C "$CLONE" rev-parse --short=7 HEAD)"
         echo "$TS $LOG_TAG clone updated $OLD_SHA7→$NEW_SHA7" >&2
       else
-        echo "$TS $LOG_TAG merge --ff-only failed; refusing" >&2
-        _alert_once "$CLONE" "clone-refused:merge-failed:$HEAD_SHA" \
-          "pr-deploy-agent: clone refused (merge-failed)" \
-          "Fast-forward merge failed. Fix manually — the agent never resets."
-        exit 0
+        _refuse "merge-failed" \
+          "merge --ff-only failed; fix manually — the agent never resets"
       fi
     else
-      echo "$TS $LOG_TAG clone is diverged; refusing" >&2
-      _alert_once "$CLONE" "clone-refused:diverged:$HEAD_SHA" \
-        "pr-deploy-agent: clone refused (diverged)" \
-        "Clone has diverged from origin/main. Fix manually — the agent never resets."
-      exit 0
+      _refuse "diverged" \
+        "clone has diverged from origin/main; fix manually — the agent never resets"
     fi
   fi
 
@@ -160,6 +168,12 @@ main() {
   fi
 
   # ── 7. Exec the clone's tick.sh (same process; new code if just updated) ──
+  #
+  # Close fd 8 (launcher lock) before handing off to tick.sh so that any
+  # process tick.sh backgrounds does not inherit it and block the next launcher
+  # invocation.  tick.sh acquires its own tick lock on fd 9 ($STATE_DIR/lock)
+  # which serialises concurrent ticks for the full duration of the tick.
+  exec 8>&-
   exec "$CLONE/scripts/ops/pr-deploy-agent/tick.sh"
 }
 

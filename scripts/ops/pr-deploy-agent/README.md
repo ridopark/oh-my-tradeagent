@@ -34,8 +34,7 @@ touch ~/.config/pr-deploy-agent/DISABLED
 rm ~/.config/pr-deploy-agent/DISABLED
 
 # 4. Copy the Discord webhook into the clone's .env (one line, mode 600)
-grep '^DISCORD_WEBHOOK_URL=' .env > ~/.local/share/pr-deploy-agent/repo/.env
-chmod 600 ~/.local/share/pr-deploy-agent/repo/.env
+(umask 077; grep '^DISCORD_WEBHOOK_URL=' .env > ~/.local/share/pr-deploy-agent/repo/.env)
 
 # 5. Install systemd user units from the clone
 mkdir -p ~/.config/systemd/user
@@ -86,12 +85,11 @@ install -D -m 0755 /tmp/launch.sh ~/.local/share/pr-deploy-agent/launch.sh
 # Step 4 — bootstrap the clone (kill switch is still set; cloning has no external effect)
 ~/.local/share/pr-deploy-agent/launch.sh
 # Verify hooks: ls ~/.local/share/pr-deploy-agent/repo/.git/hooks/pre-push
-# Journal should contain: "cloned ... at <sha>" then "kill switch set"
+# Terminal output should show: "cloned ... at <sha>" then "kill switch set"
 
 # Step 5 — copy the Discord webhook into the clone's .env (one line only, not the full .env)
-grep '^DISCORD_WEBHOOK_URL=' ~/src/oh-my-tradeagent/.env \
-    > ~/.local/share/pr-deploy-agent/repo/.env
-chmod 600 ~/.local/share/pr-deploy-agent/repo/.env
+(umask 077; grep '^DISCORD_WEBHOOK_URL=' ~/src/oh-my-tradeagent/.env \
+    > ~/.local/share/pr-deploy-agent/repo/.env)
 
 # Step 6 — update the installed unit file and reload
 cp ~/.local/share/pr-deploy-agent/repo/scripts/ops/pr-deploy-agent/systemd/pr-deploy-agent.service \

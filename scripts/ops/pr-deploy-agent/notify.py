@@ -116,32 +116,19 @@ def _cli_main() -> None:
     parser.add_argument("--color", default="yellow")
     parser.add_argument(
         "--state-dir",
-        default=None,
-        help="Override the state directory (default: $STATE_DIR or XDG default).",
+        required=True,
+        help="State directory containing state.json (always passed by launch.sh).",
     )
     args = parser.parse_args()
 
     # repo_root: three levels up from this script's location (i.e. the clone root)
     repo_root = Path(__file__).resolve().parent.parent.parent
-
-    # Determine state file path
-    import os as _os
-    if args.state_dir:
-        state_path = Path(args.state_dir) / "state.json"
-    else:
-        state_home = _os.environ.get(
-            "XDG_STATE_HOME", str(Path.home() / ".local" / "state")
-        )
-        state_dir = _os.environ.get("STATE_DIR", state_home + "/pr-deploy-agent")
-        state_path = Path(state_dir) / "state.json"
+    state_path = Path(args.state_dir) / "state.json"
 
     state = statefile.load(state_path)
-    if statefile.is_notified(state, args.once):
+    if not notify_once(state, args.once, repo_root, args.title, args.body, args.color):
         print("already notified", flush=True)
         sys.exit(0)
-
-    post(repo_root, args.title, args.body, args.color)
-    statefile.mark_notified(state, args.once)
     statefile.save(state_path, state)
 
 

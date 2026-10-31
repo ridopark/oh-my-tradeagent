@@ -86,6 +86,8 @@ class _Fixture:
         self.gitconfig = self.tmp / "gitconfig"
         self.gitconfig.write_text("")
 
+        # git_env is used for direct git subprocess calls inside tests (not via
+        # launch.sh); it inherits os.environ so git can find its own helpers.
         self.git_env = {
             **os.environ,
             **_GIT_IDENTITY,
@@ -143,10 +145,37 @@ class _Fixture:
         )
         fake_make.chmod(0o755)
 
+    def use_real_notify(self) -> None:
+        """Replace stub notify.py (and statefile.py) in the clone with the real ones."""
+        clone = self.clone_path()
+        tick_dir = clone / "scripts" / "ops" / "pr-deploy-agent"
+        for name in ("notify.py", "statefile.py"):
+            (tick_dir / name).write_text((AGENT_DIR / name).read_text())
+
     def launch_env(self, extra: dict | None = None) -> dict:
-        """Build the environment dict for a launch.sh subprocess."""
+        """Build the environment dict for a launch.sh subprocess.
+
+        Explicitly excludes shell-level vars (DISCORD_WEBHOOK_URL, STATE_DIR,
+        XDG_STATE_HOME, XDG_DATA_HOME) so tests are not affected by the developer's
+        shell environment.  Finding 5: repro was
+        ``DISCORD_WEBHOOK_URL=https://x.invalid python3 -m unittest ...`` causing
+        TestWebhookWarning to fail silently.
+        """
+        # Start from os.environ but strip vars that would interfere with
+        # webhook / state-dir tests.
+        _STRIP = {
+            "DISCORD_WEBHOOK_URL",
+            "STATE_DIR",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "PR_DEPLOY_AGENT_HOME",
+            "PR_DEPLOY_AGENT_CLONE_URL",
+            "XDG_CONFIG_HOME",
+        }
         env = {
-            **self.git_env,
+            **{k: v for k, v in os.environ.items() if k not in _STRIP},
+            **_GIT_IDENTITY,
+            "GIT_CONFIG_GLOBAL": str(self.gitconfig),
             # Give bash a safe $HOME so it never reads the workstation's .bashrc
             "HOME": str(self.tmp / "home"),
             "PR_DEPLOY_AGENT_HOME": str(self.agent_home),
@@ -234,10 +263,12 @@ class TestBootstrap(unittest.TestCase):
         self.assertIn("cloned", result.stderr)
         self.assertIn(self.f.sha_a[:7], result.stderr)
 
-        # fake make was called with 'hooks'
+        # fake make was called with -C <clone> hooks  (finding 4)
         self.assertTrue(self.f.make_log.exists(), "fake make was never called")
         make_output = self.f.make_log.read_text()
         self.assertIn("hooks", make_output)
+        self.assertIn("-C", make_output)
+        self.assertIn(str(self.f.clone_path()), make_output)
 
         # clone directory exists
         self.assertTrue((self.f.clone_path() / ".git").is_dir())
@@ -450,15 +481,20 @@ class TestRefusal(unittest.TestCase):
         # Make clone dirty (tracked file modified, not staged)
         tick_path.write_text(original + "# dirty\n")
 
+        # Snapshot both HEAD and porcelain BEFORE the launcher run (finding 2)
+        status_before = _git(clone, ["status", "--porcelain"], self.f.git_env)
+
         result = self.f.run_launch()
 
         self.assertEqual(result.returncode, 0, result.stderr[-300:])
         self.assertIn("dirty", result.stderr)
         self.assertNotIn("STUB TICK", result.stdout)
 
-        # Clone state is byte-for-byte unchanged (HEAD and file)
+        # Clone state is byte-for-byte unchanged — both HEAD and porcelain (finding 2)
         head_after = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        status_after = _git(clone, ["status", "--porcelain"], self.f.git_env)
         self.assertEqual(head_before, head_after)
+        self.assertEqual(status_before, status_after)
         self.assertEqual(tick_path.read_text(), original + "# dirty\n")
 
         # Alert was requested with the right key prefix
@@ -467,6 +503,52 @@ class TestRefusal(unittest.TestCase):
             any(k.startswith(f"clone-refused:dirty:{head_before}") for k in keys),
             f"expected clone-refused:dirty key, got {keys}",
         )
+
+    def test_dirty_two_runs_exactly_one_alert(self) -> None:
+        """Finding 2: two runs on a dirty clone with real notify.py → exactly one alert."""
+        clone = self.f.clone_path()
+        self.f.use_real_notify()
+
+        state_dir = self.f.tmp / "state-real"
+        state_dir.mkdir()
+
+        tick_path = clone / "scripts" / "ops" / "pr-deploy-agent" / "tick.sh"
+        tick_path.write_text(tick_path.read_text() + "# dirty\n")
+
+        head_before = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        status_before = _git(clone, ["status", "--porcelain"], self.f.git_env)
+
+        extra = {
+            "STATE_DIR": str(state_dir),
+            "DISCORD_DRY_RUN": "1",
+            # Prevent notify.py from creating __pycache__ which would change status
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        r1 = self.f.run_launch(extra)
+        r2 = self.f.run_launch(extra)
+
+        # Both runs must exit 0 and not run the tick
+        self.assertEqual(r1.returncode, 0, r1.stderr[-300:])
+        self.assertEqual(r2.returncode, 0, r2.stderr[-300:])
+        self.assertNotIn("STUB TICK", r1.stdout)
+        self.assertNotIn("STUB TICK", r2.stdout)
+
+        # HEAD and porcelain unchanged across both runs (finding 2)
+        head_after = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        status_after = _git(clone, ["status", "--porcelain"], self.f.git_env)
+        self.assertEqual(head_before, head_after)
+        self.assertEqual(status_before, status_after)
+
+        # Exactly ONE alert recorded in state.json (finding 2)
+        import json as _json
+        state_path = state_dir / "state.json"
+        self.assertTrue(state_path.exists(), "state.json not written by real notify.py")
+        state = _json.loads(state_path.read_text())
+        dirty_keys = [
+            k for k in state.get("notified", {})
+            if k.startswith(f"clone-refused:dirty:{head_before}")
+        ]
+        self.assertEqual(len(dirty_keys), 1, f"expected exactly 1 dirty alert; state={state}")
 
     def test_untracked_is_dirty_env_is_not(self) -> None:
         """Untracked non-.env file = dirty; ignored .env does NOT count."""
@@ -499,15 +581,20 @@ class TestRefusal(unittest.TestCase):
         # Advance origin independently
         self.f.add_origin_commit("origin advance")
 
+        # Snapshot porcelain before (finding 2)
+        status_before = _git(clone, ["status", "--porcelain"], self.f.git_env)
+
         result = self.f.run_launch()
 
         self.assertEqual(result.returncode, 0, result.stderr[-300:])
         self.assertIn("diverged", result.stderr)
         self.assertNotIn("STUB TICK", result.stdout)
 
-        # Clone is still at the local commit
+        # Clone HEAD and porcelain unchanged (finding 2)
         head_after = _git(clone, ["rev-parse", "HEAD"], self.f.git_env)
+        status_after = _git(clone, ["status", "--porcelain"], self.f.git_env)
         self.assertEqual(local_head, head_after)
+        self.assertEqual(status_before, status_after)
 
         # Alert key present
         keys = self._notify_keys()
@@ -608,7 +695,11 @@ class TestDrift(unittest.TestCase):
         self.f.cleanup()
 
     def test_drift_warns_and_runs(self) -> None:
-        """Clone has a different launch.sh: drift logged, alert sent, tick still runs."""
+        """Clone has a different launch.sh: drift logged, alert sent, tick still runs.
+
+        Finding 3: assert launcher-drift: unconditionally (no if-exists guard) so
+        that no-op'ing the drift alert in launch.sh causes this test to fail.
+        """
         result = self.f.run_launch()
 
         self.assertEqual(result.returncode, 0, result.stderr[-300:])
@@ -616,10 +707,34 @@ class TestDrift(unittest.TestCase):
         # Tick still ran despite drift
         self.assertIn("STUB TICK", result.stdout)
 
-        # Alert key starts with 'launcher-drift:'
+        # Alert key starts with 'launcher-drift:' — asserted unconditionally
+        # (finding 3: removing the drift alert in launch.sh must cause this to fail)
+        self.assertTrue(self.f.notify_log.exists(), "notify_log not written; drift alert missing")
+        logged = self.f.notify_log.read_text()
+        self.assertIn("launcher-drift:", logged)
+
+    def test_no_drift_when_matching(self) -> None:
+        """Finding 3: when installed launcher matches clone's, no drift alert is sent."""
+        # Push the ACTUAL launch.sh (the launcher under test) as the clone's launch.sh
+        self.f.push_file_to_origin(
+            "scripts/ops/pr-deploy-agent/launch.sh",
+            LAUNCH_SH.read_text(),
+            executable=True,
+        )
+        # Re-bootstrap so the clone has the matching launcher
+        self.f.run_launch()
+
+        # Clear any prior notify log entries
         if self.f.notify_log.exists():
-            logged = self.f.notify_log.read_text()
-            self.assertIn("launcher-drift:", logged)
+            self.f.notify_log.unlink()
+
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertNotIn("installed launcher differs from main", result.stderr)
+        # notify_log must NOT contain a launcher-drift: entry
+        if self.f.notify_log.exists():
+            self.assertNotIn("launcher-drift:", self.f.notify_log.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -651,3 +766,109 @@ class TestWebhookWarning(unittest.TestCase):
         result = self.f.run_launch()
         self.assertEqual(result.returncode, 0, result.stderr[-200:])
         self.assertNotIn("no Discord webhook configured", result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: fail closed on git command failure
+# ---------------------------------------------------------------------------
+
+class TestGitError(unittest.TestCase):
+    """launch.sh must refuse (no tick, git-error alert) when a gating git command fails."""
+
+    def setUp(self) -> None:
+        self.f = _Fixture()
+        self.f.setup_origin()
+        boot = self.f.run_launch()
+        self.assertEqual(boot.returncode, 0, boot.stderr[-300:])
+
+    def tearDown(self) -> None:
+        self.f.cleanup()
+
+    def _notify_keys(self) -> list[str]:
+        if not self.f.notify_log.exists():
+            return []
+        keys = []
+        for line in self.f.notify_log.read_text().splitlines():
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == "--once" and i + 1 < len(parts):
+                    keys.append(parts[i + 1])
+        return keys
+
+    def test_corrupt_index_fails_closed(self) -> None:
+        """Corrupt .git/index makes git status exit non-zero: no tick, git-error alert sent."""
+        clone = self.f.clone_path()
+        index = clone / ".git" / "index"
+        index.write_bytes(b"NOT A VALID GIT INDEX FILE CONTENT")
+
+        result = self.f.run_launch()
+
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertNotIn("STUB TICK", result.stdout)
+        # Some log about the git failure must appear
+        self.assertTrue(
+            "git" in result.stderr.lower() or "refused" in result.stderr.lower(),
+            f"expected a git-error log line; stderr={result.stderr[-300:]}",
+        )
+
+        # A git-error alert key must have been sent
+        keys = self._notify_keys()
+        self.assertTrue(
+            any(k.startswith("clone-refused:git-error:") for k in keys),
+            f"expected clone-refused:git-error key, got {keys!r}; stderr={result.stderr[-300:]}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 7: fd 8 must not be inherited by long-lived children of tick.sh
+# ---------------------------------------------------------------------------
+
+# Stub tick that closes stdout + stderr BEFORE backgrounding a sleep so that
+# Python's subprocess.run(capture_output=True) returns immediately (without
+# waiting for the sleep to exit).  The background sleep inherits fd 8 only if
+# launch.sh does NOT close it before exec'ing tick.sh.
+_STUB_TICK_BG = """\
+#!/usr/bin/env bash
+# Close stdout and stderr first so the test harness does not wait for the sleep.
+exec 1>&-
+exec 2>&-
+sleep 4 &
+"""
+
+
+class TestFdInheritance(unittest.TestCase):
+    """fd 8 (launcher lock) must not block the next launcher run via background children."""
+
+    def setUp(self) -> None:
+        self.f = _Fixture()
+        self.f.setup_origin()
+        # Push a tick that backgrounds a sleep
+        self.f.push_file_to_origin(
+            "scripts/ops/pr-deploy-agent/tick.sh",
+            _STUB_TICK_BG,
+            executable=True,
+        )
+        boot = self.f.run_launch()
+        self.assertEqual(boot.returncode, 0, boot.stderr[-300:])
+
+    def tearDown(self) -> None:
+        # Kill any stray sleep processes to avoid polluting subsequent tests.
+        subprocess.run(["pkill", "[s]leep"], capture_output=True)
+        self.f.cleanup()
+
+    def test_background_child_does_not_block_next_run(self) -> None:
+        """A sleep backgrounded by tick.sh must not hold fd 8 and block the next run.
+
+        Finding 7: before the fix, the sleep inherits fd 8 and the second
+        launcher invocation blocks with 'another tick holds the lock'.
+        After the fix (exec 8>&- before exec tick.sh), sleep has no fd 8.
+        """
+        r1 = self.f.run_launch()
+        # r1 returns quickly because tick.sh closed stdout before starting sleep
+        self.assertEqual(r1.returncode, 0, r1.stderr[-300:])
+
+        # Second run: must NOT be blocked by the sleep holding fd 8
+        r2 = self.f.run_launch()
+        self.assertEqual(r2.returncode, 0, r2.stderr[-300:])
+        self.assertNotIn("another tick holds the lock", r2.stderr,
+                         "fd 8 was inherited by the backgrounded sleep; close it before exec")
