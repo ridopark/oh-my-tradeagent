@@ -204,7 +204,7 @@ def test_aggregate_off_nbbo_print_counts_in_dp_and_large_but_not_buy_sell():
     nbbo_side = side(771.8561, nbbo, parse_ts("2026-10-29T13:30:10Z"))
     assert nbbo_side == "unknown"
     accs: dict = {}
-    aggregate([t], {1013: nbbo_side}, accs, min_notional=200_000, min_size=10_000)
+    aggregate([t], {t: nbbo_side}, accs, min_notional=200_000, min_size=10_000)
     (bar,) = [acc.to_wire() for acc in accs.values()]
     assert bar["dp_volume"] == 126311
     assert bar["large_count"] == 1
@@ -319,7 +319,10 @@ def fixture_trades() -> list[Trade]:
     return out
 
 
-FIXTURE_SIDES = {1: "buy", 4: "mid", 6: "unknown"}  # NBBO side per KEPT print (trade_id)
+def fixture_sides() -> dict:
+    """NBBO side per KEPT Trade, keyed by the Trade object (not by trade_id)."""
+    side_by_id = {1: "buy", 4: "mid", 6: "unknown"}
+    return {t: side_by_id[t.trade_id] for t in fixture_trades() if t.trade_id in side_by_id}
 
 
 def test_fixture_keeps_exactly_the_three_expected_prints():
@@ -330,7 +333,7 @@ def test_fixture_keeps_exactly_the_three_expected_prints():
 
 def test_aggregate_hand_computed_bars():
     accs: dict = {}
-    touched = aggregate(fixture_trades(), FIXTURE_SIDES, accs, **MIN)
+    touched = aggregate(fixture_trades(), fixture_sides(), accs, **MIN)
     a_key = ("QQQ", datetime(2026, 10, 29, 13, 30, tzinfo=UTC))
     b_key = ("QQQ", datetime(2026, 10, 29, 13, 35, tzinfo=UTC))
     assert touched == {a_key, b_key}
@@ -386,8 +389,9 @@ def test_aggregate_bar_without_off_exchange_prints_has_null_vwap():
 
 def test_aggregate_large_uses_notional_not_size():
     # 10,000 shares at $1 = $10,000 notional: KEPT (size) but NOT large (< $200k)
+    t = trade("2026-10-29T13:30:10Z", 1.0, 10_000, x="D", i=8)
     accs: dict = {}
-    aggregate([trade("2026-10-29T13:30:10Z", 1.0, 10_000, x="D", i=8)], {8: "buy"}, accs, **MIN)
+    aggregate([t], {t: "buy"}, accs, **MIN)
     (bar,) = [acc.to_wire() for acc in accs.values()]
     assert (bar["large_count"], bar["large_volume"]) == (0, 0)
     assert bar["buy_volume"] == 10_000
@@ -479,7 +483,7 @@ def test_cursor_resume_excludes_already_seen_t_and_i():
     ]
     cur = Cursor.start(datetime(2026, 10, 29, 13, 0, tzinfo=UTC)).advance(first)
     assert cur.last_t == parse_ts(t0)
-    assert cur.last_ids == frozenset({2, 3})
+    assert {t.trade_id for t in cur.seen_at_last_t} == {2, 3}
     # The next poll starts AT last_t (Alpaca's start is inclusive), so the same-timestamp
     # trades come back: they must be dropped, a new id at the same t and later ones kept.
     page = [
@@ -493,14 +497,14 @@ def test_cursor_resume_excludes_already_seen_t_and_i():
     assert [t.trade_id for t in fresh] == [4, 5]
     cur2 = cur.advance(fresh)
     assert cur2.last_t == parse_ts("2026-10-29T13:30:11Z")
-    assert cur2.last_ids == frozenset({5})
+    assert {t.trade_id for t in cur2.seen_at_last_t} == {5}
     # advancing on an empty page is a no-op
     assert cur2.advance([]) == cur2
 
 
 def test_cursor_advance_unions_ids_at_the_same_instant():
     """Two cycles can each end on trades at the SAME timestamp (a burst straddling the fetch
-    end). The second advance must keep the first cycle's ids, or those trades come back as new
+    end). The second advance must keep the first cycle's trades, or those trades come back as new
     on the third fetch and are double-counted."""
     t0 = "2026-10-29T13:30:10Z"
     cur = Cursor.start(datetime(2026, 10, 29, 13, 0, tzinfo=UTC)).advance(
@@ -508,13 +512,13 @@ def test_cursor_advance_unions_ids_at_the_same_instant():
     )
     cur2 = cur.advance([trade(t0, 500.0, 100, i=4)])
     assert cur2.last_t == parse_ts(t0)
-    assert cur2.last_ids == frozenset({2, 3, 4})
+    assert {t.trade_id for t in cur2.seen_at_last_t} == {2, 3, 4}
     assert cur2.filter_new([trade(t0, 500.0, 100, i=2), trade(t0, 500.0, 100, i=3)]) == []
 
 
 def test_cursor_start_is_the_lookback_instant_with_nothing_seen():
     cur = Cursor.start(datetime(2026, 10, 29, 13, 0, tzinfo=UTC))
-    assert cur.last_ids == frozenset()
+    assert cur.seen_at_last_t == frozenset()
     assert [t.trade_id for t in cur.filter_new([trade("2026-10-29T13:00:00Z", 1.0, 1, i=9)])] == [9]
 
 
@@ -714,3 +718,43 @@ def test_read_universe_empty_file_fails_fast(tmp_path):
     f.write_text("# nothing\n")
     with pytest.raises(SystemExit):
         read_universe(f)
+
+
+# ---------------------------------------------------------------------------
+# #1035 — per-Trade keying: cursor and aggregate twins
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_keeps_a_same_instant_trade_whose_id_matches_another_exchange():
+    """Old code keyed the seen-set by trade_id, so a V id 2 at last_t was dropped because D id 2
+    was already in the set.  The fix keys by Trade value, so only the exact same Trade is
+    filtered."""
+    t0_str = "2026-10-29T13:30:10Z"
+    d_first = trade(t0_str, 500.0, 400, x="D", i=2)
+    cur = Cursor.start(datetime(2026, 10, 29, 13, 0, tzinfo=UTC)).advance([d_first])
+    # On the next poll Alpaca returns: the original D id 2 (same Trade value), a lit V id 2, and
+    # a second D id 2 at a different price (different Trade value).
+    d_orig = trade(t0_str, 500.0, 400, x="D", i=2)   # same value as d_first -> blocked
+    v_twin = trade(t0_str, 500.0, 100, x="V", i=2)   # different exchange -> new
+    d_twin = trade(t0_str, 499.90, 500, x="D", i=2)  # different price/size -> new
+    fresh = cur.filter_new([d_orig, v_twin, d_twin])
+    # Old code: all three are dropped (id 2 in seen set); new code: V and second D pass.
+    assert len(fresh) == 2
+    assert v_twin in fresh
+    assert d_twin in fresh
+    # After advancing over fresh, all three should be filtered on the next call.
+    cur2 = cur.advance(fresh)
+    assert cur2.filter_new([d_orig, v_twin, d_twin]) == []
+
+
+def test_aggregate_same_id_d_prints_use_their_own_side():
+    """Two kept D prints with the same trade_id but different prices: the aggregator must look up
+    sides by the Trade object so each contributes its own buy or sell volume."""
+    t1 = trade("2026-10-29T13:30:10Z", 500.00, 400, x="D", i=7)  # buy
+    t2 = trade("2026-10-29T13:30:20Z", 499.90, 400, x="D", i=7)  # sell
+    accs: dict = {}
+    sides = {t1: "buy", t2: "sell"}
+    aggregate([t1, t2], sides, accs, min_notional=200_000, min_size=10_000)
+    (bar,) = [acc.to_wire() for acc in accs.values()]
+    assert bar["buy_volume"] == 400
+    assert bar["sell_volume"] == 400

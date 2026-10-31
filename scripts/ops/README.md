@@ -9,6 +9,8 @@ scripts/ops/
 ├── temporal-copytrade-namespace-bootstrap.sh # register the `copytrade` Temporal namespace + SAs
 ├── check_drill_freshness.py                  # Phase 7 promotion-gate: kill-switch/rollback drill freshness
 ├── pr-deploy-agent/                          # systemd timer: auto-approve safe deploys + merge READY PRs
+├── darkpool_1035_cleanup_dryrun.sql          # #1035 history cleanup: SELECT-only audit (run first)
+├── darkpool_1035_cleanup_apply.sql           # #1035 history cleanup: guarded apply (operator-run)
 └── tests/
     └── test_check_drill_freshness.py
 ```
@@ -120,3 +122,49 @@ before issuing the dual-control `LivePromotionApproved`.
 Exit `0` when both drills are fresh; `1` when one or both are stale/missing
 (stderr names each failing drill type). Unit tests live in
 `tests/test_check_drill_freshness.py`.
+
+---
+
+## `darkpool_1035_cleanup_dryrun.sql` + `darkpool_1035_cleanup_apply.sql` — #1035 history cleanup
+
+Before fix #1035 (per-Trade keying in the collector), lit-exchange trades and
+below-threshold D prints were posted alongside real dark-pool prints because
+they shared a trade id with a kept D print. 1,831 such rows from 2026-10-30 sit
+in `darkpool_print`. Two kept D rows also carry a mis-stamped `quote_ts` (the
+bug took the quote from the twin, not from the correct trade). The bars are
+correct — no bar's `buy_volume`/`sell_volume` is wrong.
+
+### Dry run (SELECT-only, safe on production)
+
+```sh
+HOMELAB_PSQL_ALIGNED=1 scripts/data/homelab_psql.sh dashboard \
+    < scripts/ops/darkpool_1035_cleanup_dryrun.sql
+```
+
+Expected output (confirmed 2026-10-31 against 2026-10-30 data):
+
+| Section | What | Count |
+|---------|------|-------|
+| 1c | rows to DELETE (lit-exchange twins + below-threshold D twins) | **1,831** |
+| 2b | rows to RELABEL (kept D with stale/future quote_ts) | **2** |
+| 3b | bar adjustments (relabelled rows with side buy/sell) | **0** |
+
+### Apply (operator-run; requires the collector to have rolled with fix #1035 first)
+
+```sh
+ssh ridopark@192.168.10.123 \
+  "kubectl -n copytrade exec -i postgres-0 -- psql -U temporal -d dashboard \
+    -v ON_ERROR_STOP=1 -v expected_delete=1831 -v expected_relabel=2 -f -" \
+  < scripts/ops/darkpool_1035_cleanup_apply.sql
+```
+
+Pass the counts from **your** dry-run output as `-v expected_delete=N -v expected_relabel=N`.
+The script aborts if the live counts differ from what you pass — this catches new ingestion
+between the dry run and the apply.
+
+### Alternative: leave history as-is
+
+The 1,831 bad rows age out under the BFF's 90-day print retention sweep
+(`DarkpoolRetention.PRINT_RETENTION_DAYS`) by **2027-01-28**. The `/dark-pool` page shows inflated large-print levels
+until then but no bar totals are wrong. The 2 mis-quoted rows are relabelled
+`unknown` by the apply; leaving them as `unknown` (they already are) is also fine.
