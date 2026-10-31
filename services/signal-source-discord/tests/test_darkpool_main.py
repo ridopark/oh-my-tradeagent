@@ -171,6 +171,7 @@ def make_collector(
     max_requests: int = 2000,
     heartbeat=None,
     data: AlpacaDataClient | None = None,
+    state_path: pathlib.Path | None = None,
 ) -> DarkpoolCollector:
     return DarkpoolCollector(
         data=data or alpaca.client(max_requests=max_requests),
@@ -183,6 +184,7 @@ def make_collector(
         log=LOG,
         clock=clock or Clock(NOW),
         heartbeat=heartbeat,
+        state_path=state_path,
     )
 
 
@@ -783,3 +785,210 @@ def test_universe_file_is_read(monkeypatch, tmp_path: pathlib.Path):
     f.write_text("SPY\nQQQ\n")
     monkeypatch.setenv("DARKPOOL_UNIVERSE_FILE", str(f))
     assert darkpool_main.universe_from_env() == ["SPY", "QQQ"]
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — cursor persistence
+# ---------------------------------------------------------------------------
+
+
+async def test_cursor_persist_resume_starts_at_bucket_start(tmp_path):
+    """After a restart the first trades request starts at bucket5m(saved last_t).
+    The 13:35 bucket is rebuilt whole from all its trades, not only those after last_t."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca)
+    state_path = tmp_path / "cursors.json"
+
+    # Cycle 1 at 09:40 ET (NOW = 13:40Z): commits both trades, last_t = 13:38:10Z.
+    c1 = make_collector(alpaca, bff, ["QQQ"], clock=Clock(NOW), state_path=state_path)
+    await c1.cycle()
+    assert state_path.exists()
+    assert c1.cursors["QQQ"].last_t == parse_ts("2026-10-29T13:38:10Z")
+
+    # Cycle 2: new collector, clock at 10:10 ET (14:10Z).
+    # Without state the floor would be bucket5m(14:00Z) = 14:00:00Z.
+    # With state: floor = bucket5m(13:38:10Z) = 13:35:00Z.
+    alpaca.requests.clear()
+    c2 = make_collector(
+        alpaca,
+        bff,
+        ["QQQ"],
+        clock=Clock(parse_ts("2026-10-29T14:10:00Z")),
+        state_path=state_path,
+    )
+    assert c2.floors["QQQ"] == parse_ts("2026-10-29T13:35:00Z")
+    await c2.cycle()
+
+    # First trades request must start at 13:35:00Z, not 14:00:00Z.
+    first_trades = next(r for r in alpaca.requests if r.url.path == "/v2/stocks/trades")
+    assert first_trades.url.params["start"] == "2026-10-29T13:35:00Z"
+    assert c2.floors["QQQ"] == parse_ts("2026-10-29T13:35:00Z")
+
+    # The 13:35 bucket is rebuilt whole: both trades of that bucket are counted.
+    bars = bff.bodies()[-1]["bars"]
+    bar_35 = next(b for b in bars if b["bucket"] == "2026-10-29T13:35:00Z")
+    assert bar_35["total_trades"] == 2
+
+    # No temp file left next to the target.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["cursors.json"]
+
+
+async def test_cursor_persist_budget_cut_resumes_from_prefix_bucket(tmp_path):
+    """A budget-cut prefix cursor is persisted; a new collector resumes at its bucket start."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca)
+    state_path = tmp_path / "cursors.json"
+
+    # Budget = 1: trades request succeeds, quote request hits cap -> prefix commit at lit trade.
+    c1 = make_collector(alpaca, bff, ["QQQ"], max_requests=1, state_path=state_path)
+    await c1.cycle()
+    # Cursor stopped at the lit trade (13:38:00Z), not the D print (13:38:10Z).
+    assert c1.cursors["QQQ"].last_t == parse_ts("2026-10-29T13:38:00Z")
+    assert state_path.exists()
+
+    alpaca.requests.clear()
+    c2 = make_collector(
+        alpaca,
+        bff,
+        ["QQQ"],
+        clock=Clock(parse_ts("2026-10-29T14:10:00Z")),
+        state_path=state_path,
+    )
+    # bucket5m(13:38:00Z) = 13:35:00Z
+    assert c2.floors["QQQ"] == parse_ts("2026-10-29T13:35:00Z")
+    await c2.cycle()
+
+    first_trades = next(r for r in alpaca.requests if r.url.path == "/v2/stocks/trades")
+    assert first_trades.url.params["start"] == "2026-10-29T13:35:00Z"
+
+
+@pytest.mark.parametrize(
+    "setup,expect_warning,expect_info",
+    [
+        ("invalid_json", True, False),
+        ("floor_gt_last_t", True, False),
+        ("old_poll_day", False, True),
+        ("missing", False, False),
+    ],
+    ids=["invalid_json", "floor_gt_last_t", "old_poll_day", "missing"],
+)
+async def test_cursor_persist_fallback_on_bad_state(
+    setup, expect_warning, expect_info, tmp_path, caplog
+):
+    """A bad, old or missing state file falls back to bucket5m(now - lookback). Never raises."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+    state_path = tmp_path / "cursors.json"
+
+    now_10 = parse_ts("2026-10-29T14:10:00Z")  # 10:10 ET
+
+    if setup == "invalid_json":
+        state_path.write_text("not json{{{")
+    elif setup == "floor_gt_last_t":
+        state_path.write_text(
+            json.dumps({
+                "version": 1,
+                "poll_day": "2026-10-29",
+                "symbols": {
+                    "QQQ": {
+                        "last_t": "2026-10-29T13:38:00Z",
+                        "floor": "2026-10-29T13:45:00Z",  # floor > last_t
+                    }
+                },
+            })
+        )
+    elif setup == "old_poll_day":
+        state_path.write_text(
+            json.dumps({
+                "version": 1,
+                "poll_day": "2026-10-28",
+                "symbols": {
+                    "QQQ": {
+                        "last_t": "2026-10-28T23:55:00Z",
+                        "floor": "2026-10-28T23:55:00Z",
+                    }
+                },
+            })
+        )
+    # "missing": no file created
+
+    with caplog.at_level(logging.INFO, logger="test.darkpool_main"):
+        collector = make_collector(alpaca, bff, ["QQQ"], clock=Clock(now_10), state_path=state_path)
+
+    await collector.cycle()
+
+    # Falls back to bucket5m(now - 10 min) = bucket5m(14:00Z) = 14:00:00Z.
+    first_trades = next(r for r in alpaca.requests if r.url.path == "/v2/stocks/trades")
+    assert first_trades.url.params["start"] == "2026-10-29T14:00:00Z"
+
+    darkpool_records = [r for r in caplog.records if "darkpool" in r.message.lower() or "state" in r.message.lower()]
+    if expect_warning:
+        assert any(r.levelno >= logging.WARNING for r in darkpool_records), (
+            f"expected a WARNING for setup={setup!r}"
+        )
+    if expect_info:
+        assert any(r.levelno >= logging.INFO for r in darkpool_records), (
+            f"expected at least INFO for setup={setup!r}"
+        )
+    if not expect_warning and not expect_info:
+        assert not any("state" in r.message for r in caplog.records), (
+            f"expected no state log for setup={setup!r}"
+        )
+
+
+async def test_cursor_persist_universe_drift(tmp_path):
+    """Symbols in the file but not in the universe are ignored;
+    new universe symbols start at bucket5m(now - lookback)."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+    alpaca.trades["NEW"] = [raw("2026-10-29T13:38:00Z", 1)]
+
+    state_path = tmp_path / "cursors.json"
+    state_path.write_text(
+        json.dumps({
+            "version": 1,
+            "poll_day": "2026-10-29",
+            "symbols": {
+                "QQQ": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
+                "OLD": {"last_t": "2026-10-29T13:38:00Z", "floor": "2026-10-29T13:35:00Z"},
+            },
+        })
+    )
+    collector = make_collector(
+        alpaca,
+        bff,
+        ["QQQ", "NEW"],
+        clock=Clock(parse_ts("2026-10-29T14:10:00Z")),
+        state_path=state_path,
+    )
+    await collector.cycle()
+
+    def start_for(sym: str) -> str:
+        req = next(
+            r for r in alpaca.requests
+            if r.url.path == "/v2/stocks/trades" and r.url.params["symbols"] == sym
+        )
+        return req.url.params["start"]
+
+    # QQQ resumes from its saved bucket start.
+    assert start_for("QQQ") == "2026-10-29T13:35:00Z"
+    # NEW starts at bucket5m(now - 10 min).
+    assert start_for("NEW") == "2026-10-29T14:00:00Z"
+    # OLD never appears in any request.
+    assert not any(r.url.params.get("symbols") == "OLD" for r in alpaca.requests)
+
+
+async def test_cursor_persist_write_failure_does_not_stop_cycle(tmp_path, caplog):
+    """An unwritable state_path logs a warning but cycle() still posts bars."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca)
+    # Point into a directory that does not exist -> OSError on write.
+    state_path = tmp_path / "no_such_dir" / "cursors.json"
+    collector = make_collector(alpaca, bff, ["QQQ"], state_path=state_path)
+    with caplog.at_level(logging.WARNING, logger="test.darkpool_main"):
+        stats = await collector.cycle()
+    assert stats.posted is True
+    assert any(
+        r.levelno >= logging.WARNING and "darkpool" in r.message
+        for r in caplog.records
+    )

@@ -13,13 +13,14 @@ NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per
 429 ending the cycle after a short sleep.
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
-nothing; flipping that env is the go-live. There is no cursor persistence: a restart starts every
-symbol at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min), i.e. on a 5-minute
-boundary, and no trade before that instant is ever aggregated or posted. That alignment is what
-makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
-partial window (a restart at 10:07 rebuilding 09:55 from 09:57 on) would OVERWRITE the complete
-row the previous process had stored — one corrupted bucket per symbol on every image roll.
-Prints dedupe on (symbol, ts, trade_id), so re-reading them is harmless.
+nothing; flipping that env is the go-live. Cursor persistence: a container restart on the same ET day resumes each symbol at
+``bucket5m(saved last_t)`` (the start of the 5-minute bucket the symbol had reached), so a restart
+during the open loses no bars and no bar is overwritten with a partial one. A pod replacement (a
+deploy or a node move) still starts at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)``, because the
+``state`` emptyDir does not survive pod replacement. That bucket-aligned restart is what makes a
+re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so starting mid-bucket would
+OVERWRITE the complete row the previous process stored — one corrupted bucket per symbol on every
+image roll. Prints dedupe on (symbol, ts, trade_id), so re-reading them is harmless.
 
 Trades are fetched up to ``now - 5 s``: TRF prints are indexed with a lag, and a print whose
 ``t`` is already behind the cursor when it lands would otherwise be lost for good.
@@ -45,6 +46,7 @@ re-send is idempotent — because a BFF roll is exactly when coverage would othe
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -65,7 +67,9 @@ from .darkpool_collector import (
     Cursor,
     aggregate,
     bucket5m,
+    format_ts,
     keep,
+    parse_ts,
     print_to_wire,
     prune_accumulators,
     read_universe,
@@ -221,6 +225,7 @@ class DarkpoolCollector:
         log: logging.Logger,
         clock: Callable[[], datetime] = now_utc,
         heartbeat: Callable[[], None] | None = None,
+        state_path: pathlib.Path | None = None,
     ) -> None:
         self._data = data
         self._ingest = ingest
@@ -232,6 +237,7 @@ class DarkpoolCollector:
         self._log = log
         self._clock = clock
         self._heartbeat = heartbeat or (lambda: None)
+        self._state_path = state_path
         self.cursors: dict[str, Cursor] = {}
         # Per symbol: the bucket-aligned instant its cursor started at; nothing earlier is kept.
         self.floors: dict[str, datetime] = {}
@@ -239,6 +245,8 @@ class DarkpoolCollector:
         self._next_start = 0
         # Prints the BFF refused, re-sent with the next batch (bounded, see UNPOSTED_MAX).
         self.unposted: list[dict] = []
+        if state_path is not None:
+            self._load_cursors(state_path)
 
     async def cycle(self) -> CycleStats:
         stats = CycleStats(symbols=len(self._universe))
@@ -295,6 +303,7 @@ class DarkpoolCollector:
                 min_size=self._min_size,
             )
             self.cursors[symbol] = cursor.advance(fresh)
+            self._save_cursors()
             for t in fresh:
                 if t.trade_id in sides:
                     prints.append(print_to_wire(t, quotes[t.trade_id], sides[t.trade_id]))
@@ -369,6 +378,81 @@ class DarkpoolCollector:
                 sides[t.trade_id] = side(t.price, quote, t.ts)
         return fresh, sides, quotes, None
 
+    def _load_cursors(self, path: pathlib.Path) -> None:
+        """Try to resume from a saved cursor file. Missing file is silently ignored."""
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            self._log.warning("darkpool state file unreadable (%r); ignoring: %s", exc, path)
+            return
+        if data.get("version") != 1:
+            self._log.warning(
+                "darkpool state file has unexpected version %r; ignoring: %s",
+                data.get("version"),
+                path,
+            )
+            return
+        poll_day = str(data.get("poll_day", ""))
+        today_et = self._clock().astimezone(ET).strftime("%Y-%m-%d")
+        if poll_day != today_et:
+            self._log.info(
+                "darkpool state file is from a different day (%s vs %s); ignoring: %s",
+                poll_day,
+                today_et,
+                path,
+            )
+            return
+        try:
+            symbols_data = data.get("symbols") or {}
+            loaded: dict[str, datetime] = {}  # symbol -> floor to apply
+            for symbol in self._universe:
+                if symbol not in symbols_data:
+                    continue
+                entry = symbols_data[symbol]
+                last_t = parse_ts(entry["last_t"])
+                floor_saved = parse_ts(entry["floor"])
+                if floor_saved > last_t:
+                    self._log.warning(
+                        "darkpool state file has floor > last_t for %s; ignoring: %s",
+                        symbol,
+                        path,
+                    )
+                    return
+                loaded[symbol] = bucket5m(last_t)
+        except (KeyError, ValueError) as exc:
+            self._log.warning("darkpool state file malformed (%r); ignoring: %s", exc, path)
+            return
+        for symbol, floor in loaded.items():
+            self.floors[symbol] = floor
+            self.cursors[symbol] = Cursor.start(floor)
+
+    def _save_cursors(self) -> None:
+        """Write the whole cursor map atomically (temp + rename). Logs and skips on any error."""
+        if self._state_path is None:
+            return
+        try:
+            poll_day = self._clock().astimezone(ET).strftime("%Y-%m-%d")
+            symbols_out = {
+                sym: {
+                    "last_t": format_ts(cursor.last_t),
+                    "floor": format_ts(self.floors.get(sym, cursor.last_t)),
+                }
+                for sym, cursor in self.cursors.items()
+            }
+            payload = json.dumps(
+                {"version": 1, "poll_day": poll_day, "symbols": symbols_out},
+                separators=(",", ":"),
+            )
+            tmp = self._state_path.parent / (self._state_path.name + ".tmp")
+            tmp.write_text(payload)
+            os.replace(tmp, self._state_path)
+        except OSError as exc:
+            self._log.warning(
+                "darkpool failed to write state file (%r): %s", exc, self._state_path
+            )
+
 
 async def run_loop(
     collector: DarkpoolCollector,
@@ -428,6 +512,7 @@ async def _run() -> int:
         dry_run=dry_run,
         log=log,
         heartbeat=heartbeat_path.touch,
+        state_path=state_dir / "cursors.json",
     )
     log.info(
         "darkpool collector starting (dry_run=%s poll=%ss symbols=%d lookback=%smin window=%s-%s ET)",
