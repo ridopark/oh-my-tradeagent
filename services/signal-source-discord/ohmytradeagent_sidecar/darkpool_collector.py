@@ -220,14 +220,14 @@ class BarAccumulator:
 
 def aggregate(
     trades: Sequence[Trade],
-    sides: Mapping[int, str],
+    sides: Mapping[Trade, str],
     accumulators: dict[BarKey, BarAccumulator],
     *,
     min_notional: float,
     min_size: int,
 ) -> set[BarKey]:
-    """Fold ``trades`` (in Alpaca's time order) into ``accumulators``; ``sides`` maps the trade_id
-    of each KEPT print to its NBBO side. Returns the (symbol, bucket) keys touched."""
+    """Fold ``trades`` (in Alpaca's time order) into ``accumulators``; ``sides`` maps each KEPT
+    ``Trade`` to its NBBO side. Returns the (symbol, bucket) keys touched."""
     touched: set[BarKey] = set()
     for t in trades:
         key = (t.symbol, bucket5m(t.ts))
@@ -236,7 +236,7 @@ def aggregate(
             acc = accumulators[key] = BarAccumulator(t.symbol, key[1])
         nbbo_side = None
         if keep(t, min_notional=min_notional, min_size=min_size):
-            nbbo_side = sides.get(t.trade_id, "unknown")
+            nbbo_side = sides.get(t, "unknown")
         acc.add(t, nbbo_side)
         touched.add(key)
     return touched
@@ -274,12 +274,16 @@ def print_to_wire(trade: Trade, quote: Quote | None, nbbo_side: str) -> dict:
 
 @dataclass(frozen=True)
 class Cursor:
-    """Per-symbol resume point: the last trade timestamp seen and every trade id AT that
-    timestamp. The next poll starts at ``last_t`` (Alpaca's ``start`` is inclusive), so the ids
-    let the same-instant trades be dropped without assuming ids are ordered within an instant."""
+    """Per-symbol resume point: the last trade timestamp seen and every Trade AT that timestamp.
+    The next poll starts at ``last_t`` (Alpaca's ``start`` is inclusive), so the set lets
+    same-instant trades be dropped without assuming ids are ordered within an instant.
+
+    The set is keyed by the full ``Trade`` value (not by ``trade_id``) so that two trades from
+    different exchanges, or with different prices/sizes, that happen to share a numeric id are
+    never confused."""
 
     last_t: datetime
-    last_ids: frozenset[int] = frozenset()
+    seen_at_last_t: frozenset[Trade] = frozenset()
 
     @classmethod
     def start(cls, since: datetime) -> Cursor:
@@ -288,7 +292,7 @@ class Cursor:
     def is_new(self, trade: Trade) -> bool:
         if trade.ts > self.last_t:
             return True
-        return trade.ts == self.last_t and trade.trade_id not in self.last_ids
+        return trade.ts == self.last_t and trade not in self.seen_at_last_t
 
     def filter_new(self, trades: Iterable[Trade]) -> list[Trade]:
         return [t for t in trades if self.is_new(t)]
@@ -297,10 +301,10 @@ class Cursor:
         if not trades:
             return self
         last_t = max(t.ts for t in trades)
-        ids = {t.trade_id for t in trades if t.ts == last_t}
+        seen = {t for t in trades if t.ts == last_t}
         if last_t == self.last_t:
-            ids |= self.last_ids
-        return Cursor(last_t=last_t, last_ids=frozenset(ids))
+            seen |= self.seen_at_last_t
+        return Cursor(last_t=last_t, seen_at_last_t=frozenset(seen))
 
 
 class BudgetExhausted(Exception):

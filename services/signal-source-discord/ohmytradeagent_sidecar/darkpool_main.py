@@ -66,6 +66,7 @@ from .darkpool_collector import (
     BarKey,
     BudgetExhausted,
     Cursor,
+    Trade,
     aggregate,
     format_ts,
     bucket5m,
@@ -304,8 +305,8 @@ class DarkpoolCollector:
             )
             self.cursors[symbol] = cursor.advance(fresh)
             for t in fresh:
-                if t.trade_id in sides:
-                    prints.append(print_to_wire(t, quotes[t.trade_id], sides[t.trade_id]))
+                if t in sides:
+                    prints.append(print_to_wire(t, quotes[t], sides[t]))
             if exhausted is not None:
                 stats.skipped = len(order) - n
                 self._next_start = self._universe.index(symbol)
@@ -390,8 +391,8 @@ class DarkpoolCollector:
             ),
             key=lambda t: t.ts,
         )
-        sides: dict[int, str] = {}
-        quotes: dict = {}
+        sides: dict[Trade, str] = {}
+        quotes: dict[Trade, object] = {}
         for i, t in enumerate(fresh):
             if keep(t, min_notional=self._min_notional, min_size=self._min_size):
                 try:
@@ -401,8 +402,8 @@ class DarkpoolCollector:
                         raise
                     return fresh[:i], sides, quotes, exc
                 self._heartbeat()
-                quotes[t.trade_id] = quote
-                sides[t.trade_id] = side(t.price, quote, t.ts)
+                quotes[t] = quote
+                sides[t] = side(t.price, quote, t.ts)
         return fresh, sides, quotes, None
 
 

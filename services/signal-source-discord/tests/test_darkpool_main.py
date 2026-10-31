@@ -335,7 +335,7 @@ async def test_a_500_from_one_symbol_does_not_block_the_next():
     assert [b["symbol"] for b in body["bars"]] == ["BBB"]
     # AAA's cursor did not move: it is still the lookback start, so the next cycle re-reads it
     assert collector.cursors["AAA"] == Cursor.start(NOW - timedelta(minutes=10))
-    assert collector.cursors["BBB"].last_ids == frozenset({2})
+    assert {t.trade_id for t in collector.cursors["BBB"].seen_at_last_t} == {2}
     # next cycle: AAA recovers and is posted; BBB has nothing new (cursor excludes the seen rows)
     stats = await collector.cycle()
     assert stats.errors == 0
@@ -399,9 +399,9 @@ async def test_budget_hit_mid_symbol_commits_the_prefix_and_resumes_from_it():
     stats = await collector.cycle()
     assert (stats.skipped, stats.kept_prints, stats.bars) == (1, 0, 1)
     assert bff.bodies()[0]["bars"][0]["total_volume"] == 100  # the lit trade only
-    assert collector.cursors["QQQ"] == Cursor(
-        last_t=parse_ts("2026-10-29T13:38:00Z"), last_ids=frozenset({1})
-    )
+    cur = collector.cursors["QQQ"]
+    assert cur.last_t == parse_ts("2026-10-29T13:38:00Z")
+    assert {t.trade_id for t in cur.seen_at_last_t} == {1}
     # Next cycle: trades from 13:38:00 (the lit trade is dropped by id), the print's NBBO fits.
     alpaca.requests.clear()
     collector._data.max_requests = 2
@@ -824,3 +824,94 @@ def test_universe_file_is_read(monkeypatch, tmp_path: pathlib.Path):
     f.write_text("SPY\nQQQ\n")
     monkeypatch.setenv("DARKPOOL_UNIVERSE_FILE", str(f))
     assert darkpool_main.universe_from_env() == ["SPY", "QQQ"]
+
+
+# ---------------------------------------------------------------------------
+# #1035 — per-Trade keying: cycle seam tests
+# ---------------------------------------------------------------------------
+
+
+async def test_same_id_lit_trade_is_not_posted_and_d_keeps_its_own_quote():
+    """A lit trade with the same trade_id as a kept D print must not be posted.
+    On old code both are posted (trade_id in sides -> True for the lit twin)."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:38:10Z", 7, p=500.0, s=400, x="D"),  # kept D (200k notional)
+        raw("2026-10-29T13:38:15Z", 7, p=500.0, s=100, x="V"),  # lit twin with same id
+    ]
+    alpaca.quotes["QQQ"] = [{"t": "2026-10-29T13:38:09Z", "bp": 499.98, "ap": 500.00}]
+    collector = make_collector(alpaca, bff, ["QQQ"])
+    await collector.cycle()
+    (body,) = bff.bodies()
+    (p,) = body["prints"]  # exactly one print, not two
+    assert p["exchange"] == "D"
+    assert p["quote_ts"] == "2026-10-29T13:38:09Z"
+    assert p["side"] == "buy"
+
+
+async def test_same_id_d_prints_each_get_their_own_quote_and_side():
+    """Two kept D prints with the same trade_id at different timestamps must each carry the NBBO
+    at or before their own timestamp. On old code the second overwrites the first's quote/side in
+    the sides dict, so the first print gets the wrong quote and a lit twin is posted too."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:38:10Z", 7, p=500.00, s=400, x="D"),  # kept (200k): buy
+        raw("2026-10-29T13:38:15Z", 7, p=500.00, s=100, x="V"),  # lit twin: not posted
+        raw("2026-10-29T13:38:20Z", 7, p=499.90, s=500, x="D"),  # kept (~250k): sell
+    ]
+    alpaca.quotes["QQQ"] = [
+        {"t": "2026-10-29T13:38:09Z", "bp": 499.98, "ap": 500.00},  # -> buy for price 500.00
+        {"t": "2026-10-29T13:38:19Z", "bp": 499.90, "ap": 500.10},  # -> sell for price 499.90
+    ]
+    collector = make_collector(alpaca, bff, ["QQQ"])
+    await collector.cycle()
+    (body,) = bff.bodies()
+    assert len(body["prints"]) == 2
+    p1, p2 = sorted(body["prints"], key=lambda p: p["ts"])
+    assert p1["exchange"] == "D" and p1["quote_ts"] == "2026-10-29T13:38:09Z"
+    assert p1["side"] == "buy"
+    assert p2["exchange"] == "D" and p2["quote_ts"] == "2026-10-29T13:38:19Z"
+    assert p2["side"] == "sell"
+    (bar,) = body["bars"]
+    assert bar["buy_volume"] == 400
+    assert bar["sell_volume"] == 500
+
+
+async def test_below_threshold_d_twin_is_not_posted():
+    """A D print below both thresholds (size 1, notional < 200k) must not be posted even when it
+    shares a trade_id with a kept D print. On old code the kept print's sides entry is keyed by
+    id, so the twin matches and gets posted."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:38:10Z", 7, p=500.00, s=400, x="D"),  # kept (200k notional)
+        raw("2026-10-29T13:38:15Z", 7, p=500.00, s=1, x="D"),    # same id, below threshold
+    ]
+    alpaca.quotes["QQQ"] = [{"t": "2026-10-29T13:38:09Z", "bp": 499.98, "ap": 500.00}]
+    collector = make_collector(alpaca, bff, ["QQQ"])
+    await collector.cycle()
+    (body,) = bff.bodies()
+    assert len(body["prints"]) == 1
+    (p,) = body["prints"]
+    assert p["size"] == 400  # the kept print, not the tiny twin
+
+
+async def test_same_id_d_prints_at_the_same_instant_are_both_posted():
+    """Two D prints with the same trade_id and the same ts but different price/size must both be
+    posted, each with its own side. On old code the second overwrites the first's entry in sides,
+    so both prints get the second's side."""
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    # At the same ts: price >= ask -> buy; price <= bid -> sell (same quote 499.98/500.00).
+    alpaca.trades["QQQ"] = [
+        raw("2026-10-29T13:38:10Z", 7, p=500.00, s=400, x="D"),  # price == ask -> buy
+        raw("2026-10-29T13:38:10Z", 7, p=499.98, s=500, x="D"),  # price == bid -> sell
+    ]
+    alpaca.quotes["QQQ"] = [{"t": "2026-10-29T13:38:09Z", "bp": 499.98, "ap": 500.00}]
+    collector = make_collector(alpaca, bff, ["QQQ"])
+    await collector.cycle()
+    (body,) = bff.bodies()
+    assert len(body["prints"]) == 2
+    sides = {p["side"] for p in body["prints"]}
+    assert sides == {"buy", "sell"}
+    (bar,) = body["bars"]
+    assert bar["buy_volume"] == 400
+    assert bar["sell_volume"] == 500
