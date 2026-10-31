@@ -14,7 +14,7 @@ CREATE TABLE audit_log (
   kind            VARCHAR(64) NOT NULL,
   actor           VARCHAR(128),
   workflow_id     VARCHAR(256),
-  correlation_id  VARCHAR(96),
+  correlation_id  VARCHAR(256),
   subject         JSONB NOT NULL,
   prev_hash       BYTEA NULL,
   row_hash        BYTEA NULL

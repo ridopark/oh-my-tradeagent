@@ -2,11 +2,21 @@ package com.ohmytradeagent.orchestrator.activities;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.ohmytradeagent.contract.AuditEvent;
+import com.ohmytradeagent.orchestrator.alert.OrderFailureAlerter;
+import com.ohmytradeagent.orchestrator.alert.TenantWebhookResolver;
+import com.ohmytradeagent.orchestrator.alert.WebhookClient;
+import com.ohmytradeagent.orchestrator.alert.WebhookEmbed;
 import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -28,11 +38,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.mockito.ArgumentCaptor;
 import org.postgresql.util.PSQLException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -92,6 +104,45 @@ class AuditLogChainWriterIT {
   @EnableTransactionManagement
   static class AuditITConfig {
 
+    // Issue #1029 Step 2: mock seams for the funnel IT — one WebhookClient to capture the Discord
+    // embed, one TenantWebhookResolver stubbed to return a fixed non-blank URL so postEmbedToUrl
+    // is actually invoked. Declared as static fields so the same instances are reachable both from
+    // the @Bean declarations (which pass them to OrderFailureAlerter) and from the @Autowired test
+    // fields (which assert on them).
+    private static final WebhookClient mockWebhookClient;
+    private static final TenantWebhookResolver mockWebhookResolver;
+
+    static {
+      mockWebhookClient = mock(WebhookClient.class);
+      mockWebhookResolver = mock(TenantWebhookResolver.class);
+      when(mockWebhookResolver.resolve(any(), any())).thenReturn("https://discord.test/webhook/it");
+    }
+
+    @Bean
+    WebhookClient webhookClient() {
+      return mockWebhookClient;
+    }
+
+    /**
+     * Issue #1029 Step 2: wire the production after-commit alerter using the mock seams above. Uses
+     * the 5-arg constructor directly (not @Autowired) to avoid pulling in the full orchestrator
+     * Spring configuration (no live DB config needed for the resolver).
+     *
+     * <p>{@code DEFAULT_FAILURE_KINDS} is package-private in the {@code alert} package and not
+     * accessible here; passing {@code "FloorBreachAlerted"} is sufficient — this test only needs
+     * the alerter to dispatch on that kind; the full default-kinds coverage is the responsibility
+     * of {@code OrderFailureAlerterTest} in the {@code alert} package.
+     */
+    @Bean
+    OrderFailureAlerter orderFailureAlerter() {
+      return new OrderFailureAlerter(
+          mockWebhookClient,
+          mockWebhookResolver,
+          /* failureKinds= */ "FloorBreachAlerted",
+          /* signalFeedEnabled= */ false,
+          /* floorBreachLiveUrl= */ "");
+    }
+
     @Bean
     ObjectMapper objectMapper() {
       // Match the production ObjectMapper shape (JavaTimeModule registered) so OffsetDateTime
@@ -112,6 +163,12 @@ class AuditLogChainWriterIT {
      * path: Spring still wraps it with the @Transactional AOP proxy
      * because @EnableTransactionManagement is active and AuditActivitiesImpl.log() carries
      * the @Transactional annotation.
+     *
+     * <p>Issue #1029 Step 2: inject the context's ApplicationEventPublisher (rather than the
+     * noopEventPublisher used in the pre-#1029 shape) so the @TransactionalEventListener on
+     * OrderFailureAlerter fires for FloorBreachAlerted events. The existing tests use event kinds
+     * not in the failure allowlist so OrderFailureAlerter.onAuditEvent() returns immediately for
+     * them — no existing assertion is disturbed by this swap.
      */
     @Bean
     AuditActivitiesImpl auditActivities(
@@ -119,9 +176,9 @@ class AuditLogChainWriterIT {
         ObjectMapper objectMapper,
         AuditLogChainWriter chainWriter,
         @org.springframework.beans.factory.annotation.Value("${audit.chain-writer.enabled:true}")
-            boolean chainWriterEnabled) {
-      return new AuditActivitiesImpl(
-          dsl, objectMapper, chainWriter, chainWriterEnabled, noopEventPublisher());
+            boolean chainWriterEnabled,
+        ApplicationEventPublisher publisher) {
+      return new AuditActivitiesImpl(dsl, objectMapper, chainWriter, chainWriterEnabled, publisher);
     }
   }
 
@@ -169,6 +226,9 @@ class AuditLogChainWriterIT {
   @Autowired private ObjectMapper om;
   @Autowired private AuditLogChainWriter chainWriter;
   @Autowired private org.jooq.DSLContext dsl;
+  // Issue #1029 Step 2: the mock webhook client exposed as a Spring bean for assertion in the
+  // floor-breach funnel IT. Reset in @BeforeEach so each test sees a clean call count.
+  @Autowired private WebhookClient webhookClient;
 
   @BeforeAll
   static void openAdminConnection() throws Exception {
@@ -195,6 +255,11 @@ class AuditLogChainWriterIT {
     try (Statement st = adminConn.createStatement()) {
       st.executeUpdate("DELETE FROM audit_log");
     }
+    // Reset the mock webhook client before each test so the floor-breach funnel IT (@Order(6))
+    // sees a clean call count regardless of whether an earlier test accidentally triggered it.
+    // Only webhookClient is reset; AuditITConfig.mockWebhookResolver is not reset so its
+    // resolve() stubbing (set once in AuditITConfig's static initializer) stays in place.
+    reset(webhookClient);
   }
 
   @Test
@@ -544,6 +609,104 @@ class AuditLogChainWriterIT {
         assertThat(rs.next()).as("only two sequential rows must persist").isFalse();
       }
     }
+  }
+
+  /**
+   * Issue #1029 Step 2: the literal 111-char production position workflow id round-trips through
+   * both {@code workflow_id} and {@code correlation_id} columns after V12 widens {@code
+   * correlation_id} to {@code VARCHAR(256)}, and the production after-commit funnel posts exactly
+   * one Discord embed for it.
+   *
+   * <p><b>RED argument without V12:</b> before this migration {@code audit_log.correlation_id} was
+   * {@code VARCHAR(96)}; inserting a 111-char value causes Postgres to throw {@code value too long
+   * for type character varying(96)}, {@code AuditActivitiesImpl.persist()} catches and swallows it
+   * (best-effort log path), the row is never committed, and the read-back below finds no row — this
+   * is the authoritative RED proof. Whether the {@code @TransactionalEventListener AFTER_COMMIT}
+   * listener also fails to fire in that case is the expected mechanism (consistent with the
+   * production evidence) but is not verified here. After V12 widens the column to {@code
+   * VARCHAR(256)}, the INSERT succeeds and both assertions below pass. CI confirms this with {@code
+   * RUN_DB_ITS=true} against the Flyway-migrated schema; the schema-parity test in {@code
+   * services/audit} is the local RED carrier (Docker-free).
+   *
+   * <p>The 111-char id is the production {@code staging_paper/copytrade-v1} position workflow id
+   * observed in 72 failed floor-breach audit INSERTs in the 24 h before issue #1029 was filed:
+   * {@code t-staging_paper/s-copytrade-v1/pos/SMCI
+   * 261120C00050000/chat-messages-769797179992571914-1541869380974157876:0}.
+   */
+  @Test
+  @Order(6)
+  void floorBreachAlertedWithLongIdInsertsPagesViaRealFunnel() throws Exception {
+    // The literal 111-char production position workflow id from staging_paper/copytrade-v1 that
+    // caused 72 silent floor-breach misses in the 24 h before #1029 was filed.
+    final String PROD_WORKFLOW_ID =
+        "t-staging_paper/s-copytrade-v1/pos/SMCI  261120C00050000"
+            + "/chat-messages-769797179992571914-1541869380974157876:0";
+    assertThat(PROD_WORKFLOW_ID).as("production id must be 111 chars").hasSize(111);
+
+    AuditEvent ev = new AuditEvent();
+    ev.setSchemaVersion(1L);
+    ev.setTenantId("staging_paper");
+    ev.setStrategyId("copytrade-v1");
+    ev.setEventId(UUID.randomUUID().toString());
+    ev.setOccurredAt(java.time.OffsetDateTime.now());
+    ev.setKind("FloorBreachAlerted");
+    ev.setActor("FloorBreachAlertLoop");
+    ev.setWorkflowId(PROD_WORKFLOW_ID);
+    ev.setCorrelationId(PROD_WORKFLOW_ID);
+    ev.setSubject(
+        java.util.Map.of(
+            "contract_symbol", "SMCI  261120C00050000",
+            "qty", "10",
+            "entry_premium", "1.50",
+            "current_bid", "0.75",
+            "loss_pct", "0.50",
+            "step", "1",
+            "threshold", "0.50"));
+
+    UUID eventId = UUID.fromString(ev.getEventId());
+
+    // Drive the event through the Spring-proxied AuditActivitiesImpl so the @Transactional
+    // boundary is exercised and the @TransactionalEventListener(AFTER_COMMIT) on
+    // OrderFailureAlerter fires after the INSERT commits.
+    activities.log(ev);
+
+    // --- Row assertion: the 111-char ids must both have been stored intact with a chain hash. ---
+    try (PreparedStatement ps =
+        adminConn.prepareStatement(
+            "SELECT length(workflow_id) AS wf_len, length(correlation_id) AS corr_len, "
+                + "row_hash IS NOT NULL AS has_hash "
+                + "FROM audit_log WHERE event_id = ?")) {
+      ps.setObject(1, eventId);
+      try (var rs = ps.executeQuery()) {
+        assertThat(rs.next())
+            .as(
+                "FloorBreachAlerted row must be committed to audit_log (without V12 the"
+                    + " INSERT fails with 'value too long for type character varying(96)')")
+            .isTrue();
+        assertThat(rs.getInt("wf_len"))
+            .as("workflow_id column must store the full 111-char id")
+            .isEqualTo(111);
+        assertThat(rs.getInt("corr_len"))
+            .as(
+                "correlation_id column must store the full 111-char id"
+                    + " after V12 widens it to VARCHAR(256)")
+            .isEqualTo(111);
+        assertThat(rs.getBoolean("has_hash"))
+            .as("row_hash must be non-null (chain writer is enabled)")
+            .isTrue();
+      }
+    }
+
+    // --- Funnel assertion: AFTER_COMMIT listener must have posted exactly one Discord embed. ---
+    ArgumentCaptor<WebhookEmbed> embedCaptor = ArgumentCaptor.forClass(WebhookEmbed.class);
+    verify(webhookClient, times(1)).postEmbedToUrl(any(), embedCaptor.capture());
+    WebhookEmbed embed = embedCaptor.getValue();
+    assertThat(embed.title())
+        .as("floor-breach embed title must start with ':rotating_light: FLOOR BREACH'")
+        .startsWith(":rotating_light: FLOOR BREACH");
+    assertThat(embed.footer())
+        .as("embed footer must contain the full 111-char workflow id")
+        .contains(PROD_WORKFLOW_ID);
   }
 
   /**

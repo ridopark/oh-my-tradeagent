@@ -160,6 +160,33 @@ class WorkflowIdsTest {
     assertThat(WorkflowIds.entrySignalIdFromPosition(id)).isEqualTo("wl/2026-06-09/SPY/P");
   }
 
+  /**
+   * Issue #1029: {@code audit_log.workflow_id} and {@code correlation_id} are both {@code
+   * VARCHAR(256)}; every id that {@link WorkflowIds#position} can build must fit. Worst case:
+   * 64-char tenant, 64-char strategy, 21-char OCC (standard padded OCC with embedded spaces),
+   * 59-char signal id. Formula: 2+64+3+64+5+21+1+59 = 219. If this assertion fails, the plan must
+   * be revisited: 256 is the wrong ceiling and the migration width must increase too.
+   */
+  @Test
+  void positionWorstCaseIdFitsInAuditLogColumnWidth() {
+    String tenant = "a".repeat(64);
+    String strategy = "b".repeat(64);
+    String occ = "SMCI  261120C00050000"; // 21 chars, embedded spaces are the standard OCC form
+    String signalId = "c".repeat(59);
+
+    String id = WorkflowIds.position(tenant, strategy, occ, signalId);
+
+    assertThat(id.length())
+        .as(
+            "Worst-case WorkflowIds.position() length must be ≤ 256 (audit_log.workflow_id"
+                + " / correlation_id width). Actual length: %d",
+            id.length())
+        .isLessThanOrEqualTo(256);
+    assertThat(id.length())
+        .as("Expected worst-case length to be 219 (2+64+3+64+5+21+1+59); got %d", id.length())
+        .isEqualTo(219);
+  }
+
   @Test
   void entrySignalIdFromPositionRefusesMalformedIds() {
     assertThat(WorkflowIds.entrySignalIdFromPosition("t-a/s-b/sig/some-signal")).isNull();
