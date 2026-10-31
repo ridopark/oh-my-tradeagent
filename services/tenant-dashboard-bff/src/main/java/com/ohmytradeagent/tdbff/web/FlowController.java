@@ -100,6 +100,11 @@ public class FlowController {
     }
 
     Set<String> labelSet = parseLabels(labels);
+    // before and before_id must come together: one without the other is a malformed cursor.
+    if ((before == null) != (beforeId == null)) {
+      throw new IllegalArgumentException(
+          "cursor params 'before' and 'before_id' must be supplied together");
+    }
     OffsetDateTime beforeTs =
         before == null || before.isBlank() ? null : OffsetDateTime.parse(before);
 
@@ -164,7 +169,9 @@ public class FlowController {
     body.put("date", sessionDate.toString());
     body.put("count", items.size());
     body.put("items", items);
-    if (page.lastFirstTs() != null) {
+    // Emit the cursor only when the page is full (rows.size() == limit), meaning a further page
+    // may exist. A short page is the last page and needs no cursor (amended at review 2026-10-31).
+    if (rows.size() == query.limit() && page.lastFirstTs() != null) {
       body.put("next_before", instant(page.lastFirstTs()));
       body.put("next_before_id", page.lastId());
     }

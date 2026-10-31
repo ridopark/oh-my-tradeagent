@@ -294,6 +294,27 @@ class ServiceTokenFilterTest {
     assertThat(res.getStatus()).isEqualTo(401);
   }
 
+  @Test
+  void flowPathParameterTraversal_cannotSmuggleTheIngestTokenIntoATenantRead() throws Exception {
+    // Mirrors darkpoolPathParameterTraversal: `..;a` traverses after Tomcat strips path params.
+    MockHttpServletResponse res =
+        run("/internal/flow/..;a/..;b/api/positions", "Bearer " + INGEST_TOKEN);
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void flowIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
+    // Mirrors darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401.
+    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", new MockEnvironment());
+    MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/flow/ingest");
+    req.addHeader("Authorization", "Bearer ");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+
+    unprovisioned.doFilter(req, res, new MockFilterChain());
+
+    assertThat(res.getStatus()).isEqualTo(401);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Path-traversal guard. getRequestURI() is the RAW request line; Spring dispatches on the DECODED
   // and NORMALIZED path. Without this guard the two disagree and every path-based decision this

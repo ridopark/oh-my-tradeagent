@@ -280,18 +280,21 @@ class FlowControllerWebMvcTest {
   }
 
   @Test
-  void orders_cursorPaging_passesBeforeThrough() throws Exception {
-    when(repo.orders(any())).thenReturn(new OrderPage(List.of(), null, null));
-
+  void orders_cursorPaging_beforeWithoutBeforeId_is400() throws Exception {
+    // before and before_id must come together; before alone is a malformed cursor → 400.
     mvc.perform(
             get("/api/flow/orders")
                 .header("X-Tenant-Id", "t")
                 .param("before", "2026-10-31T15:30:00Z"))
-        .andExpect(status().isOk());
+        .andExpect(status().isBadRequest());
+    verifyNoInteractions(repo);
+  }
 
-    ArgumentCaptor<OrderQuery> q = ArgumentCaptor.forClass(OrderQuery.class);
-    verify(repo).orders(q.capture());
-    assertThat(q.getValue().before()).isEqualTo(OffsetDateTime.parse("2026-10-31T15:30:00Z"));
+  @Test
+  void orders_cursorPaging_beforeIdWithoutBefore_is400() throws Exception {
+    mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t").param("before_id", "42"))
+        .andExpect(status().isBadRequest());
+    verifyNoInteractions(repo);
   }
 
   @Test
@@ -330,14 +333,27 @@ class FlowControllerWebMvcTest {
   }
 
   @Test
-  void orders_nextCursorPresentWhenPageHasRows() throws Exception {
+  void orders_nextCursorPresentWhenPageIsFull() throws Exception {
+    // limit=1, 1 row returned → page is full → cursor present (a further page may exist).
+    OffsetDateTime ts = OffsetDateTime.parse("2026-10-31T15:00:00Z");
+    when(repo.orders(any())).thenReturn(new OrderPage(List.of(order()), ts, 7L));
+
+    mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t").param("limit", "1"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.next_before").value("2026-10-31T15:00:00Z"))
+        .andExpect(jsonPath("$.next_before_id").value(7));
+  }
+
+  @Test
+  void orders_nextCursorAbsentWhenShortPage() throws Exception {
+    // 1 row returned against the default limit of 200 → short page (last page) → no cursor.
     OffsetDateTime ts = OffsetDateTime.parse("2026-10-31T15:00:00Z");
     when(repo.orders(any())).thenReturn(new OrderPage(List.of(order()), ts, 7L));
 
     mvc.perform(get("/api/flow/orders").header("X-Tenant-Id", "t"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.next_before").value("2026-10-31T15:00:00Z"))
-        .andExpect(jsonPath("$.next_before_id").value(7));
+        .andExpect(jsonPath("$.next_before").doesNotExist())
+        .andExpect(jsonPath("$.next_before_id").doesNotExist());
   }
 
   @Test

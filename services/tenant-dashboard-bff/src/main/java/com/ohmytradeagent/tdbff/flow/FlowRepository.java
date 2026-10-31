@@ -69,8 +69,9 @@ public class FlowRepository {
    *
    * <p>NOTE: the DB columns for the option right and the cross label are named {@code option_right}
    * and {@code is_cross} because {@code right} and {@code cross} are RESERVED keywords in
-   * PostgreSQL 16. The JSON wire names {@code right} and {@code cross} are preserved via explicit
-   * {@code @JsonProperty} annotations on those components.
+   * PostgreSQL 16. The JSON wire names {@code right} and {@code cross} are pinned by explicit
+   * {@code @JsonProperty} annotations on those components so that {@code @JsonNaming} or a future
+   * rename does not silently change the wire key.
    */
   @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
   public record Order(
@@ -360,12 +361,10 @@ public class FlowRepository {
     }
     if (query.before() != null && query.beforeId() != null) {
       // Compound keyset cursor: (first_ts, id) < (?, ?) so rows sharing first_ts are not skipped.
+      // The controller validates that both params are present or absent together.
       sql.append(" AND (first_ts, id) < (?::timestamptz, ?)");
       binds.add(query.before());
       binds.add(query.beforeId());
-    } else if (query.before() != null) {
-      sql.append(" AND first_ts < ?::timestamptz");
-      binds.add(query.before());
     }
     sql.append(" ORDER BY first_ts DESC, id DESC LIMIT ?");
     binds.add(query.limit());

@@ -336,20 +336,45 @@ class FlowMigrationIT {
 
   @Test
   void retentionDeletesOrdersAndTickerDays_asTheWriter() {
+    // Use a ticker unique to this test to get exact counts regardless of other tests' rows.
+    // Just inside (before) the cutoff → deleted; at/after the cutoff → survives (strict <).
+    String justBeforeOrderCutoff = "2025-12-31T23:59:59Z"; // < 2026-01-01T00:00:00Z → deleted
+    String atOrderCutoff = "2026-01-01T00:00:00Z"; // NOT < cutoff → survives
+
     repo.ingest(
-        List.of(order("IT:ret:old", "GOOG", "2025-01-02T15:00:00Z", "C")),
-        List.of(tickerDay("GOOG", "2025-01-02", new BigDecimal("5000.00"), BigDecimal.ZERO)));
+        List.of(
+            order("IT:ret:old:2", "GOORET", justBeforeOrderCutoff, "C"),
+            order("IT:ret:new:2", "GOORET", atOrderCutoff, "C")),
+        List.of(
+            tickerDay("GOORET", "2025-12-31", new BigDecimal("5000.00"), BigDecimal.ZERO),
+            tickerDay("GOORET", "2026-01-01", new BigDecimal("6000.00"), BigDecimal.ZERO)));
 
     OffsetDateTime orderCutoff = OffsetDateTime.parse("2026-01-01T00:00:00Z");
     int deletedOrders = repo.deleteOrdersOlderThan(orderCutoff, 500);
-    assertThat(deletedOrders).isGreaterThanOrEqualTo(1);
+    assertThat(deletedOrders).as("exactly the one pre-cutoff order deleted").isEqualTo(1);
 
     LocalDate dayCutoff = LocalDate.of(2026, 1, 1);
     int deletedDays = repo.deleteTickerDaysOlderThan(dayCutoff, 500);
-    assertThat(deletedDays).isGreaterThanOrEqualTo(1);
+    assertThat(deletedDays).as("exactly the one pre-cutoff ticker-day deleted").isEqualTo(1);
 
-    // A second pass finds nothing.
-    assertThat(repo.deleteOrdersOlderThan(orderCutoff, 500)).as("nothing left").isZero();
+    // The newer rows survive.
+    List<Order> survivors =
+        repo.orders(
+                new OrderQuery(null, "GOORET", null, null, null, null, null, null, null, null, 10))
+            .items();
+    assertThat(survivors)
+        .as("only the at-cutoff order survives")
+        .extracting(Order::orderId)
+        .containsExactly("IT:ret:new:2");
+
+    List<TickerDay> daySurvivors = repo.summary(LocalDate.of(2026, 1, 1), "GOORET");
+    assertThat(daySurvivors).as("only the at-cutoff ticker-day survives").hasSize(1);
+    assertThat(daySurvivors.get(0).sessionDate()).isEqualTo(LocalDate.of(2026, 1, 1));
+
+    // A second pass finds nothing more to delete.
+    assertThat(repo.deleteOrdersOlderThan(orderCutoff, 500))
+        .as("second pass: nothing left to delete")
+        .isZero();
   }
 
   @Test
@@ -406,8 +431,8 @@ class FlowMigrationIT {
 
   /**
    * 12-order fixture covering every SQL-level filter: ET date bounds, ticker, min_premium, each
-   * label (sweep/block/multi_leg/unusual), option_right (C/P), side (buy/sell/mid/unknown), and DTE
-   * range. Proves the repository SQL is correct for all filter combinations at once without a mock.
+   * label (sweep/block/multi_leg/unusual), option_right (C/P), side (buy/sell), and DTE range.
+   * Proves the repository SQL is correct for all filter combinations at once without a mock.
    */
   @Test
   void allFiltersAtTheSqlLevel_12OrderFixture() {
@@ -522,7 +547,7 @@ class FlowMigrationIT {
                 false,
                 false,
                 true),
-            // 9. option_right=P
+            // 9. option_right=P, side=sell
             makeOrder(
                 "IT:12:put",
                 "TSLA",
@@ -574,11 +599,15 @@ class FlowMigrationIT {
                 false,
                 false,
                 null)),
-        List.of());
+        List.of(
+            tickerDay(
+                "TSLA", "2026-10-29", new BigDecimal("700000.00"), new BigDecimal("50000.00")),
+            tickerDay("NVDA", "2026-10-29", new BigDecimal("50000.00"), BigDecimal.ZERO)));
 
     LocalDate oct29 = LocalDate.of(2026, 10, 29);
 
-    // ET date bounds: only in-session orders returned.
+    // ET date bounds: exactly the 10 in-session TSLA orders; premarket and NVDA excluded.
+    // Orders 1,4-12 have inSession timestamp; order 2 (premarket) and 3 (NVDA) must not appear.
     List<String> inSessionIds =
         repo
             .orders(
@@ -587,9 +616,20 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(inSessionIds).doesNotContain("IT:12:premarket", "IT:12:nvda");
+    assertThat(inSessionIds)
+        .containsExactlyInAnyOrder(
+            "IT:12:in-session",
+            "IT:12:big-prem",
+            "IT:12:sweep",
+            "IT:12:block",
+            "IT:12:multileg",
+            "IT:12:unusual",
+            "IT:12:put",
+            "IT:12:sell",
+            "IT:12:dte-short",
+            "IT:12:dte-long");
 
-    // Ticker filter: NVDA row returned, TSLA rows absent.
+    // Ticker filter: exactly the NVDA order on oct29; no TSLA rows.
     List<String> nvdaIds =
         repo
             .orders(
@@ -598,10 +638,9 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(nvdaIds).contains("IT:12:nvda");
-    assertThat(nvdaIds).doesNotContain("IT:12:in-session");
+    assertThat(nvdaIds).containsExactly("IT:12:nvda");
 
-    // min_premium=100000: big-prem included, $50k rows excluded.
+    // min_premium=100000: exactly the big-prem order ($150k >= $100k); all $50k rows excluded.
     List<String> bigIds =
         repo
             .orders(
@@ -621,8 +660,7 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(bigIds).contains("IT:12:big-prem");
-    assertThat(bigIds).doesNotContain("IT:12:in-session");
+    assertThat(bigIds).containsExactly("IT:12:big-prem");
 
     // Label filters (each tested independently).
     assertHasOnly(
@@ -670,14 +708,14 @@ class FlowMigrationIT {
                     100))
             .items());
 
-    // option_right=P: only the put row.
+    // option_right=P: exactly the put row.
     assertHasOnly(
         "IT:12:put",
         repo.orders(
                 new OrderQuery(oct29, "TSLA", null, null, "P", null, null, null, null, null, 100))
             .items());
 
-    // side=sell: sell rows.
+    // side=sell: exactly IT:12:sell (C, sell) and IT:12:put (P, sell).
     List<String> sellIds =
         repo
             .orders(
@@ -687,10 +725,9 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(sellIds).contains("IT:12:sell", "IT:12:put");
-    assertThat(sellIds).doesNotContain("IT:12:in-session");
+    assertThat(sellIds).containsExactlyInAnyOrder("IT:12:sell", "IT:12:put");
 
-    // DTE range: dte_min=3 excludes the short-DTE order (dte=2).
+    // DTE range: dte_min=3 excludes IT:12:dte-short (dte=2); the 9 remaining TSLA in-session rows.
     List<String> longDteIds =
         repo
             .orders(new OrderQuery(oct29, "TSLA", null, null, null, null, 3, null, null, null, 100))
@@ -698,10 +735,19 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(longDteIds).doesNotContain("IT:12:dte-short");
-    assertThat(longDteIds).contains("IT:12:dte-long");
+    assertThat(longDteIds)
+        .containsExactlyInAnyOrder(
+            "IT:12:in-session",
+            "IT:12:big-prem",
+            "IT:12:sweep",
+            "IT:12:block",
+            "IT:12:multileg",
+            "IT:12:unusual",
+            "IT:12:put",
+            "IT:12:sell",
+            "IT:12:dte-long");
 
-    // dte_max=5 excludes the long-DTE order (dte=60).
+    // dte_max=5: exactly IT:12:dte-short (dte=2 <= 5); the dte=60 row excluded.
     List<String> shortDteIds =
         repo
             .orders(new OrderQuery(oct29, "TSLA", null, null, null, null, null, 5, null, null, 100))
@@ -709,8 +755,16 @@ class FlowMigrationIT {
             .stream()
             .map(Order::orderId)
             .toList();
-    assertThat(shortDteIds).doesNotContain("IT:12:dte-long");
-    assertThat(shortDteIds).contains("IT:12:dte-short");
+    assertThat(shortDteIds).containsExactly("IT:12:dte-short");
+
+    // summary: exactly the two ticker-days posted in this fixture.
+    List<TickerDay> summaryAll = repo.summary(oct29, null);
+    assertThat(summaryAll.stream().map(TickerDay::ticker).toList())
+        .containsExactlyInAnyOrder("TSLA", "NVDA");
+    TickerDay tslaSummary =
+        summaryAll.stream().filter(d -> "TSLA".equals(d.ticker())).findFirst().orElseThrow();
+    assertThat(tslaSummary.callPremium()).isEqualByComparingTo("700000.00");
+    assertThat(tslaSummary.putPremium()).isEqualByComparingTo("50000.00");
   }
 
   /**

@@ -15,7 +15,8 @@
 -- NOTE: `right` and `cross` are RESERVED keywords in PostgreSQL 16 (pg_get_keywords() returns
 -- reserved / can-be-function-or-type for both).  Using them bare as column names causes a parse
 -- error.  The columns are therefore named `option_right` and `is_cross`; the JSON wire names
--- `right` and `cross` are preserved via explicit @JsonProperty annotations in FlowRepository.
+-- `right` and `cross` are pinned by explicit @JsonProperty annotations in FlowRepository so
+-- that @JsonNaming or a future rename does not silently change the wire key.
 CREATE TABLE flow_order (
   id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   order_id                TEXT          NOT NULL,           -- deterministic dedup key
@@ -55,9 +56,9 @@ CREATE TABLE flow_order (
   UNIQUE (order_id)
 );
 
--- The two paging shapes: all orders newest-first, and per-ticker newest-first. The second also
--- serves the retention sweep (WHERE first_ts < ? ORDER BY first_ts LIMIT ?). Named so the
--- structure tests can assert them.
+-- The two paging shapes: all orders newest-first, and per-ticker newest-first. The first also
+-- serves the retention sweep (WHERE first_ts < ? ORDER BY first_ts ASC LIMIT ?); the ticker-led
+-- index cannot serve it (leading column mismatch). Named so the structure tests can assert them.
 CREATE INDEX flow_order_first_ts_idx        ON flow_order (first_ts DESC);
 CREATE INDEX flow_order_ticker_first_ts_idx ON flow_order (ticker, first_ts DESC);
 
