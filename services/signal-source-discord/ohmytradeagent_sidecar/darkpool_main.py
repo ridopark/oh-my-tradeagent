@@ -9,16 +9,19 @@ each with the NBBO at the print, folds ALL trades into 5-minute bars, and POSTs 
 here is on a trading path.
 
 NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per-cycle request cap
-(``DARKPOOL_MAX_REQUESTS``, default 1000), a stop when ``X-Ratelimit-Remaining`` runs low, and a
-429 ending the cycle after a short sleep.
+(``DARKPOOL_MAX_REQUESTS``, default 1000), a per-symbol page cap (``MAX_TRADE_PAGES``, default 10,
+~43 MiB whole-cycle peak — see ``darkpool_collector`` for the memory measurement), a stop when
+``X-Ratelimit-Remaining`` runs low, and a 429 ending the cycle after a short sleep.
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
-nothing; flipping that env is the go-live. Cursors are saved to ``STATE_DIR/cursors.json`` after
-every cycle whose batch was stored (#1032). The state dir is an emptyDir, so this survives a
-CONTAINER restart (a liveness kill) but not a new pod. On start a symbol with a saved cursor resumes
-at ``bucket5m(last_t)``; one without starts at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)``
-(default 10 min). Either way the start is a 5-minute boundary and no trade before it is ever
-aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
+nothing; flipping that env is the go-live. Cursors and the round-robin start symbol are saved to
+``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is an
+emptyDir, so this survives a CONTAINER restart (a liveness kill) but not a new pod. On start a
+symbol with a saved cursor resumes at ``bucket5m(last_t)``; one without starts at
+``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min). The saved ``next_start`` means the
+first cycle after a restart begins at the universe position the previous cycle stopped at, so a
+fixed universe order cannot starve its tail across restarts. Either way the start is a 5-minute
+boundary and no trade before it is ever aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
 partial window (a restart at 10:07 rebuilding 09:55 from 09:57 on) would OVERWRITE the complete
 row the previous process had stored — one corrupted bucket per symbol on every image roll.
 Prints dedupe on (symbol, ts, trade_id), so re-reading them is harmless.
@@ -32,10 +35,15 @@ committed (aggregated, cursor advanced, prints queued) only from requests that s
 the budget runs out during its NBBO lookups, the time-ordered PREFIX of its trades whose lookups
 completed is committed and the cursor stops there, so a budget stop mid-symbol loses nothing and
 a symbol that alone needs more than one cycle's budget still advances every cycle instead of
-restarting from the same cursor forever. When the cap stops a cycle, the NEXT cycle starts at
-the symbol that was cut (round-robin), so a fixed universe order cannot starve its tail; a cycle
-that made NO progress at all (the very first symbol's trades pages already exceeded the budget)
-logs an error and rotates past that symbol so it cannot pin the whole universe.
+restarting from the same cursor forever. When the page cap (``MAX_TRADE_PAGES``) is hit for a
+symbol, the fetched prefix is committed, the cursor advances, and the cycle CONTINUES to the next
+symbol (not break — no ``skipped`` count). The cycle summary logs ``truncated=%d`` for the count
+of page-capped symbols. When the request-budget cap stops a cycle, the NEXT cycle starts at the
+symbol that was cut (round-robin), so a fixed universe order cannot starve its tail; a cycle that
+made NO progress at all (the very first symbol's trades pages already exceeded the budget) logs an
+error and rotates past that symbol so it cannot pin the whole universe.
+A symbol with more than ``MAX_TRADE_PAGES``×10k trades at a single instant cannot advance
+(theoretical; logged each cycle).
 
 Cursors persist across the poll window: Monday's first cycle fetches from Friday's ~19:59 cursor,
 which is a small, cheap read (the tape between is empty); the floor only matters right after a
@@ -211,6 +219,7 @@ class CycleStats:
     bars: int = 0
     errors: int = 0
     skipped: int = 0
+    truncated: int = 0
     posted: bool = False
 
 
@@ -264,8 +273,9 @@ class DarkpoolCollector:
                 self.cursors[symbol] = Cursor.start(self.floors[symbol])
             cursor = self.cursors[symbol]
             exhausted: BudgetExhausted | None = None
+            page_truncated: bool = False
             try:
-                fresh, sides, quotes, exhausted = await self._fetch(
+                fresh, sides, quotes, exhausted, page_truncated = await self._fetch(
                     symbol, cursor, now - SETTLE_LAG
                 )
             except BudgetExhausted as exc:
@@ -319,7 +329,19 @@ class DarkpoolCollector:
                     len(fresh),
                     stats.skipped,
                 )
+                del fresh, sides, quotes
                 break
+            if page_truncated:
+                stats.truncated += 1
+                self._log.warning(
+                    "darkpool %s page cap hit: %d pages fetched, %d trades committed, "
+                    "new cursor %s; continuing to next symbol",
+                    symbol,
+                    self._data.max_pages,
+                    len(fresh),
+                    format_ts(self.cursors[symbol].last_t),
+                )
+            del fresh, sides, quotes
         bars = [self.accumulators[k].to_wire() for k in sorted(touched)]
         prune_accumulators(self.accumulators)
         stats.requests = self._data.requests_this_cycle
@@ -339,7 +361,7 @@ class DarkpoolCollector:
             self._save_cursors()
         self._log.info(
             "darkpool cycle: symbols=%d requests=%d kept_prints=%d bars=%d dry_run=%s "
-            "errors=%d skipped=%d posted=%s unposted=%d",
+            "errors=%d skipped=%d truncated=%d posted=%s unposted=%d",
             stats.symbols,
             stats.requests,
             stats.kept_prints,
@@ -347,6 +369,7 @@ class DarkpoolCollector:
             self._dry_run,
             stats.errors,
             stats.skipped,
+            stats.truncated,
             stats.posted,
             len(self.unposted),
         )
@@ -354,42 +377,60 @@ class DarkpoolCollector:
 
     def _load_cursors(self) -> None:
         """Resume each saved symbol at the START of its cursor's bucket: that bucket is re-read
-        whole, so its re-posted bar cannot overwrite a complete row with a partial one."""
+        whole, so its re-posted bar cannot overwrite a complete row with a partial one.
+
+        Accepts both the old flat ``{sym: ts}`` shape and the new
+        ``{"cursors": {sym: ts}, "next_start": sym}`` shape written since #1041 Step 2."""
         if self._state_path is None or not self._state_path.exists():
             return
         try:
             saved = json.loads(self._state_path.read_text())
-            starts = {sym: bucket5m(parse_ts(ts)) for sym, ts in saved.items()}
+            if "cursors" in saved:
+                cursor_map = saved["cursors"]
+                next_sym = saved.get("next_start", "")
+            else:
+                cursor_map = saved
+                next_sym = ""
+            starts = {sym: bucket5m(parse_ts(ts)) for sym, ts in cursor_map.items()}
         except Exception as exc:  # noqa: BLE001 - a bad file means a cold start, never a crash
             self._log.warning("darkpool cursor state unreadable, starting cold: %r", exc)
             return
         for sym, start in starts.items():
             self.floors[sym] = start
             self.cursors[sym] = Cursor.start(start)
+        # Map saved symbol name to index; fall back to 0 when absent or no longer in the universe.
+        if next_sym and next_sym in self._universe:
+            self._next_start = self._universe.index(next_sym)
+        else:
+            self._next_start = 0
         self._log.info("darkpool cursor state loaded for %d symbols", len(starts))
 
     def _save_cursors(self) -> None:
         if self._state_path is None:
             return
+        # Save next_start as a symbol name so a universe edit cannot misplace it.
+        next_sym = self._universe[self._next_start]
+        payload = {
+            "cursors": {sym: format_ts(c.last_t) for sym, c in self.cursors.items()},
+            "next_start": next_sym,
+        }
         tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({sym: format_ts(c.last_t) for sym, c in self.cursors.items()}))
+        tmp.write_text(json.dumps(payload))
         tmp.replace(self._state_path)
 
     async def _fetch(self, symbol: str, cursor: Cursor, end: datetime):
         """Trades in (cursor, end] in time order plus the NBBO side of every kept print, and the
         BudgetExhausted that cut the NBBO lookups short (then only the committable prefix of the
-        trades is returned), else None. Raises on any failure, and on a budget stop before any
-        trade could be committed. Anything before the symbol's floor is dropped even if the API
-        returns it. No trade-condition filter: the bars are consolidated volume (odd lots,
-        extended-hours prints included) in numerator and denominator alike, and the only
-        selection is exchange D, so the dark share is unbiased by conditions."""
+        trades is returned), else None. Also returns a truncated flag when the page cap was hit.
+        Raises on any failure, and on a budget stop before any trade could be committed. Anything
+        before the symbol's floor is dropped even if the API returns it. No trade-condition filter:
+        the bars are consolidated volume (odd lots, extended-hours prints included) in numerator
+        and denominator alike, and the only selection is exchange D, so the dark share is unbiased
+        by conditions."""
         floor = self.floors[symbol]
+        raw_trades, page_truncated = await self._data.trades(symbol, cursor.last_t, end)
         fresh = sorted(
-            (
-                t
-                for t in cursor.filter_new(await self._data.trades(symbol, cursor.last_t, end))
-                if t.ts >= floor
-            ),
+            (t for t in cursor.filter_new(raw_trades) if t.ts >= floor),
             key=lambda t: t.ts,
         )
         sides: dict[Trade, str] = {}
@@ -401,11 +442,11 @@ class DarkpoolCollector:
                 except BudgetExhausted as exc:
                     if i == 0:
                         raise
-                    return fresh[:i], sides, quotes, exc
+                    return fresh[:i], sides, quotes, exc, False
                 self._heartbeat()
                 quotes[t] = quote
                 sides[t] = side(t.price, quote, t.ts)
-        return fresh, sides, quotes, None
+        return fresh, sides, quotes, None, page_truncated
 
 
 async def run_loop(

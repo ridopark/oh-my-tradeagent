@@ -4,7 +4,9 @@
 Everything that decides WHAT a print is lives here and is unit-tested without I/O: classification,
 side inference from the NBBO, ET 5-minute bucketing, the per-bucket accumulators the BFF upserts,
 and the per-symbol cursor. ``AlpacaDataClient`` is the only network code: it POLLS
-``GET /v2/stocks/trades`` and ``GET /v2/stocks/quotes`` over REST with a per-cycle request budget.
+``GET /v2/stocks/trades`` and ``GET /v2/stocks/quotes`` over REST with a per-cycle request budget
+and a per-symbol page cap (``MAX_TRADE_PAGES``, default 10; see the constant for the memory bound
+derivation). ``trades()`` returns ``(list[Trade], truncated: bool)``.
 
 NEVER a WebSocket. Alpaca allows ONE data socket per account on this plan and the market-data pod
 holds it (equity feed -> watchlist triggers); a second socket evicts the live feed.
@@ -56,6 +58,15 @@ TRADES_PAGE_LIMIT = 10_000
 # 91% of it NBBO lookups; a restart burst at the open is ~2,500-3,500. The cap bounds one cycle;
 # round-robin resume (darkpool_main) spreads the rest over the following cycles.
 DEFAULT_MAX_REQUESTS = 1_000
+# Memory bound from tracemalloc measurement (Python 3.12, real Trade.from_alpaca, 10k-row pages):
+#   ~385 B retained per Trade  =>  ~3.7 MiB retained per 10k-row page
+#   ~6.5 MiB transient per page (parsed JSON + response body)
+#   Pod memory limit: 256 Mi; idle process: ~40 MiB
+#   Cap 10 pages => <=100,000 trades => ~37 MiB retained + ~6.5 MiB transient peak
+#     => ~43 MiB whole-cycle peak (cycle() del's fresh/sides/quotes before the next symbol's fetch,
+#        so previous symbol's data does not accumulate; measured 42.5 MiB, was 78.2 MiB without del)
+#     => <130 MiB with a 2x fragmentation allowance  (20 pages ~80 MiB: too close)
+MAX_TRADE_PAGES = 10
 # Stop the cycle when the account's X-Ratelimit-Remaining (10,000/min, shared with the
 # market-data pod and the quote collector) drops below this.
 RATELIMIT_REMAINING_FLOOR = 2_000
@@ -332,11 +343,13 @@ class AlpacaDataClient:
         log: logging.Logger,
         client: httpx.AsyncClient | None = None,
         max_requests: int = DEFAULT_MAX_REQUESTS,
+        max_pages: int = MAX_TRADE_PAGES,
         remaining_floor: int = RATELIMIT_REMAINING_FLOOR,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._log = log
         self.max_requests = max_requests
+        self.max_pages = max_pages
         self._remaining_floor = remaining_floor
         self._sleep = sleep
         self._owns_client = client is None
@@ -378,10 +391,13 @@ class AlpacaDataClient:
                 pass
         return resp.json()
 
-    async def trades(self, symbol: str, start: datetime, end: datetime) -> list[Trade]:
-        """All SIP trades of ``symbol`` in [start, end], pages joined in order."""
+    async def trades(self, symbol: str, start: datetime, end: datetime) -> tuple[list[Trade], bool]:
+        """SIP trades of ``symbol`` in [start, end], pages joined in order, up to ``max_pages``
+        pages. Returns ``(trades, truncated)`` where ``truncated`` is True when a
+        ``next_page_token`` remained after the cap was reached."""
         out: list[Trade] = []
         token: str | None = None
+        pages_fetched = 0
         while True:
             params = {
                 "symbols": symbol,
@@ -397,9 +413,12 @@ class AlpacaDataClient:
             out.extend(
                 Trade.from_alpaca(symbol, r) for r in (body.get("trades") or {}).get(symbol, [])
             )
+            pages_fetched += 1
             token = body.get("next_page_token")
             if not token:
-                return out
+                return out, False
+            if pages_fetched >= self.max_pages:
+                return out, True
 
     async def quote_before(self, symbol: str, ts: datetime) -> Quote | None:
         """The latest NBBO at or before ``ts`` within ``QUOTE_MAX_AGE``, or None."""
