@@ -34,6 +34,7 @@ import math
 import os
 import pathlib
 import resource
+import shutil
 import signal
 import sys
 import time
@@ -83,6 +84,8 @@ WINDOW_OPEN_ET = dtime(9, 25)
 WINDOW_CLOSE_ET = dtime(16, 20)
 # Back-off for a 406 (slot held by previous pod): wait this long before retrying.
 SLOT_HELD_BACKOFF_SECS = 60.0
+# Timeout waiting for a greeting or auth reply from the server.
+HANDSHAKE_TIMEOUT_SECS = 10.0
 # Reconnect back-off sequence: base seconds, grows linearly up to max.
 RECONNECT_BASE_SECS = 2.0
 RECONNECT_MAX_SECS = 60.0
@@ -328,6 +331,7 @@ class Metrics:
     _rest_calls_this_min: int = 0
     rest_calls_min_peak: int = 0
     _last_tick_time: float = field(default_factory=time.monotonic)
+    stream_errors: int = 0  # decode_error/non_dict/bad_symbol/parse_error/non-406 error controls
 
     def tick_second(self) -> None:
         now = time.monotonic()
@@ -417,6 +421,8 @@ class SessionState:
     options_cache: dict[str, list] = field(default_factory=dict)  # ticker → contract list
     options_cache_date: str = ""  # ET date the cache is for (reset per day)
     orders_counted: int = 0  # dry-run count of orders that would be posted
+    first_trade_logged: bool = False  # True after the first "flow: first trade" INFO line
+    first_flush_logged: bool = False  # True after the first "flow: first archive flush" INFO line
 
 
 class FlowSession:
@@ -476,18 +482,28 @@ class FlowSession:
         state.quote_set.current = frozenset()
         state.quote_cache.clear()
 
-        # Greeting
-        greeting = await ws.recv()
-        records = parse_frame(greeting)
-        self._log.debug("greeting: %s", records)
+        # Greeting — with handshake timeout; inspect for error controls.
+        try:
+            greeting = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            raise _StreamError(f"no greeting within {HANDSHAKE_TIMEOUT_SECS} s")
+        for rec in parse_frame(greeting):
+            if isinstance(rec, Control) and rec.action == "error":
+                if rec.code == 406:
+                    raise _SlotHeldError(f"406: {rec.msg}")
+                raise _StreamError(f"greeting error {rec.code}: {rec.msg}")
+        self._log.info("flow: connected")
 
         # Auth
         await ws.send(msgpack.packb({"action": "auth", "key": self._key_id, "secret": self._secret}))
 
-        # Read until authenticated or error
+        # Read until authenticated or error (each recv has the handshake timeout).
         authenticated = False
         for _ in range(10):
-            frame = await ws.recv()
+            try:
+                frame = await asyncio.wait_for(ws.recv(), timeout=HANDSHAKE_TIMEOUT_SECS)
+            except asyncio.TimeoutError:
+                raise _StreamError(f"no auth acknowledgement within {HANDSHAKE_TIMEOUT_SECS} s")
             for rec in parse_frame(frame):
                 if isinstance(rec, Control):
                     if rec.action == "success" and rec.msg == "authenticated":
@@ -500,6 +516,7 @@ class FlowSession:
                 break
         if not authenticated:
             raise _StreamError("no auth acknowledgement")
+        self._log.info("flow: authenticated")
 
         # Populate initial quote set via REST (non-blocking: background task).
         _rotation_task: asyncio.Task | None = asyncio.create_task(
@@ -557,13 +574,32 @@ class FlowSession:
                         if state.archiver:
                             archive_rows_buf.append(trade_to_archive_row(rec, quote))
                         state.last_trade_ts = rec.ts_raw
+                        if not state.first_trade_logged:
+                            self._log.info("flow: first trade %s", rec.ts_raw)
+                            state.first_trade_logged = True
                     elif isinstance(rec, Quote):
                         state.metrics.add_quote()
                         state.quote_cache[rec.contract] = rec
-                    elif isinstance(rec, Control) and rec.action == "error":
-                        if rec.code == 406:
-                            raise _SlotHeldError(f"406 mid-session: {rec.msg}")
-                        self._log.warning("stream error %s: %s", rec.code, rec.msg)
+                    elif isinstance(rec, Control):
+                        if rec.action == "error":
+                            if rec.code == 406:
+                                raise _SlotHeldError(f"406 mid-session: {rec.msg}")
+                            # Non-406 error: count and log (capped at first 5)
+                            state.metrics.stream_errors += 1
+                            if state.metrics.stream_errors <= 5:
+                                self._log.warning(
+                                    "flow: stream error code=%s msg=%s", rec.code, rec.msg
+                                )
+                        elif rec.action in ("subscription", "subscription_updated"):
+                            self._log.info("flow: subscription ack %s", rec.action)
+                        elif rec.action in ("decode_error", "non_dict", "bad_symbol", "parse_error"):
+                            state.metrics.stream_errors += 1
+                            if state.metrics.stream_errors <= 5:
+                                self._log.warning(
+                                    "flow: stream error action=%s detail=%s",
+                                    rec.action,
+                                    rec.msg,
+                                )
 
             mono = time.monotonic()
 
@@ -591,8 +627,13 @@ class FlowSession:
                     self._emit_order(state, order, mono)
                 # Archive flush
                 if state.archiver and archive_rows_buf:
+                    bytes_before = state.archiver.bytes_today
                     state.archiver.write_flush(archive_rows_buf, now)
+                    bytes_written = state.archiver.bytes_today - bytes_before
                     archive_rows_buf = []
+                    if bytes_written > 0 and not state.first_flush_logged:
+                        self._log.info("flow: first archive flush bytes=%d", bytes_written)
+                        state.first_flush_logged = True
                 flush_deadline = mono + FLUSH_INTERVAL_SECS
 
             # Metrics log line
@@ -608,7 +649,12 @@ class FlowSession:
 
         # Final archive flush for this session (clean window close).
         if state.archiver and archive_rows_buf:
+            bytes_before = state.archiver.bytes_today
             state.archiver.write_flush(archive_rows_buf, self._clock())
+            bytes_written = state.archiver.bytes_today - bytes_before
+            if bytes_written > 0 and not state.first_flush_logged:
+                self._log.info("flow: first archive flush bytes=%d", bytes_written)
+                state.first_flush_logged = True
 
     def _emit_order(self, state: SessionState, order: Order, mono: float) -> None:
         """Emit a completed order: update metrics and rolling map.
@@ -744,7 +790,8 @@ class FlowSession:
             "loop_lag_max_ms=%.0f orders/min rate=%.1f total=%d >=25k=%d >=50k=%d >=100k=%d "
             "quoted_premium_share=%.2f rss_mb=%.0f rss_peak_mb=%.0f "
             "open_windows=%d quoted=%d rolling_map=%d seen_contracts=~%d "
-            "archive_bytes=%d gap_seconds=%.0f gaps=%d reconnects=%d rest_calls_min=%d",
+            "archive_bytes=%d gap_seconds=%.0f gaps=%d reconnects=%d rest_calls_min=%d "
+            "stream_errors=%d",
             trades_s_mean,
             m.trades_1s_peak,
             quotes_s_mean,
@@ -767,6 +814,7 @@ class FlowSession:
             gap_count,
             m.reconnects,
             m.rest_calls_min_peak,
+            m.stream_errors,
         )
         m.tick_metrics_interval()
 
@@ -778,7 +826,7 @@ class FlowSession:
             "flow session summary: trades=%d quotes=%d orders=%d >=25k=%d >=50k=%d >=100k=%d "
             "trades_1s_peak_session=%d quotes_1s_peak_session=%d loop_lag_max_ms_session=%.0f "
             "quoted_premium_share=%.2f rss_peak_mb=%.0f seen_contracts=~%d "
-            "archive_bytes=%d gaps=%d reconnects=%d gap_seconds=%.0f",
+            "archive_bytes=%d gaps=%d reconnects=%d gap_seconds=%.0f stream_errors=%d",
             m.trades_total,
             m.quotes_total,
             m.orders_total,
@@ -795,6 +843,7 @@ class FlowSession:
             gap_count,
             m.reconnects,
             m.gap_seconds,
+            m.stream_errors,
         )
 
 
@@ -970,6 +1019,29 @@ async def run_loop(
 
     reconnect_wait = RECONNECT_BASE_SECS
     last_disconnect_ts: str | None = None
+    last_disconnect_reason: str = "reconnect"
+
+    # Startup self-check: log archive dir writability and free space.
+    if archive_dir is not None:
+        if archive_dir.exists():
+            writable = os.access(archive_dir, os.W_OK)
+            probe: pathlib.Path | None = archive_dir
+        else:
+            parent = archive_dir.parent
+            writable = parent.exists() and os.access(parent, os.W_OK)
+            probe = parent if parent.exists() else None
+        try:
+            free_bytes = shutil.disk_usage(probe).free if probe is not None else -1
+        except OSError:
+            free_bytes = -1
+        log.info(
+            "flow: archive dir %s writable=%s free_bytes=%d cap_bytes=%d floor_bytes=%d",
+            archive_dir,
+            writable,
+            free_bytes,
+            cap_bytes,
+            free_floor_bytes,
+        )
 
     while True:
         # SIGTERM: end any active session and return normally.
@@ -986,9 +1058,9 @@ async def run_loop(
             if last_disconnect_ts is not None and (
                 state.archiver is not None or state.metrics.trades_total > 0
             ):
-                # Record the open reconnect gap with to=null (session ended before reconnect).
+                # Record the open gap with to=null (session ended before reconnect).
                 if state.archiver:
-                    state.archiver.record_gap(last_disconnect_ts, None, "reconnect")
+                    state.archiver.record_gap(last_disconnect_ts, None, last_disconnect_reason)
                 state.metrics.gap_count += 1
                 state.metrics.gap_seconds += (
                     now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
@@ -996,6 +1068,7 @@ async def run_loop(
                 _end_session(session, state, now, log, build)
                 state = _make_session_state(archive_dir, cap_bytes, free_floor_bytes, build, log)
                 last_disconnect_ts = None
+                last_disconnect_reason = "reconnect"
             await _sleep(1.0)
             continue
 
@@ -1030,6 +1103,10 @@ async def run_loop(
 
         except _SlotHeldError as exc:
             log.warning("flow: slot held (406) — backing off %ss: %s", SLOT_HELD_BACKOFF_SECS, exc)
+            # Record disconnect so the window-close branch writes a manifest for the day.
+            # reconnects is NOT incremented for a 406 (the previous pod holds the slot).
+            last_disconnect_ts = _fmt_ts(_clock())
+            last_disconnect_reason = "slot_held"
             heartbeat_path.touch()
             await _sleep(SLOT_HELD_BACKOFF_SECS)
         except _StreamError as exc:
@@ -1063,7 +1140,13 @@ def _end_session(
         state.metrics.add_order(order.premium, order.side_source)
     if state.archiver:
         date_str = now.astimezone(ET).strftime("%Y-%m-%d")
-        state.archiver.close_session(date_str, "09:25-16:20", build)
+        manifest = state.archiver.close_session(date_str, "09:25-16:20", build)
+        manifest_path = state.archiver._dir / f"{date_str}.manifest.json"
+        log.info(
+            "flow: manifest written %s trades=%d",
+            manifest_path,
+            manifest.get("trades", 0),
+        )
     session._log_session_summary(state, now)
     log.info("flow session ended (state reset for next day)")
 

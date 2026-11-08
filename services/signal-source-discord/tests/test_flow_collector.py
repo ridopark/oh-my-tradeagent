@@ -1003,3 +1003,72 @@ def test_archiver_first_disk_check_runs_on_a_freshly_booted_host(tmp_path, monke
     arch.write_flush(_make_rows(3), ts("2026-10-29T14:00:00Z"))
     assert (tmp_path / "archive" / "2026-10-29.trades.ndjson.gz").exists()
     assert not arch._disk_stopped
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — close_session always writes manifest, disk-guard numbers, disk_usage OSError
+# ---------------------------------------------------------------------------
+
+
+def test_archiver_close_session_zero_trades_returns_null_shape(tmp_path):
+    """close_session with no prior writes returns a manifest with null/zero fields
+    and writes the manifest file."""
+    arch = TapeArchiver(tmp_path / "archive")
+    manifest = arch.close_session("2026-11-09", "09:25-16:20", "test-build")
+
+    assert manifest is not None, "close_session must return a manifest even when no trades written"
+    assert manifest["file"] is None
+    assert manifest["bytes"] == 0
+    assert manifest["sha256"] is None
+    assert manifest["trades"] == 0
+    assert manifest["first_t"] is None
+    assert manifest["last_t"] is None
+    assert manifest["date"] == "2026-11-09"
+
+    manifest_path = tmp_path / "archive" / "2026-11-09.manifest.json"
+    assert manifest_path.exists(), "manifest file must be written even for zero-trade session"
+    on_disk = __import__("json").loads(manifest_path.read_text())
+    assert on_disk["file"] is None
+    assert on_disk["trades"] == 0
+
+
+def test_archiver_disk_guard_warning_includes_numbers(tmp_path, caplog):
+    """The disk-guard triggered WARNING must include free=, floor=, dir_size=, cap=."""
+    import logging as _logging
+    arch = TapeArchiver(
+        tmp_path / "archive",
+        cap_bytes=10_000_000_000,
+        free_floor_bytes=10_000_000_000_000,  # absurdly large: always below floor
+    )
+    flush_ts = ts("2026-10-29T14:00:00Z")
+    with caplog.at_level(_logging.WARNING):
+        arch.write_flush(_make_rows(5), flush_ts)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    disk_warnings = [m for m in warning_msgs if "disk guard" in m]
+    assert len(disk_warnings) >= 1, f"no disk guard WARNING found; warnings: {warning_msgs}"
+    w = disk_warnings[0]
+    for field in ("free=", "floor=", "dir_size=", "cap="):
+        assert field in w, f"disk guard WARNING missing '{field}': {w}"
+
+
+def test_archiver_disk_usage_oserror_warns(tmp_path, caplog, monkeypatch):
+    """When shutil.disk_usage raises OSError, a WARNING containing 'disk_usage' is logged."""
+    import logging as _logging
+    from ohmytradeagent_sidecar import flow_collector as fc
+
+    def _raise(_path: object) -> object:
+        raise OSError("synthetic disk_usage failure")
+
+    monkeypatch.setattr(fc.shutil, "disk_usage", _raise)
+
+    arch = TapeArchiver(tmp_path / "archive")
+    flush_ts = ts("2026-10-29T14:00:00Z")
+    with caplog.at_level(_logging.WARNING):
+        arch.write_flush(_make_rows(3), flush_ts)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == _logging.WARNING]
+    disk_usage_warns = [m for m in warning_msgs if "disk_usage" in m]
+    assert len(disk_usage_warns) >= 1, (
+        f"expected a WARNING containing 'disk_usage'; warnings: {warning_msgs}"
+    )
