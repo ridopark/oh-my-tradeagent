@@ -86,7 +86,7 @@ from .darkpool_collector import (
     read_universe,
     side,
 )
-from .runtime import required, setup_logging
+from .runtime import attach_run_log, required, setup_logging
 
 INGEST_PATH = "/internal/darkpool/ingest"
 # Mirrors DarkpoolIngestBatch.MAX_ROWS on the BFF; a larger batch is rejected wholesale.
@@ -509,6 +509,10 @@ async def _run() -> int:
         heartbeat=heartbeat_path.touch,
         state_path=state_dir / "cursors.json",
     )
+    run_log_handler = attach_run_log(state_dir)
+    if run_log_handler is not None:
+        log.info("run log: %s", state_dir / "run.log")
+
     log.info(
         "darkpool collector starting (dry_run=%s poll=%ss symbols=%d lookback=%smin window=%s-%s ET)",
         dry_run,
@@ -520,6 +524,9 @@ async def _run() -> int:
     )
     try:
         await run_loop(collector, heartbeat_path, poll_secs, log=log)
+    except BaseException:
+        log.exception("darkpool collector crashed")
+        raise
     finally:
         await ingest.aclose()
         await data.aclose()

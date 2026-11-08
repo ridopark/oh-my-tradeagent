@@ -71,7 +71,7 @@ from .flow_collector import (
     parse_frame,
     trade_to_archive_row,
 )
-from .runtime import required, setup_logging
+from .runtime import attach_run_log, required, setup_logging
 
 UTC = timezone.utc
 WS_URL = "wss://stream.data.alpaca.markets/v1beta1/opra"
@@ -1092,6 +1092,10 @@ async def _run() -> int:
     key_id = required("APCA_API_KEY_ID_DATA")
     secret = required("APCA_API_SECRET_KEY_DATA")
 
+    run_log_handler = attach_run_log(archive_dir)
+    if run_log_handler is not None:
+        log.info("run log: %s", archive_dir / "run.log")
+
     log.info(
         "flow collector starting (dry_run=%s window=%s-%s ET archive=%s build=%s)",
         dry_run,
@@ -1112,19 +1116,23 @@ async def _run() -> int:
 
     async with httpx.AsyncClient(base_url=DATA_BASE_URL, timeout=30.0) as data_cl:
         async with httpx.AsyncClient(base_url=TRADING_BASE_URL, timeout=30.0) as trading_cl:
-            await run_loop(
-                key_id=key_id,
-                secret=secret,
-                archive_dir=archive_dir,
-                dry_run=dry_run,
-                heartbeat_path=heartbeat_path,
-                log=log,
-                data_client=data_cl,
-                trading_client=trading_cl,
-                universe_path=universe_path,
-                build=build,
-                stop_event=stop_event,
-            )
+            try:
+                await run_loop(
+                    key_id=key_id,
+                    secret=secret,
+                    archive_dir=archive_dir,
+                    dry_run=dry_run,
+                    heartbeat_path=heartbeat_path,
+                    log=log,
+                    data_client=data_cl,
+                    trading_client=trading_cl,
+                    universe_path=universe_path,
+                    build=build,
+                    stop_event=stop_event,
+                )
+            except BaseException:
+                log.exception("flow collector crashed")
+                raise
     return 0
 
 
