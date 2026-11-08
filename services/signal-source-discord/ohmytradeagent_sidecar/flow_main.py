@@ -1081,19 +1081,20 @@ async def run_loop(
         try:
             log.info("flow: connecting to %s", WS_URL)
             async with (connect_fn or websockets.connect)(WS_URL, **connect_args) as ws:
-                # Record recovery gap if we were disconnected
-                if last_disconnect_ts is not None:
-                    reconnect_ts = _fmt_ts(now)
-                    state.metrics.gap_count += 1
-                    state.metrics.gap_seconds += (
-                        now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
-                    ).total_seconds()
-                    if state.archiver:
-                        state.archiver.record_gap(last_disconnect_ts, reconnect_ts, "reconnect")
-                    last_disconnect_ts = None
                 await session.run(state, ws, stop_event=stop_event)
 
-            # session.run() returned cleanly (window closed or SIGTERM) — session end
+            # session.run() returned cleanly (window closed or SIGTERM): close any open gap.
+            # `now` was captured at the top of this loop iteration — that is the reconnect time.
+            if last_disconnect_ts is not None:
+                reconnect_ts = _fmt_ts(now)
+                state.metrics.gap_count += 1
+                state.metrics.gap_seconds += (
+                    now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
+                ).total_seconds()
+                if state.archiver:
+                    state.archiver.record_gap(last_disconnect_ts, reconnect_ts, last_disconnect_reason)
+                last_disconnect_ts = None
+            # session end
             _end_session(session, state, _clock(), log, build)
             if stop_event is not None and stop_event.is_set():
                 return  # SIGTERM: do not reset state and continue
@@ -1103,16 +1104,18 @@ async def run_loop(
 
         except _SlotHeldError as exc:
             log.warning("flow: slot held (406) — backing off %ss: %s", SLOT_HELD_BACKOFF_SECS, exc)
-            # Record disconnect so the window-close branch writes a manifest for the day.
+            # Only open a new gap on the first failure; consecutive retries accumulate into one.
             # reconnects is NOT incremented for a 406 (the previous pod holds the slot).
-            last_disconnect_ts = _fmt_ts(_clock())
-            last_disconnect_reason = "slot_held"
+            if last_disconnect_ts is None:
+                last_disconnect_ts = _fmt_ts(_clock())
+                last_disconnect_reason = "slot_held"
             heartbeat_path.touch()
             await _sleep(SLOT_HELD_BACKOFF_SECS)
         except _StreamError as exc:
             log.warning("flow: disconnected: %s — reconnecting in %.0fs", exc, reconnect_wait)
             state.metrics.reconnects += 1
-            last_disconnect_ts = _fmt_ts(_clock())
+            if last_disconnect_ts is None:
+                last_disconnect_ts = _fmt_ts(_clock())
             heartbeat_path.touch()
             await _sleep(reconnect_wait)
             reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)
@@ -1122,7 +1125,8 @@ async def run_loop(
         ) as exc:
             log.warning("flow: transport error: %r; reconnecting in %.0fs", exc, reconnect_wait)
             state.metrics.reconnects += 1
-            last_disconnect_ts = _fmt_ts(_clock())
+            if last_disconnect_ts is None:
+                last_disconnect_ts = _fmt_ts(_clock())
             heartbeat_path.touch()
             await _sleep(reconnect_wait)
             reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)
@@ -1169,15 +1173,15 @@ async def _run() -> int:
     archive_dir_env = os.getenv("FLOW_ARCHIVE_DIR", "")
     archive_dir = pathlib.Path(archive_dir_env) if archive_dir_env else None
 
+    run_log_handler = attach_run_log(archive_dir)
+    if run_log_handler is not None:
+        log.info("run log: %s", archive_dir / "run.log")
+
     universe_path_env = os.getenv("DARKPOOL_UNIVERSE_FILE", "")
     universe_path = pathlib.Path(universe_path_env) if universe_path_env else None
 
     key_id = required("APCA_API_KEY_ID_DATA")
     secret = required("APCA_API_SECRET_KEY_DATA")
-
-    run_log_handler = attach_run_log(archive_dir)
-    if run_log_handler is not None:
-        log.info("run log: %s", archive_dir / "run.log")
 
     log.info(
         "flow collector starting (dry_run=%s window=%s-%s ET archive=%s build=%s)",

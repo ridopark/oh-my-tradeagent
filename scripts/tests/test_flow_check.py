@@ -60,6 +60,8 @@ def _session_summary_line() -> str:
 
 
 # Stub kubectl script: matches call patterns and returns env-var-driven outputs.
+# grep-based run.log calls are simulated by running grep on STUB_RUN_LOG here,
+# so the 500-noise-line test works correctly.
 _STUB_KUBECTL = """\
 #!/usr/bin/env bash
 args="$*"
@@ -67,7 +69,11 @@ if [[ "$args" == *"get deploy flow-collector"* ]] && [[ "$args" == *"readyReplic
     printf '%s\\n' "${STUB_READY:-1/1}"
 elif [[ "$args" == *"get pods"* ]] && [[ "$args" == *"app=flow-collector"* ]] && [[ "$args" == *"restartCount"* ]]; then
     printf '%s\\n' "${STUB_RESTARTS:-0}"
-elif [[ "$args" == *"exec"* ]] && [[ "$args" == *"flow-collector"* ]] && [[ "$args" == *"tail"* ]] && [[ "$args" == *"run.log"* ]]; then
+elif [[ "$args" == *"exec"* ]] && [[ "$args" == *"flow-collector"* ]] && [[ "$args" == *"flow metrics:"* ]]; then
+    printf '%s\\n' "${STUB_RUN_LOG:-}" | grep -F "flow metrics:" | tail -n 1 || true
+elif [[ "$args" == *"exec"* ]] && [[ "$args" == *"flow-collector"* ]] && [[ "$args" == *"flow session summary:"* ]]; then
+    printf '%s\\n' "${STUB_RUN_LOG:-}" | grep -F "flow session summary:" | tail -n 1 || true
+elif [[ "$args" == *"exec"* ]] && [[ "$args" == *"flow-collector"* ]] && [[ "$args" == *"run.log"* ]]; then
     printf '%s\\n' "${STUB_RUN_LOG:-}"
 elif [[ "$args" == *"exec"* ]] && [[ "$args" == *"flow-collector"* ]] && [[ "$args" == *"stat"* ]]; then
     printf '%s\\n' "${STUB_ARCHIVE_BYTES:-}"
@@ -175,6 +181,58 @@ class FlowCheckTest(unittest.TestCase):
         """On a weekend all time-gated checks are skipped; exit 0 when pod is ready."""
         code, out = run_check(SUN_1100)
         self.assertEqual(code, 0, f"expected exit 0 on weekend; got {code}:\n{out}")
+
+    def test_noise_lines_after_metrics_still_ok(self):
+        """500 httpx noise lines following the last metrics line must not hide it.
+
+        The script uses server-side grep so the noise lines are ignored and the
+        metrics line is found even though it appears well before the last 200 lines.
+        """
+        noise_line = json.dumps({
+            "ts": _ts_ago(10),
+            "level": "INFO",
+            "logger": "httpx",
+            "msg": "HTTP Request: GET https://stream.data.alpaca.markets/v1beta1/opra",
+        })
+        # Metrics line first, then 500 httpx noise lines
+        stub_run_log = _metrics_line(seconds_ago=30) + "\n" + "\n".join(
+            [noise_line] * 500
+        )
+        code, out = run_check(
+            MON_1100,
+            stub_run_log=stub_run_log,
+            stub_archive_bytes="98765",
+        )
+        self.assertEqual(code, 0, f"expected exit 0 with noise after metrics; got {code}:\n{out}")
+        self.assertIn("OK", out, out)
+
+    def test_friday_summary_only_alerts_after_close(self):
+        """A session summary from Friday must NOT satisfy Monday's after-16:25 check.
+
+        The summary ts is scoped to today's ET date; a stale summary from a prior
+        day is treated as absent.
+        """
+        # Friday 2026-11-07 — summary ts will start with "2026-11-07T..."
+        # today (from FAKE_NOW=MON_1700) is "2026-11-09" → mismatch → alert
+        friday_ts = "2026-11-07T21:20:00.000Z"  # 16:20 ET on Friday
+        friday_summary = json.dumps({
+            "ts": friday_ts,
+            "level": "INFO",
+            "logger": "flow_collector",
+            "msg": "flow session summary: trades=120000 reconnects=0",
+        })
+        manifest_today = json.dumps({
+            "date": "2026-11-09",
+            "trades": 150000,
+        })
+        code, out = run_check(
+            MON_1700,
+            stub_run_log=friday_summary,
+            stub_archive_bytes="98765",
+            stub_manifest=manifest_today,
+        )
+        self.assertEqual(code, 1, f"expected exit 1 (no today's summary); got {code}:\n{out}")
+        self.assertIn("flow session summary", out, out)
 
 
 if __name__ == "__main__":

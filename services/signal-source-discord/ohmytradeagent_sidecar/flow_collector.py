@@ -820,8 +820,13 @@ class TapeArchiver:
             "build": build or self._build,
         }
         manifest_path = self._dir / f"{date_str}.manifest.json"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "flow: manifest write failed %s: %s", manifest_path, exc
+            )
         return manifest
 
     @property

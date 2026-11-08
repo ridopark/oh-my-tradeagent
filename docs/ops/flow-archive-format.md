@@ -64,11 +64,6 @@ for line in sys.stdin:
 "
 ```
 
-```
-<YYYY-MM-DD>.trades.ndjson.gz   — all OPRA trades received that session
-<YYYY-MM-DD>.manifest.json      — session summary + sha256 of the trades file
-```
-
 ## Trades file (`<date>.trades.ndjson.gz`)
 
 One JSON object per line, gzip-compressed. The file is built from **concatenated gzip

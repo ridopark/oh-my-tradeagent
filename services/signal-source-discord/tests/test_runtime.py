@@ -114,3 +114,23 @@ def test_attaches_to_root_logger(tmp_path):
 
     lines = (tmp_path / "run.log").read_text().splitlines()
     assert any("ws warning" in json.loads(line)["msg"] for line in lines)
+
+
+def test_httpx_info_filtered(tmp_path):
+    """httpx INFO records are dropped from the durable run log; WARNING+ still appear."""
+    attach_run_log(tmp_path)
+
+    logging.getLogger("httpx").info("HTTP Request: GET https://stream.data.alpaca.markets")
+    logging.getLogger("httpx").warning("httpx connect error")
+
+    lines = (tmp_path / "run.log").read_text().splitlines()
+    msgs = [json.loads(line)["msg"] for line in lines if line.strip()]
+
+    # INFO from httpx must NOT appear
+    assert not any("HTTP Request:" in m for m in msgs), (
+        f"httpx INFO should be filtered from run log; found: {msgs}"
+    )
+    # WARNING from httpx MUST appear
+    assert any("httpx connect error" in m for m in msgs), (
+        f"httpx WARNING should reach run log; msgs: {msgs}"
+    )

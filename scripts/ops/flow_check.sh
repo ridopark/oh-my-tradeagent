@@ -71,27 +71,14 @@ in_window=0
 archive_bytes="n/a"
 manifest_trades="n/a"
 
-# Read the durable run.log once — reused for the metrics recency check (2) and
-# the session-summary check (4).
-run_log=$($KUBECTL -n "$NS" exec deploy/flow-collector -- \
-  tail -n 200 /app/archive/run.log 2>/dev/null) || true
-
-# Extract the last 'flow metrics:' JSON line from run.log.
-last=$(echo "$run_log" | python3 -c '
-import sys, json
-last = ""
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        d = json.loads(line)
-        if str(d.get("msg", "")).startswith("flow metrics:"):
-            last = line
-    except Exception:
-        pass
-print(last)
-')
+# Find the newest 'flow metrics:' line via server-side grep (immune to noise lines after it).
+# Try run.log first; fall back to run.log.1 when run.log has no match (e.g. right after rotation).
+last=$($KUBECTL -n "$NS" exec deploy/flow-collector -- \
+  sh -c 'grep -F "flow metrics:" /app/archive/run.log 2>/dev/null | tail -n 1' 2>/dev/null) || true
+if [ -z "$last" ]; then
+  last=$($KUBECTL -n "$NS" exec deploy/flow-collector -- \
+    sh -c 'grep -F "flow metrics:" /app/archive/run.log.1 2>/dev/null | tail -n 1' 2>/dev/null) || true
+fi
 
 # 2. In-window: metrics recency
 if [ "$in_window" = 1 ]; then
@@ -146,22 +133,25 @@ if [ "$dow" -le 5 ] && [ "$et_hm" -ge 1625 ]; then
     if ! [[ "$manifest_trades" =~ ^[0-9]+$ ]] || [ "$manifest_trades" -lt "$FLOW_MIN_TRADES" ]; then
       problems+=("manifest trades=${manifest_trades} < FLOW_MIN_TRADES=${FLOW_MIN_TRADES} for $today")
     fi
-    has_summary=$(echo "$run_log" | python3 -c '
+    has_summary_raw=$($KUBECTL -n "$NS" exec deploy/flow-collector -- \
+      sh -c 'grep -F "flow session summary:" /app/archive/run.log 2>/dev/null | tail -n 1' 2>/dev/null) || true
+    has_summary=$(printf '%s\n' "$has_summary_raw" | python3 -c "
 import sys, json
-found = "no"
+found = 'no'
+today = '$today'
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     try:
         d = json.loads(line)
-        if str(d.get("msg", "")).startswith("flow session summary:"):
-            found = "yes"
-            break
+        if str(d.get('msg', '')).startswith('flow session summary:'):
+            if d.get('ts', '')[:10] == today:
+                found = 'yes'
     except Exception:
         pass
 print(found)
-')
+")
     if [ "$has_summary" != "yes" ]; then
       problems+=("no 'flow session summary:' line in run.log for $today")
     fi

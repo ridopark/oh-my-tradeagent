@@ -487,6 +487,10 @@ async def _run() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     heartbeat_path = state_dir / "heartbeat"
 
+    run_log_handler = attach_run_log(state_dir)
+    if run_log_handler is not None:
+        log.info("run log: %s", state_dir / "run.log")
+
     universe = universe_from_env()
     data = AlpacaDataClient(
         key_id=required("APCA_API_KEY_ID_DATA"),
@@ -509,9 +513,6 @@ async def _run() -> int:
         heartbeat=heartbeat_path.touch,
         state_path=state_dir / "cursors.json",
     )
-    run_log_handler = attach_run_log(state_dir)
-    if run_log_handler is not None:
-        log.info("run log: %s", state_dir / "run.log")
 
     log.info(
         "darkpool collector starting (dry_run=%s poll=%ss symbols=%d lookback=%smin window=%s-%s ET)",

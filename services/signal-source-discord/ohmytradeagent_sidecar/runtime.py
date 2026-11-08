@@ -27,6 +27,20 @@ def setup_logging(level: str, name: str = "ohmytradeagent_sidecar") -> logging.L
     return logging.getLogger(name)
 
 
+class _HttpxFilter(logging.Filter):
+    """Drop httpx records below WARNING from the durable run log.
+
+    httpx logs one INFO line per outgoing HTTP request; at OPRA quote rates this
+    floods the run log with noise.  WARNING and above (e.g. connection errors) are
+    still written.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        if record.name == "httpx" or record.name.startswith("httpx."):
+            return record.levelno >= logging.WARNING
+        return True
+
+
 class _JsonFormatter(logging.Formatter):
     """Single-line JSON formatter for the durable run log."""
 
@@ -80,6 +94,7 @@ def attach_run_log(
         return None
 
     handler.setFormatter(_JsonFormatter())
+    handler.addFilter(_HttpxFilter())
     root = logging.getLogger()
     handler.setLevel(root.level)
     root.addHandler(handler)
