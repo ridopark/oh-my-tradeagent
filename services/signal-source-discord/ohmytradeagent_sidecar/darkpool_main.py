@@ -14,11 +14,14 @@ NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per
 ``X-Ratelimit-Remaining`` runs low, and a 429 ending the cycle after a short sleep.
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
-nothing; flipping that env is the go-live. Cursors are saved to ``STATE_DIR/cursors.json`` after
-every cycle whose batch was stored (#1032). The state dir is an emptyDir, so this survives a
-CONTAINER restart (a liveness kill) but not a new pod. On start a symbol with a saved cursor resumes
-at ``bucket5m(last_t)``; one without starts at ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)``
-(default 10 min). Either way the start is a 5-minute boundary and no trade before it is ever
+nothing; flipping that env is the go-live. Cursors and the round-robin start symbol are saved to
+``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is an
+emptyDir, so this survives a CONTAINER restart (a liveness kill) but not a new pod. On start a
+symbol with a saved cursor resumes at ``bucket5m(last_t)``; one without starts at
+``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min). The saved ``next_start`` means the
+first cycle after a restart begins at the universe position the previous cycle stopped at, so a
+fixed universe order cannot starve its tail across restarts. Either way the start is a 5-minute
+boundary and no trade before it is ever
 aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
 partial window (a restart at 10:07 rebuilding 09:55 from 09:57 on) would OVERWRITE the complete
 row the previous process had stored — one corrupted bucket per symbol on every image roll.
@@ -371,25 +374,47 @@ class DarkpoolCollector:
 
     def _load_cursors(self) -> None:
         """Resume each saved symbol at the START of its cursor's bucket: that bucket is re-read
-        whole, so its re-posted bar cannot overwrite a complete row with a partial one."""
+        whole, so its re-posted bar cannot overwrite a complete row with a partial one.
+
+        Accepts both the old flat ``{sym: ts}`` shape and the new
+        ``{"cursors": {sym: ts}, "next_start": sym}`` shape written since #1041 Step 2."""
         if self._state_path is None or not self._state_path.exists():
             return
         try:
             saved = json.loads(self._state_path.read_text())
-            starts = {sym: bucket5m(parse_ts(ts)) for sym, ts in saved.items()}
+            # New shape: {"cursors": {sym: ts}, "next_start": sym}
+            # Old flat shape: {sym: ts}  — no "cursors" key
+            if "cursors" in saved:
+                cursor_map = saved["cursors"]
+                next_sym = saved.get("next_start", "")
+            else:
+                cursor_map = saved
+                next_sym = ""
+            starts = {sym: bucket5m(parse_ts(ts)) for sym, ts in cursor_map.items()}
         except Exception as exc:  # noqa: BLE001 - a bad file means a cold start, never a crash
             self._log.warning("darkpool cursor state unreadable, starting cold: %r", exc)
             return
         for sym, start in starts.items():
             self.floors[sym] = start
             self.cursors[sym] = Cursor.start(start)
+        # Map saved symbol name to index; fall back to 0 when absent or no longer in the universe.
+        if next_sym and next_sym in self._universe:
+            self._next_start = self._universe.index(next_sym)
+        else:
+            self._next_start = 0
         self._log.info("darkpool cursor state loaded for %d symbols", len(starts))
 
     def _save_cursors(self) -> None:
         if self._state_path is None:
             return
+        # Save next_start as a symbol name so a universe edit cannot misplace it.
+        next_sym = self._universe[self._next_start] if self._universe else ""
+        payload = {
+            "cursors": {sym: format_ts(c.last_t) for sym, c in self.cursors.items()},
+            "next_start": next_sym,
+        }
         tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({sym: format_ts(c.last_t) for sym, c in self.cursors.items()}))
+        tmp.write_text(json.dumps(payload))
         tmp.replace(self._state_path)
 
     async def _fetch(self, symbol: str, cursor: Cursor, end: datetime):

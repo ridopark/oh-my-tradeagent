@@ -1112,3 +1112,108 @@ async def test_page_cap_boundary_inside_one_instant_is_not_double_counted():
     last_bar = all_bars[-1]
     # t1 + t2 + t3 each exactly once = 3; a double-count of t2 would yield 4
     assert last_bar["total_trades"] == 3, f"expected 3 total_trades, got {last_bar['total_trades']}"
+
+
+# ---------------------------------------------------------------------------
+# #1041 Step 2 — persisted round-robin start
+# ---------------------------------------------------------------------------
+
+
+async def test_restart_resumes_the_round_robin_at_the_saved_symbol(tmp_path):
+    """Universe A1..A5, max_requests=3; cycle 1 of process 1 stops after A3 (budget).
+    A NEW collector from the same state_path: its first cycle's trades requests start at A4,
+    then A5, then A1 — not at A1, A2, A3."""
+    state = tmp_path / "cursors.json"
+    alpaca = FakeAlpaca()
+    bff = FakeBff()
+    syms = ["A1", "A2", "A3", "A4", "A5"]
+    for s in syms:
+        alpaca.trades[s] = [raw("2026-10-29T13:38:00Z", 1)]
+    # process 1: budget=3 for 5 symbols → stops after A3, saves next_start=A4
+    p1 = DarkpoolCollector(
+        data=alpaca.client(max_requests=3),
+        ingest=bff.client(),
+        universe=syms,
+        min_notional=200_000,
+        min_size=10_000,
+        lookback_minutes=10,
+        dry_run=False,
+        log=LOG,
+        clock=Clock(NOW),
+        state_path=state,
+    )
+    stats1 = await p1.cycle()
+    assert stats1.skipped == 2
+    assert state.exists()
+    # process 2: load from state, full budget; first requests must be A4, A5, A1 in that order
+    alpaca.requests.clear()
+    p2 = DarkpoolCollector(
+        data=alpaca.client(max_requests=2000),
+        ingest=bff.client(),
+        universe=syms,
+        min_notional=200_000,
+        min_size=10_000,
+        lookback_minutes=10,
+        dry_run=False,
+        log=LOG,
+        clock=Clock(NOW),
+        state_path=state,
+    )
+    await p2.cycle()
+    trades_syms = [
+        r.url.params["symbols"]
+        for r in alpaca.requests
+        if r.url.path == "/v2/stocks/trades"
+    ]
+    assert trades_syms[:3] == ["A4", "A5", "A1"]
+
+
+async def test_flat_cursor_file_from_before_1041_still_loads(tmp_path, caplog):
+    """Old flat {sym: ts} format loads without warnings; floors and _next_start are correct;
+    after one stored cycle the saved file has the new {"cursors": ..., "next_start": ...} shape."""
+    state = tmp_path / "cursors.json"
+    state.write_text('{"QQQ": "2026-10-29T13:38:00Z"}')
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    seed_kept_print(alpaca)
+    with caplog.at_level(logging.WARNING, logger=LOG.name):
+        collector = make_persistent(alpaca, bff, state, Clock(NOW))
+    assert collector.floors["QQQ"] == parse_ts("2026-10-29T13:35:00Z")
+    assert "unreadable" not in caplog.text
+    assert collector._next_start == 0
+    # after one successful cycle the saved file must have the new shape
+    await collector.cycle()
+    saved = json.loads(state.read_text())
+    assert set(saved.keys()) == {"cursors", "next_start"}
+    assert "QQQ" in saved["cursors"]
+
+
+async def test_saved_next_start_not_in_the_universe_starts_at_the_head(tmp_path, caplog):
+    """A saved next_start that names a symbol no longer in the universe falls back to index 0;
+    no crash, no 'unreadable' warning."""
+    state = tmp_path / "cursors.json"
+    state.write_text('{"cursors": {"QQQ": "2026-10-29T13:38:00Z"}, "next_start": "GONE"}')
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+    with caplog.at_level(logging.WARNING, logger=LOG.name):
+        collector = make_persistent(alpaca, bff, state, Clock(NOW))
+    assert "unreadable" not in caplog.text
+    assert collector._next_start == 0
+    alpaca.requests.clear()
+    await collector.cycle()
+    # first request is for the universe's head (QQQ is the only symbol here)
+    assert alpaca.requests[0].url.params["symbols"] == "QQQ"
+
+
+async def test_flat_cursor_file_with_subsecond_timestamp_loads(tmp_path, caplog):
+    """The real live file has sub-second precision timestamps like '2026-11-06T21:09:04.282812Z'.
+    The flat-file loader must parse them and round down to their 5-minute bucket."""
+    state = tmp_path / "cursors.json"
+    # Synthetic value that mirrors the real file's shape (sub-second precision).
+    state.write_text('{"QQQ": "2026-11-06T21:09:04.282812Z"}')
+    alpaca, bff = FakeAlpaca(), FakeBff()
+    alpaca.trades["QQQ"] = [raw("2026-10-29T13:38:00Z", 1)]
+    with caplog.at_level(logging.WARNING, logger=LOG.name):
+        collector = make_persistent(alpaca, bff, state, Clock(NOW))
+    assert "unreadable" not in caplog.text
+    # bucket5m("2026-11-06T21:09:04.282812Z") = 2026-11-06T21:05:00Z
+    assert collector.floors["QQQ"] == parse_ts("2026-11-06T21:05:00Z")
