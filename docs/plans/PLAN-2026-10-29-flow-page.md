@@ -168,7 +168,7 @@ throws (copy `DarkpoolRetention`, including its load-bearing `@Autowired`). The 
 `GET /internal/flow/watchlist?date=` (same prefix, same token) returns today's watchlist tickers via the
 existing `WatchlistDailyReader` so the collector can quote the day's names without a tenant credential;
 `GET /api/flow/orders?date=&ticker=&min_premium=&labels=sweep,block,multi_leg,unusual&right=C|P&side=&dte_min=&dte_max=&before=&before_id=&limit=`
-(session date in ET bounds `[09:25, 16:20)`, defaults to today ET when omitted, newest first, limit
+(several `labels` combine with OR, decided 2026-11-08; session date in ET bounds `[09:25, 16:20)`, defaults to today ET when omitted, newest first, limit
 default 200 max 500; paging uses a compound cursor: `before` = last row's `first_ts` RFC-3339,
 `before_id` = last row's auto-increment `id`; response includes `next_before` + `next_before_id` when
 a further page exists; amended at review 2026-10-31) and `GET /api/flow/summary?date=&ticker=`

@@ -323,24 +323,21 @@ public class FlowRepository {
       binds.add(query.minPremium());
     }
     if (query.labels() != null) {
+      // Labels combine with OR (decided 2026-11-08): sweep+block means "sweeps or blocks".
+      List<String> any = new ArrayList<>();
       for (String label : query.labels()) {
         switch (label) {
-          case "sweep" -> {
-            sql.append(" AND sweep = true");
-          }
-          case "block" -> {
-            sql.append(" AND block = true");
-          }
-          case "multi_leg" -> {
-            sql.append(" AND multi_leg = true");
-          }
-          case "unusual" -> {
-            sql.append(" AND unusual = true");
-          }
+          case "sweep" -> any.add("sweep = true");
+          case "block" -> any.add("block = true");
+          case "multi_leg" -> any.add("multi_leg = true");
+          case "unusual" -> any.add("unusual = true");
           default -> {
             /* unknown labels are ignored */
           }
         }
+      }
+      if (!any.isEmpty()) {
+        sql.append(" AND (").append(String.join(" OR ", any)).append(")");
       }
     }
     if (query.right() != null) {
