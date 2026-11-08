@@ -607,9 +607,10 @@ async def test_trades_pagination_joins_pages_in_order():
     client = fake.client()
     start = datetime(2026, 10, 29, 13, 30, tzinfo=UTC)
     end = datetime(2026, 10, 29, 13, 31, tzinfo=UTC)
-    trades = await client.trades("QQQ", start, end)
+    trades, truncated = await client.trades("QQQ", start, end)
     assert [t.trade_id for t in trades] == [1, 2, 3, 4]
     assert all(t.symbol == "QQQ" for t in trades)
+    assert truncated is False
     assert client.requests_this_cycle == 3
     tokens = [r.url.params.get("page_token") for r in fake.requests]
     assert tokens == [None, "p1", "p2"]
@@ -689,7 +690,7 @@ async def test_low_ratelimit_remaining_stops_the_cycle_after_the_current_respons
     fake.headers = {"X-Ratelimit-Remaining": "2000"}
     await client.trades("QQQ", start, end)  # at the floor: fine
     fake.headers = {"X-Ratelimit-Remaining": "1999"}
-    trades = await client.trades("QQQ", start, end)  # the response that crossed it is kept...
+    trades, _trunc = await client.trades("QQQ", start, end)  # the response that crossed it is kept...
     assert [t.trade_id for t in trades] == [1]
     with pytest.raises(BudgetExhausted) as exc:  # ...and the NEXT request is refused
         await client.trades("QQQ", start, end)
@@ -758,3 +759,30 @@ def test_aggregate_same_id_d_prints_use_their_own_side():
     (bar,) = [acc.to_wire() for acc in accs.values()]
     assert bar["buy_volume"] == 400
     assert bar["sell_volume"] == 400
+
+
+async def test_trades_stops_at_the_page_cap_and_reports_more():
+    """With max_pages=2 on a 3-page response: only pages 1-2 are fetched, truncated=True,
+    exactly 2 requests issued. With max_pages=3 all pages are fetched, truncated=False."""
+    fake = FakeAlpaca()
+    fake.pages = [
+        [raw("2026-10-29T13:30:00Z", 1), raw("2026-10-29T13:30:01Z", 2)],
+        [raw("2026-10-29T13:30:02Z", 3)],
+        [raw("2026-10-29T13:30:03Z", 4)],
+    ]
+    start = datetime(2026, 10, 29, 13, 30, tzinfo=UTC)
+    end = datetime(2026, 10, 29, 13, 31, tzinfo=UTC)
+
+    # 2-page cap: only ids 1,2,3 (pages 0 and 1); truncated because page_token still exists
+    client2 = fake.client(max_pages=2)
+    trades2, truncated2 = await client2.trades("QQQ", start, end)
+    assert [t.trade_id for t in trades2] == [1, 2, 3]
+    assert truncated2 is True
+    assert client2.requests_this_cycle == 2  # exactly 2 requests, no third
+
+    # 3-page cap: all ids, no truncation
+    fake.requests.clear()
+    client3 = fake.client(max_pages=3)
+    trades3, truncated3 = await client3.trades("QQQ", start, end)
+    assert [t.trade_id for t in trades3] == [1, 2, 3, 4]
+    assert truncated3 is False

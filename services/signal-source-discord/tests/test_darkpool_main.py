@@ -915,3 +915,200 @@ async def test_same_id_d_prints_at_the_same_instant_are_both_posted():
     (bar,) = body["bars"]
     assert bar["buy_volume"] == 400
     assert bar["sell_volume"] == 500
+
+
+# ---------------------------------------------------------------------------
+# #1041 — per-symbol page cap
+# ---------------------------------------------------------------------------
+
+
+class FakeAlpacaPaged(FakeAlpaca):
+    """Extends FakeAlpaca with optional page_size: splits each symbol's trades list into pages
+    of that size, returning next_page_token so the client can paginate. Default None keeps
+    the existing one-page-per-symbol behaviour so all prior tests are untouched."""
+
+    def __init__(self, page_size: int | None = None) -> None:
+        super().__init__()
+        self.page_size = page_size
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        sym = request.url.params["symbols"]
+        if self.fail.get(sym):
+            nxt = self.fail[sym].pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return httpx.Response(nxt, json={"message": "injected"})
+        if request.url.path == "/v2/stocks/trades":
+            if self.page_size is None:
+                # original one-page behaviour
+                start = parse_ts(request.url.params["start"])
+                rows = [
+                    r
+                    for r in self.trades.get(sym, [])
+                    if not self.respect_start or parse_ts(r["t"]) >= start
+                ]
+                return httpx.Response(200, json={"trades": {sym: rows}, "next_page_token": None})
+            # multi-page: use page_token as an integer index into chunks
+            start = parse_ts(request.url.params["start"])
+            all_rows = [
+                r
+                for r in self.trades.get(sym, [])
+                if not self.respect_start or parse_ts(r["t"]) >= start
+            ]
+            ps = self.page_size
+            token = request.url.params.get("page_token")
+            idx = int(token[1:]) if token else 0
+            chunk = all_rows[idx * ps : (idx + 1) * ps]
+            has_more = (idx + 1) * ps < len(all_rows)
+            nxt = f"p{idx + 1}" if has_more else None
+            return httpx.Response(200, json={"trades": {sym: chunk}, "next_page_token": nxt})
+        if request.url.path == "/v2/stocks/quotes":
+            end = parse_ts(request.url.params["end"])
+            rows = sorted(
+                (r for r in self.quotes.get(sym, []) if parse_ts(r["t"]) <= end),
+                key=lambda r: r["t"],
+                reverse=True,
+            )[:1]
+            return httpx.Response(200, json={"quotes": {sym: rows}, "next_page_token": None})
+        return httpx.Response(404)
+
+
+async def test_issue_1041_backlog_symbol_drains_over_cycles_without_starving_the_rest():
+    """Universe [AMZN, ZS]; AMZN has 10 trades 1 s apart served with page_size=2; ZS has one
+    trade; max_pages=2.
+
+    Cycle 1: AMZN issues exactly 2 trades-pages (not a third), stats.truncated==1,
+    stats.skipped==0, the posted batch has bars for BOTH symbols, AMZN bar total_trades==4,
+    cursor at trade 4's ts.
+
+    Cycle 2: AMZN's first request has start == trade 4's ts (no page_token); cursor at trade 8.
+
+    Cycle 3: stats.truncated==0, AMZN bar cumulative total_trades==10, total_volume == sum of
+    all 10 sizes. ZS posted exactly once (in cycle 1)."""
+    alpaca = FakeAlpacaPaged(page_size=2)
+    bff = FakeBff()
+
+    # 10 AMZN trades 1 s apart, each size=100
+    t0 = "2026-10-29T13:38:{:02d}Z"
+    alpaca.trades["AMZN"] = [raw(t0.format(i), i + 1) for i in range(10)]
+    alpaca.quotes["AMZN"] = []
+    # 1 ZS trade
+    alpaca.trades["ZS"] = [raw("2026-10-29T13:38:00Z", 100)]
+    alpaca.quotes["ZS"] = []
+
+    universe = ["AMZN", "ZS"]
+
+    def make(fa):
+        return DarkpoolCollector(
+            data=fa.client(max_requests=2000, max_pages=2),
+            ingest=bff.client(),
+            universe=universe,
+            min_notional=200_000,
+            min_size=10_000,
+            lookback_minutes=10,
+            dry_run=False,
+            log=LOG,
+            clock=Clock(NOW),
+        )
+
+    collector = make(alpaca)
+
+    # --- Cycle 1 ---
+    stats1 = await collector.cycle()
+    trades_requests_c1 = [
+        r for r in alpaca.requests if r.url.path == "/v2/stocks/trades" and r.url.params["symbols"] == "AMZN"
+    ]
+    assert len(trades_requests_c1) == 2, "AMZN must issue exactly 2 trades requests (page cap)"
+    assert stats1.truncated == 1
+    assert stats1.skipped == 0
+    body1 = bff.bodies()[0]
+    syms_in_bars1 = {b["symbol"] for b in body1["bars"]}
+    assert "AMZN" in syms_in_bars1 and "ZS" in syms_in_bars1, "both symbols in same cycle"
+    amzn_bar1 = next(b for b in body1["bars"] if b["symbol"] == "AMZN")
+    assert amzn_bar1["total_trades"] == 4
+    amzn_cursor1 = collector.cursors["AMZN"]
+    trade4_ts = parse_ts(t0.format(3))  # 0-indexed: trade 4 is index 3
+    assert amzn_cursor1.last_t == trade4_ts
+
+    # --- Cycle 2 ---
+    # start=13:38:03Z; FakeAlpacaPaged returns 4 raw trades (indices 3-6), but trade4@03Z is in
+    # seen_at_last_t -> dropped. Commits trade5..trade7 (3 trades). Cursor -> 13:38:06Z.
+    alpaca.requests.clear()
+    await collector.cycle()
+    amzn_requests_c2 = [
+        r for r in alpaca.requests if r.url.path == "/v2/stocks/trades" and r.url.params["symbols"] == "AMZN"
+    ]
+    first_amzn_req_c2 = amzn_requests_c2[0]
+    assert first_amzn_req_c2.url.params.get("page_token") is None, "must start fresh, not with a token"
+    assert first_amzn_req_c2.url.params["start"] == "2026-10-29T13:38:03Z"  # trade 4's ts
+    amzn_cursor2 = collector.cursors["AMZN"]
+    trade7_ts = parse_ts(t0.format(6))  # trade7 is index 6 (13:38:06Z); trade4 at idx3 was dropped
+    assert amzn_cursor2.last_t == trade7_ts
+
+    # --- Cycle 3 ---
+    alpaca.requests.clear()
+    stats3 = await collector.cycle()
+    assert stats3.truncated == 0
+    amzn_bar3 = next(b for b in bff.bodies()[-1]["bars"] if b["symbol"] == "AMZN")
+    assert amzn_bar3["total_trades"] == 10
+    assert amzn_bar3["total_volume"] == 10 * 100  # each trade size=100
+
+    # ZS posted only once (cycle 1 only; nothing new in cycles 2+3)
+    zs_prints = [
+        p for body in bff.bodies() for p in body["prints"] if p["symbol"] == "ZS"
+    ]
+    assert len(zs_prints) == 0  # ZS trades are below min_notional/min_size, no kept prints
+    zs_bars_all = [b for body in bff.bodies() for b in body["bars"] if b["symbol"] == "ZS"]
+    assert zs_bars_all[0]["total_trades"] == 1
+
+
+async def test_page_cap_boundary_inside_one_instant_is_not_double_counted():
+    """Two AMZN trades at the SAME ts (trade_id 2 and 3) split across the page boundary.
+
+    Setup: page_size=2, max_pages=1.
+      trades: [t1@T-1s, t2@T, t3@T]  (3 trades total, page_size=2)
+      Page 0 = [t1, t2]; page 1 = [t3].
+
+    Cycle 1: page 0 is fetched (truncated). Cursor advances to T with seen={t2}.
+    Cycle 2: start=T -> all_rows filtered >= T is [t2, t3]; page 0 = [t2, t3] (no more pages).
+      filter_new drops t2 (in seen_at_last_t), commits t3.
+    After two cycles the bar's total_trades == 3 (t1 + t2 + t3, each exactly once).
+    If t2 were double-counted, total_trades would be 4."""
+    alpaca = FakeAlpacaPaged(page_size=2)
+    bff = FakeBff()
+
+    same_ts = "2026-10-29T13:38:00Z"
+    before_ts = "2026-10-29T13:37:59Z"
+    alpaca.trades["AMZN"] = [
+        raw(before_ts, 1),   # t1: one second before the shared instant, ends up at end of page 0
+        raw(same_ts, 2),     # t2: first trade at same_ts, ends up at end of page 0 -> cursor sees it
+        raw(same_ts, 3),     # t3: second trade at same_ts, on page 1 -> fetched next cycle
+    ]
+    alpaca.quotes["AMZN"] = []
+
+    collector = DarkpoolCollector(
+        data=alpaca.client(max_requests=2000, max_pages=1),
+        ingest=bff.client(),
+        universe=["AMZN"],
+        min_notional=200_000,
+        min_size=10_000,
+        lookback_minutes=10,
+        dry_run=False,
+        log=LOG,
+        clock=Clock(NOW),
+    )
+
+    # Cycle 1: page 0 = [t1, t2], truncated; cursor advances to same_ts with seen={t2}
+    await collector.cycle()
+    assert collector.cursors["AMZN"].last_t == parse_ts(same_ts)
+    assert 2 in {t.trade_id for t in collector.cursors["AMZN"].seen_at_last_t}
+
+    # Cycle 2: start=same_ts, all_rows[>=same_ts]=[t2,t3], page 0=[t2,t3], no next_page_token;
+    # filter_new drops t2 (seen_at_last_t), commits t3 only
+    await collector.cycle()
+
+    all_bars = [b for body in bff.bodies() for b in body["bars"] if b["symbol"] == "AMZN"]
+    last_bar = all_bars[-1]
+    # t1 + t2 + t3 each exactly once = 3; a double-count of t2 would yield 4
+    assert last_bar["total_trades"] == 3, f"expected 3 total_trades, got {last_bar['total_trades']}"
