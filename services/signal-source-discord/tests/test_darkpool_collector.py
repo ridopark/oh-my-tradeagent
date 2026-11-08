@@ -690,7 +690,7 @@ async def test_low_ratelimit_remaining_stops_the_cycle_after_the_current_respons
     fake.headers = {"X-Ratelimit-Remaining": "2000"}
     await client.trades("QQQ", start, end)  # at the floor: fine
     fake.headers = {"X-Ratelimit-Remaining": "1999"}
-    trades, _trunc = await client.trades("QQQ", start, end)  # the response that crossed it is kept...
+    trades, _trunc = await client.trades("QQQ", start, end)  # the response that crossed it is kept
     assert [t.trade_id for t in trades] == [1]
     with pytest.raises(BudgetExhausted) as exc:  # ...and the NEXT request is refused
         await client.trades("QQQ", start, end)

@@ -10,7 +10,7 @@ here is on a trading path.
 
 NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per-cycle request cap
 (``DARKPOOL_MAX_REQUESTS``, default 1000), a per-symbol page cap (``MAX_TRADE_PAGES``, default 10,
-~44 MiB peak — see ``darkpool_collector`` for the memory measurement), a stop when
+~43 MiB whole-cycle peak — see ``darkpool_collector`` for the memory measurement), a stop when
 ``X-Ratelimit-Remaining`` runs low, and a 429 ending the cycle after a short sleep.
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
@@ -21,8 +21,7 @@ symbol with a saved cursor resumes at ``bucket5m(last_t)``; one without starts a
 ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min). The saved ``next_start`` means the
 first cycle after a restart begins at the universe position the previous cycle stopped at, so a
 fixed universe order cannot starve its tail across restarts. Either way the start is a 5-minute
-boundary and no trade before it is ever
-aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
+boundary and no trade before it is ever aggregated or posted. That alignment is what makes a re-read SAFE: the BFF upserts a bar WHOLE on (symbol, bucket), so a bucket rebuilt from a
 partial window (a restart at 10:07 rebuilding 09:55 from 09:57 on) would OVERWRITE the complete
 row the previous process had stored — one corrupted bucket per symbol on every image roll.
 Prints dedupe on (symbol, ts, trade_id), so re-reading them is harmless.
@@ -43,6 +42,8 @@ of page-capped symbols. When the request-budget cap stops a cycle, the NEXT cycl
 symbol that was cut (round-robin), so a fixed universe order cannot starve its tail; a cycle that
 made NO progress at all (the very first symbol's trades pages already exceeded the budget) logs an
 error and rotates past that symbol so it cannot pin the whole universe.
+A symbol with more than ``MAX_TRADE_PAGES``×10k trades at a single instant cannot advance
+(theoretical; logged each cycle).
 
 Cursors persist across the poll window: Monday's first cycle fetches from Friday's ~19:59 cursor,
 which is a small, cheap read (the tape between is empty); the floor only matters right after a
@@ -328,6 +329,7 @@ class DarkpoolCollector:
                     len(fresh),
                     stats.skipped,
                 )
+                del fresh, sides, quotes
                 break
             if page_truncated:
                 stats.truncated += 1
@@ -339,6 +341,7 @@ class DarkpoolCollector:
                     len(fresh),
                     format_ts(self.cursors[symbol].last_t),
                 )
+            del fresh, sides, quotes
         bars = [self.accumulators[k].to_wire() for k in sorted(touched)]
         prune_accumulators(self.accumulators)
         stats.requests = self._data.requests_this_cycle
@@ -382,8 +385,6 @@ class DarkpoolCollector:
             return
         try:
             saved = json.loads(self._state_path.read_text())
-            # New shape: {"cursors": {sym: ts}, "next_start": sym}
-            # Old flat shape: {sym: ts}  — no "cursors" key
             if "cursors" in saved:
                 cursor_map = saved["cursors"]
                 next_sym = saved.get("next_start", "")
@@ -408,7 +409,7 @@ class DarkpoolCollector:
         if self._state_path is None:
             return
         # Save next_start as a symbol name so a universe edit cannot misplace it.
-        next_sym = self._universe[self._next_start] if self._universe else ""
+        next_sym = self._universe[self._next_start]
         payload = {
             "cursors": {sym: format_ts(c.last_t) for sym, c in self.cursors.items()},
             "next_start": next_sym,

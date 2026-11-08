@@ -63,7 +63,9 @@ DEFAULT_MAX_REQUESTS = 1_000
 #   ~6.5 MiB transient per page (parsed JSON + response body)
 #   Pod memory limit: 256 Mi; idle process: ~40 MiB
 #   Cap 10 pages => <=100,000 trades => ~37 MiB retained + ~6.5 MiB transient peak
-#     => ~44 MiB peak => <130 MiB with a 2x fragmentation allowance  (20 pages ~80 MiB: too close)
+#     => ~43 MiB whole-cycle peak (cycle() del's fresh/sides/quotes before the next symbol's fetch,
+#        so previous symbol's data does not accumulate; measured 42.5 MiB, was 78.2 MiB without del)
+#     => <130 MiB with a 2x fragmentation allowance  (20 pages ~80 MiB: too close)
 MAX_TRADE_PAGES = 10
 # Stop the cycle when the account's X-Ratelimit-Remaining (10,000/min, shared with the
 # market-data pod and the quote collector) drops below this.
