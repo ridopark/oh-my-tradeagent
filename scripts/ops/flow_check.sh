@@ -83,7 +83,7 @@ fi
 # 2. In-window: metrics recency
 if [ "$in_window" = 1 ]; then
   if [ -z "$last" ]; then
-    problems+=("no 'flow metrics:' line found in the last 200 lines of run.log inside the window")
+    problems+=("no 'flow metrics:' line found in run.log inside the window")
   else
     age_secs=$(echo "$last" | python3 -c '
 import sys, json, datetime

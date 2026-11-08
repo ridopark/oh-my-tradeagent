@@ -466,8 +466,12 @@ class FlowSession:
         state: SessionState,
         ws: Any,
         stop_event: asyncio.Event | None = None,
+        on_established: Callable[[], None] | None = None,
     ) -> None:
         """Run one WebSocket session from greeting through trades until disconnection.
+
+        ``on_established`` is called once, right after authentication succeeds, so the
+        caller can close the outage gap at the moment data can flow again.
 
         Returns normally when ``in_flow_window`` transitions to False (clean session end)
         or when ``stop_event`` is set (SIGTERM).  Raises ``_StreamError`` on any
@@ -517,6 +521,8 @@ class FlowSession:
         if not authenticated:
             raise _StreamError("no auth acknowledgement")
         self._log.info("flow: authenticated")
+        if on_established is not None:
+            on_established()
 
         # Populate initial quote set via REST (non-blocking: background task).
         _rotation_task: asyncio.Task | None = asyncio.create_task(
@@ -1043,6 +1049,20 @@ async def run_loop(
             free_floor_bytes,
         )
 
+    def _close_open_gap() -> None:
+        # Called when a session authenticates: `now` is this iteration's reconnect time.
+        nonlocal last_disconnect_ts, last_disconnect_reason
+        if last_disconnect_ts is None:
+            return
+        state.metrics.gap_count += 1
+        state.metrics.gap_seconds += (
+            now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
+        ).total_seconds()
+        if state.archiver:
+            state.archiver.record_gap(last_disconnect_ts, _fmt_ts(now), last_disconnect_reason)
+        last_disconnect_ts = None
+        last_disconnect_reason = "reconnect"
+
     while True:
         # SIGTERM: end any active session and return normally.
         if stop_event is not None and stop_event.is_set():
@@ -1081,19 +1101,10 @@ async def run_loop(
         try:
             log.info("flow: connecting to %s", WS_URL)
             async with (connect_fn or websockets.connect)(WS_URL, **connect_args) as ws:
-                await session.run(state, ws, stop_event=stop_event)
+                await session.run(
+                    state, ws, stop_event=stop_event, on_established=_close_open_gap
+                )
 
-            # session.run() returned cleanly (window closed or SIGTERM): close any open gap.
-            # `now` was captured at the top of this loop iteration — that is the reconnect time.
-            if last_disconnect_ts is not None:
-                reconnect_ts = _fmt_ts(now)
-                state.metrics.gap_count += 1
-                state.metrics.gap_seconds += (
-                    now - datetime.fromisoformat(last_disconnect_ts.replace("Z", "+00:00"))
-                ).total_seconds()
-                if state.archiver:
-                    state.archiver.record_gap(last_disconnect_ts, reconnect_ts, last_disconnect_reason)
-                last_disconnect_ts = None
             # session end
             _end_session(session, state, _clock(), log, build)
             if stop_event is not None and stop_event.is_set():
@@ -1116,6 +1127,7 @@ async def run_loop(
             state.metrics.reconnects += 1
             if last_disconnect_ts is None:
                 last_disconnect_ts = _fmt_ts(_clock())
+                last_disconnect_reason = "reconnect"
             heartbeat_path.touch()
             await _sleep(reconnect_wait)
             reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)
@@ -1127,6 +1139,7 @@ async def run_loop(
             state.metrics.reconnects += 1
             if last_disconnect_ts is None:
                 last_disconnect_ts = _fmt_ts(_clock())
+                last_disconnect_reason = "reconnect"
             heartbeat_path.touch()
             await _sleep(reconnect_wait)
             reconnect_wait = min(reconnect_wait + RECONNECT_BASE_SECS, RECONNECT_MAX_SECS)

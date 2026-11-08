@@ -13,7 +13,7 @@ import logging
 import pathlib
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -2081,3 +2081,63 @@ async def test_run_loop_startup_archive_dir_logged_unwritable(caplog, tmp_path):
     assert "writable=False" in startup_lines[0], (
         f"expected writable=False in: {startup_lines[0]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_loop_mid_session_drop_records_its_own_gap(tmp_path):
+    """406 → session authenticates then drops → session authenticates to the close.
+
+    Two separate gaps: the 406 outage closed when the first session authenticated, and the
+    drop closed when the second did. The drop must not reuse the first outage's start.
+    """
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    closing = [False]
+    tick = [0]
+
+    def clock() -> datetime:
+        if closing[0]:
+            return NOW_OUT
+        tick[0] += 1
+        return NOW_IN + timedelta(minutes=tick[0])
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if closing[0] and len(sleeps) > 5:
+            raise asyncio.CancelledError
+
+    n = [0]
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        n[0] += 1
+        if n[0] == 1:
+            yield FakeWebSocket([_greeting(), _error_406()])
+        elif n[0] == 2:
+            yield FakeWebSocket([_greeting(), _auth_success(), _sub_ack()])  # then drops
+        else:
+            closing[0] = True  # the window closes during this session
+            yield FakeWebSocket([_greeting(), _auth_success(), _sub_ack()])
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+    with pytest.raises(asyncio.CancelledError):
+        await flow_main.run_loop(
+            key_id="k",
+            secret="s",
+            archive_dir=archive_dir,
+            dry_run=True,
+            heartbeat_path=heartbeat_path,
+            log=LOG,
+            connect_fn=fake_connect,
+            clock=clock,
+            sleep=fake_sleep,
+        )
+
+    manifest = json.loads(next(archive_dir.glob("*.manifest.json")).read_text())
+    gaps = manifest["gaps"]
+    assert [g["reason"] for g in gaps] == ["slot_held", "reconnect"], gaps
+    assert all(g["to"] is not None for g in gaps), gaps
+    assert gaps[0]["to"] <= gaps[1]["from"], gaps  # the drop opened a NEW gap
