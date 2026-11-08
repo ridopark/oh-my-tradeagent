@@ -15,8 +15,8 @@ NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
 nothing; flipping that env is the go-live. Cursors and the round-robin start symbol are saved to
-``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is an
-emptyDir, so this survives a CONTAINER restart (a liveness kill) but not a new pod. On start a
+``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is a
+PVC (``darkpool-state``), so cursors and the durable run log survive pod replacement. On start a
 symbol with a saved cursor resumes at ``bucket5m(last_t)``; one without starts at
 ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min). The saved ``next_start`` means the
 first cycle after a restart begins at the universe position the previous cycle stopped at, so a

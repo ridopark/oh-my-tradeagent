@@ -110,6 +110,24 @@ data:
     WDC
     ZS
 ---
+# State PVC for the dark-pool collector. Holds cursors.json (< 10 KB), heartbeat (< 1 KB), and
+# run.log (Step 1; capped at 150 MB across 3 rotations). local-path does not enforce capacity —
+# the 1 Gi value is documentation only. Replacing the previous emptyDir means cursors and the
+# durable run log survive pod replacement with no manual copy-off / copy-in after a roll.
+# Step 5 seeds the initial cursors from the pre-roll pod before the new pod starts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: darkpool-state
+  namespace: copytrade
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -119,6 +137,12 @@ metadata:
     app: darkpool-collector
 spec:
   replicas: 1
+  # Recreate: ensures only one pod writes cursors.json at a time. A rolling update would
+  # momentarily run TWO pods reading and writing the same PVC file concurrently. Cost: one
+  # missed 60-s cycle per roll; cursors make that lossless (the new pod resumes from the
+  # last saved cursor, so no dark-pool print is missed in the aggregated bars).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: darkpool-collector
@@ -187,7 +211,8 @@ spec:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: OPTIONS_CHAT_INGEST_TOKEN
-            # Writable emptyDir — owns the heartbeat the liveness probe reads.
+            # Persistent state dir (PVC darkpool-state): owns cursors.json, the heartbeat
+            # the liveness probe reads, and run.log (Step 1 durable run log).
             - name: STATE_DIR
               value: /app/state
           volumeMounts:
@@ -220,7 +245,8 @@ spec:
               memory: 256Mi
       volumes:
         - name: state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: darkpool-state
         - name: tmp
           emptyDir: {}
         - name: universe
