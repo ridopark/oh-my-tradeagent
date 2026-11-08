@@ -15,8 +15,8 @@ NEVER opens a WebSocket (see ``darkpool_collector``): REST only, with a hard per
 
 Dry-run (the default, ``DARKPOOL_DRY_RUN`` anything but ``false``) logs the batch summary and posts
 nothing; flipping that env is the go-live. Cursors and the round-robin start symbol are saved to
-``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is an
-emptyDir, so this survives a CONTAINER restart (a liveness kill) but not a new pod. On start a
+``STATE_DIR/cursors.json`` after every cycle whose batch was stored (#1032). The state dir is a
+PVC (``darkpool-state``), so cursors and the durable run log survive pod replacement. On start a
 symbol with a saved cursor resumes at ``bucket5m(last_t)``; one without starts at
 ``bucket5m(now - DARKPOOL_LOOKBACK_MINUTES)`` (default 10 min). The saved ``next_start`` means the
 first cycle after a restart begins at the universe position the previous cycle stopped at, so a
@@ -86,7 +86,7 @@ from .darkpool_collector import (
     read_universe,
     side,
 )
-from .runtime import required, setup_logging
+from .runtime import attach_run_log, required, setup_logging
 
 INGEST_PATH = "/internal/darkpool/ingest"
 # Mirrors DarkpoolIngestBatch.MAX_ROWS on the BFF; a larger batch is rejected wholesale.
@@ -487,6 +487,10 @@ async def _run() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     heartbeat_path = state_dir / "heartbeat"
 
+    run_log_handler = attach_run_log(state_dir)
+    if run_log_handler is not None:
+        log.info("run log: %s", state_dir / "run.log")
+
     universe = universe_from_env()
     data = AlpacaDataClient(
         key_id=required("APCA_API_KEY_ID_DATA"),
@@ -509,6 +513,7 @@ async def _run() -> int:
         heartbeat=heartbeat_path.touch,
         state_path=state_dir / "cursors.json",
     )
+
     log.info(
         "darkpool collector starting (dry_run=%s poll=%ss symbols=%d lookback=%smin window=%s-%s ET)",
         dry_run,
@@ -520,6 +525,9 @@ async def _run() -> int:
     )
     try:
         await run_loop(collector, heartbeat_path, poll_secs, log=log)
+    except BaseException:
+        log.exception("darkpool collector crashed")
+        raise
     finally:
         await ingest.aclose()
         await data.aclose()

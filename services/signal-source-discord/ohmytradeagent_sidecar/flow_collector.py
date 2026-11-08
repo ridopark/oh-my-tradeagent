@@ -680,7 +680,12 @@ class TapeArchiver:
             try:
                 probe_dir = self._dir if self._dir.exists() else self._dir.parent
                 self._cached_free = shutil.disk_usage(probe_dir).free
-            except OSError:
+            except OSError as exc:
+                self._log.warning(
+                    "flow archiver: disk_usage failed for %s — treating free=0 (fail closed): %s",
+                    self._dir,
+                    exc,
+                )
                 self._cached_free = 0  # unknown → fail closed
             self._last_free_check_mono = now_mono
 
@@ -722,8 +727,13 @@ class TapeArchiver:
                 self._disk_stop_ts = _fmt_ts(flush_ts)
                 self._disk_stop_reason = stop_reason
                 self._log.warning(
-                    "flow archiver: disk guard triggered (%s) — stopping archive writes",
+                    "flow archiver: disk guard triggered (%s) — stopping archive writes"
+                    " dir_size=%d cap=%d free=%d floor=%d",
                     stop_reason,
+                    self._cached_dir_size,
+                    self._cap_bytes,
+                    self._cached_free,
+                    self._free_floor_bytes,
                 )
             return
 
@@ -773,8 +783,12 @@ class TapeArchiver:
     def _gaps_append(self, from_ts: str, to_ts: str | None, reason: str) -> None:
         self.gaps.append({"from": from_ts, "to": to_ts, "reason": reason})
 
-    def close_session(self, date_str: str, window: str = "09:25-16:20", build: str = "") -> dict | None:
-        """Write the manifest for today's session and return it, or None if no file was written.
+    def close_session(self, date_str: str, window: str = "09:25-16:20", build: str = "") -> dict:
+        """Write the manifest for today's session and return it.
+
+        Always writes a manifest, even when no trades file was produced.  When no
+        file exists the manifest contains ``file: null``, ``bytes: 0``, ``sha256: null``,
+        and ``trades: 0`` so a zero-trade day is a recorded fact, not an absence.
 
         If a disk stop is still open at session close, it is recorded as a gap with
         ``to: null`` (the session ended before the disk guard lifted).
@@ -784,13 +798,19 @@ class TapeArchiver:
             self._gaps_append(self._disk_stop_ts, None, self._disk_stop_reason or "disk_write_error")
             # Do not clear _disk_stopped: it's still open.
 
-        if self._path is None or not self._path.exists():
-            return None
-        sha256 = _sha256_file(self._path)
-        manifest = {
+        if self._path is not None and self._path.exists():
+            sha256: str | None = _sha256_file(self._path)
+            file_name: str | None = self._path.name
+            file_bytes: int = self._path.stat().st_size
+        else:
+            sha256 = None
+            file_name = None
+            file_bytes = 0
+
+        manifest: dict = {
             "date": date_str,
-            "file": self._path.name,
-            "bytes": self._path.stat().st_size,
+            "file": file_name,
+            "bytes": file_bytes,
             "sha256": sha256,
             "trades": self._trades_written,
             "first_t": self._first_t,
@@ -800,7 +820,13 @@ class TapeArchiver:
             "build": build or self._build,
         }
         manifest_path = self._dir / f"{date_str}.manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "flow: manifest write failed %s: %s", manifest_path, exc
+            )
         return manifest
 
     @property

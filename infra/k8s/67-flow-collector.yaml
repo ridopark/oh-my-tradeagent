@@ -21,6 +21,11 @@
 # The collector's own disk guard (FLOW_ARCHIVE_CAP_BYTES / FLOW_ARCHIVE_FREE_FLOOR_BYTES)
 # is the real enforcer. See docs/ops/flow-archive-format.md.
 #
+# DURABLE RUN LOG. /app/archive/run.log lives on the same PVC (Step 1, #1044). It holds
+# one JSONL line per log record (connect, auth, subscribe, trade, flush, manifest, error,
+# crash) rotated at 50 MB × 2 backups. It survives pod replacement; read it with
+# `kubectl -n copytrade exec deploy/flow-collector -- tail -n 20 /app/archive/run.log`.
+#
 # DRY RUN (default "true"): archives the tape, logs metrics, posts nothing. Flip to "false"
 # after confirming the Step 1 measurement report:
 #   kubectl -n copytrade set env deploy/flow-collector FLOW_DRY_RUN=false

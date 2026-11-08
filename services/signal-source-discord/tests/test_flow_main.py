@@ -8,11 +8,12 @@ calls (quote-set population, spot prices, options contracts).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import pathlib
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -45,6 +46,10 @@ NOW_OUT = datetime(2026, 10, 29, 23, 0, tzinfo=UTC)
 # A weekend timestamp
 NOW_WEEKEND = datetime(2026, 11, 1, 14, 0, tzinfo=UTC)  # Sunday
 
+# Sentinel: when this appears in FakeWebSocket frames, recv() blocks forever
+# (simulates a hung server for handshake-timeout tests).
+_NEVER_RESOLVES = object()
+
 
 # ---------------------------------------------------------------------------
 # FakeWebSocket (moved from flow_main; production code has no test helpers)
@@ -54,7 +59,7 @@ NOW_WEEKEND = datetime(2026, 11, 1, 14, 0, tzinfo=UTC)  # Sunday
 class FakeWebSocket:
     """Minimal async context-manager fake for tests."""
 
-    def __init__(self, frames: list[bytes], *, close_after: int = -1) -> None:
+    def __init__(self, frames: list[bytes | object], *, close_after: int = -1) -> None:
         self._frames = list(frames)
         self._sent: list[bytes] = []
         self.close_after = close_after
@@ -69,8 +74,10 @@ class FakeWebSocket:
             raise websockets.exceptions.ConnectionClosed(None, None)
         if not self._frames:
             raise websockets.exceptions.ConnectionClosed(None, None)
+        if self._frames[0] is _NEVER_RESOLVES:
+            await asyncio.Event().wait()  # blocks until cancelled by wait_for
         self._count += 1
-        return self._frames.pop(0)
+        return self._frames.pop(0)  # type: ignore[return-value]
 
     async def __aenter__(self) -> FakeWebSocket:
         return self
@@ -121,6 +128,10 @@ def _quote_frame(
 
 def _error_406() -> bytes:
     return msgpack.packb([{"T": "error", "code": 406, "msg": "connection limit exceeded"}])
+
+
+def _error_500() -> bytes:
+    return msgpack.packb([{"T": "error", "code": 500, "msg": "internal server error"}])
 
 
 def make_session(
@@ -431,6 +442,7 @@ async def test_metrics_line_contains_all_required_fields(caplog):
         "rest_calls_min",
         "rolling_map",
         "gap_seconds",
+        "stream_errors=",
     ]
     frames = [
         _greeting(),
@@ -1565,3 +1577,567 @@ async def test_gap_count_uses_archiver_as_single_source(tmp_path, caplog):
         f"gaps= double-counted: expected 1 (archiver), got {m.group(1)}. "
         "Single source of truth must be archiver.gaps when archiver is present."
     )
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Flow session diagnostics
+# ---------------------------------------------------------------------------
+
+
+async def test_session_first_frame_406_raises_slot_held():
+    """A 406 as the very first frame (before any greeting) raises _SlotHeldError."""
+    session, state, ws = make_session([_error_406()])
+    with pytest.raises(_SlotHeldError):
+        await session.run(state, ws)
+
+
+async def test_session_first_frame_non_406_error_raises_stream_error():
+    """A non-406 error as the first frame raises _StreamError."""
+    session, state, ws = make_session([_error_500()])
+    with pytest.raises(_StreamError):
+        await session.run(state, ws)
+
+
+async def test_session_greeting_timeout_raises_stream_error_no_greeting(monkeypatch):
+    """When recv() never resolves for the greeting, _StreamError with 'no greeting' is raised."""
+    monkeypatch.setattr(flow_main, "HANDSHAKE_TIMEOUT_SECS", 0.05)
+    session, state, ws = make_session([_NEVER_RESOLVES])
+    with pytest.raises(_StreamError, match="no greeting"):
+        await session.run(state, ws)
+
+
+async def test_session_auth_timeout_raises_stream_error_no_auth(monkeypatch):
+    """Greeting received but auth recv() never resolves → _StreamError with 'no auth acknowledgement'."""
+    monkeypatch.setattr(flow_main, "HANDSHAKE_TIMEOUT_SECS", 0.05)
+    session, state, ws = make_session([_greeting(), _NEVER_RESOLVES])
+    with pytest.raises(_StreamError, match="no auth acknowledgement"):
+        await session.run(state, ws)
+
+
+async def test_session_stage_info_lines_in_order(caplog, tmp_path):
+    """INFO lines appear in order: connected, authenticated, subscription ack, first trade,
+    and after the final archive flush on clean session end, first archive flush with bytes= > 0."""
+    from ohmytradeagent_sidecar.flow_collector import TapeArchiver
+
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    # Clock: in-window for 2 main-loop iterations (sub_ack + trade), then out-of-window
+    # so run() exits cleanly via break and triggers the final archive flush.
+    clock_calls = [0]
+    clocks = [NOW_IN, NOW_IN, NOW_OUT] + [NOW_OUT] * 10
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    frames = [
+        _greeting(),
+        _auth_success(),
+        _sub_ack(),
+        _trade_frame(),
+    ]
+    state = SessionState()
+    state.archiver = TapeArchiver(archive_dir)
+
+    session = FlowSession(
+        key_id="k",
+        secret="s",
+        heartbeat_fn=lambda: None,
+        dry_run=True,
+        log=LOG,
+        clock=advancing_clock,
+    )
+    ws = FakeWebSocket(frames)
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        # run() exits cleanly when clock returns NOW_OUT (no exception expected)
+        await session.run(state, ws)
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+
+    # Must contain these substrings (not necessarily consecutive)
+    stage_markers = ["flow: connected", "flow: authenticated", "flow: subscription ack",
+                     "flow: first trade"]
+    for marker in stage_markers:
+        assert any(marker in m for m in info_msgs), (
+            f"missing INFO '{marker}' in: {info_msgs}"
+        )
+
+    # Order must be preserved
+    indices = [
+        next(i for i, m in enumerate(info_msgs) if marker in m)
+        for marker in stage_markers
+    ]
+    assert indices == sorted(indices), f"stage INFO lines out of order: {info_msgs}"
+
+    # first archive flush: appears after the trade
+    flush_lines = [m for m in info_msgs if "flow: first archive flush" in m]
+    assert len(flush_lines) >= 1, f"missing 'flow: first archive flush' in: {info_msgs}"
+    assert "bytes=" in flush_lines[0], f"first archive flush line missing bytes=: {flush_lines[0]}"
+    # bytes= value should be > 0
+    import re as _re
+    m = _re.search(r"bytes=(\d+)", flush_lines[0])
+    assert m is not None and int(m.group(1)) > 0, flush_lines[0]
+
+
+async def test_session_stream_errors_counted_limited_at_five(caplog):
+    """decode_error, non_dict, bad_symbol each increment stream_errors; first 5 logged,
+    6th and beyond counted silently."""
+    bad_occ_frame = msgpack.packb([{
+        "T": "t", "S": "not_an_occ", "p": 2.0, "s": 10, "x": "C", "c": [], "t": "2026-10-29T13:40:00Z",
+    }])
+    non_dict_frame = msgpack.packb([42])
+    decode_error_frame = b"\xff\xfe\x00\x01"
+
+    frames = [
+        _greeting(),
+        _auth_success(),
+        _sub_ack(),
+        decode_error_frame,  # 1
+        non_dict_frame,      # 2
+        bad_occ_frame,       # 3
+        decode_error_frame,  # 4
+        decode_error_frame,  # 5
+        decode_error_frame,  # 6 → counted but NOT logged
+    ]
+    session, state, ws = make_session(frames)
+    with caplog.at_level(logging.WARNING, logger="test.flow_main"):
+        with pytest.raises(_StreamError):
+            await session.run(state, ws)
+
+    stream_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "flow: stream error" in r.message
+    ]
+    assert len(stream_warnings) == 5, (
+        f"expected exactly 5 'flow: stream error' WARNINGs (first 5), got {len(stream_warnings)}: "
+        f"{[r.message for r in stream_warnings]}"
+    )
+    assert state.metrics.stream_errors == 6, (
+        f"expected stream_errors=6, got {state.metrics.stream_errors}"
+    )
+
+
+async def test_run_loop_406_day_ends_with_manifest(caplog, tmp_path):
+    """When connect_fn always yields 406 and the clock crosses 16:20 ET, the session ends
+    with a manifest showing trades=0, file=null, bytes=0, sha256=null, and gaps[0].reason=='slot_held'."""
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    clock_calls = [0]
+    # In-window for first 2 iterations (406 each time), then out-of-window
+    clocks = [NOW_IN, NOW_IN, NOW_OUT, NOW_OUT, NOW_OUT]
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        ws = FakeWebSocket([_greeting(), _error_406()])
+        yield ws
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                connect_fn=fake_connect,
+                clock=advancing_clock,
+                sleep=fake_sleep,
+            )
+
+    # Manifest must exist for today
+    manifest_files = list(archive_dir.glob("*.manifest.json"))
+    assert len(manifest_files) >= 1, f"no manifest written; files: {list(archive_dir.iterdir())}"
+
+    manifest = json.loads(manifest_files[0].read_text())
+    assert manifest["trades"] == 0, f"expected trades=0, got {manifest['trades']}"
+    assert manifest["file"] is None, f"expected file=null, got {manifest['file']}"
+    assert manifest["bytes"] == 0, f"expected bytes=0, got {manifest['bytes']}"
+    assert manifest["sha256"] is None, f"expected sha256=null, got {manifest['sha256']}"
+    assert len(manifest["gaps"]) == 1, f"expected exactly 1 gap, got {manifest['gaps']}"
+    assert manifest["gaps"][0]["reason"] == "slot_held", (
+        f"expected reason='slot_held', got {manifest['gaps'][0]['reason']}"
+    )
+    assert manifest["gaps"][0]["to"] is None, (
+        f"expected to=null, got {manifest['gaps'][0]['to']}"
+    )
+
+    # Summary must be logged with reconnects=0
+    summary_lines = [r.message for r in caplog.records if "flow session summary:" in r.message]
+    assert len(summary_lines) >= 1, f"no session summary logged; caplog: {caplog.text}"
+    assert "reconnects=0" in summary_lines[0], (
+        f"expected reconnects=0 in summary: {summary_lines[0]}"
+    )
+
+    # Manifest-written log must exist
+    manifest_log_lines = [
+        r.message for r in caplog.records if "flow: manifest written" in r.message
+    ]
+    assert len(manifest_log_lines) >= 1, "'flow: manifest written' not in caplog"
+    assert "trades=0" in manifest_log_lines[0], (
+        f"'flow: manifest written' missing 'trades=0': {manifest_log_lines[0]}"
+    )
+
+    # Summary must report exactly gaps=1
+    summary_lines = [r.message for r in caplog.records if "flow session summary:" in r.message]
+    assert any("gaps=1" in s for s in summary_lines), (
+        f"expected gaps=1 in session summary: {summary_lines}"
+    )
+
+
+async def test_run_loop_406_three_times_accumulates_one_gap(caplog, tmp_path):
+    """Three consecutive 406s before window close produce exactly ONE gap, not three.
+
+    With the fix, the first disconnect opens the gap; subsequent 406s do not open
+    new gaps.  The manifest ends with gaps=[{from=..., to=null, reason='slot_held'}].
+    """
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    # Clock: in-window for first 4 iterations (2 calls for iter1, 1 each for 2 & 3,
+    # 1 for the out-of-window iteration), then out of window.
+    # iter1: clock[0]=NOW_IN (top-loop), clock[1]=NOW_IN (opens gap, exception branch)
+    # iter2: clock[2]=NOW_IN (top-loop only — gap already open, no _clock() in except)
+    # iter3: clock[3]=NOW_IN (top-loop only)
+    # iter4: clock[4]=NOW_OUT (top-loop — out of window, ends session)
+    clock_calls = [0]
+    clocks = [NOW_IN, NOW_IN, NOW_IN, NOW_IN, NOW_OUT, NOW_OUT, NOW_OUT, NOW_OUT, NOW_OUT]
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 5:
+            raise asyncio.CancelledError
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        ws = FakeWebSocket([_greeting(), _error_406()])
+        yield ws
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                connect_fn=fake_connect,
+                clock=advancing_clock,
+                sleep=fake_sleep,
+            )
+
+    manifest_files = list(archive_dir.glob("*.manifest.json"))
+    assert len(manifest_files) >= 1, f"no manifest written; files: {list(archive_dir.iterdir())}"
+    manifest = json.loads(manifest_files[0].read_text())
+
+    assert len(manifest["gaps"]) == 1, (
+        f"expected exactly 1 gap (not {len(manifest['gaps'])}); gaps={manifest['gaps']}"
+    )
+    assert manifest["gaps"][0]["reason"] == "slot_held", manifest["gaps"]
+    assert manifest["gaps"][0]["to"] is None, manifest["gaps"]
+
+    summary_lines = [r.message for r in caplog.records if "flow session summary:" in r.message]
+    assert any("gaps=1" in s for s in summary_lines), (
+        f"expected gaps=1 in summary: {summary_lines}"
+    )
+    assert any("reconnects=0" in s for s in summary_lines), (
+        f"expected reconnects=0 in summary: {summary_lines}"
+    )
+
+
+async def test_run_loop_406_then_success_closes_one_gap(caplog, tmp_path):
+    """Two 406s followed by a successful session close exactly one gap with reason slot_held.
+
+    The gap's `to` is not null (closed when the session was established).
+    """
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    # Clock sequence:
+    # iter1 (1st 406):  clock[0]=NOW_IN top-loop; clock[1]=NOW_IN opens gap
+    # iter2 (2nd 406):  clock[2]=NOW_IN top-loop; no extra call (gap already open)
+    # iter3 (success):  clock[3]=NOW_IN top-loop; clock[4]=NOW_OUT inside session.run()
+    #                   → clean exit; gap closed using now=clock[3]=NOW_IN
+    # _end_session:     clock[5]=NOW_IN for date_str
+    # idle after:       clock[6]=NOW_OUT
+    clock_calls = [0]
+    clocks = [NOW_IN, NOW_IN, NOW_IN, NOW_IN, NOW_OUT, NOW_IN, NOW_OUT, NOW_OUT, NOW_OUT]
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    connect_num = [0]
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        connect_num[0] += 1
+        if connect_num[0] <= 2:
+            ws = FakeWebSocket([_greeting(), _error_406()])
+        else:
+            # Successful session: auth + sub_ack, then stream loop exits on NOW_OUT clock
+            ws = FakeWebSocket([_greeting(), _auth_success(), _sub_ack()])
+        yield ws
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                connect_fn=fake_connect,
+                clock=advancing_clock,
+                sleep=fake_sleep,
+            )
+
+    manifest_files = list(archive_dir.glob("*.manifest.json"))
+    assert len(manifest_files) >= 1, f"no manifest written; files: {list(archive_dir.iterdir())}"
+    manifest = json.loads(manifest_files[0].read_text())
+
+    assert len(manifest["gaps"]) == 1, (
+        f"expected exactly 1 gap; gaps={manifest['gaps']}"
+    )
+    assert manifest["gaps"][0]["reason"] == "slot_held", manifest["gaps"]
+    # Gap was closed: `to` must not be null
+    assert manifest["gaps"][0]["to"] is not None, (
+        f"expected gap to be closed (to != null) after successful session: {manifest['gaps']}"
+    )
+
+
+async def test_run_loop_transport_errors_accumulate_one_gap(caplog, tmp_path):
+    """Multiple consecutive transport errors accumulate into ONE gap in the manifest.
+
+    The first transport error opens the gap; subsequent ones do not add new gaps.
+    """
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    # Clock: iter1 opens gap (2 calls), iter2 no extra call (1 call), iter3 out-of-window (1 call)
+    clock_calls = [0]
+    clocks = [NOW_IN, NOW_IN, NOW_IN, NOW_OUT, NOW_OUT, NOW_OUT]
+
+    def advancing_clock() -> datetime:
+        i = min(clock_calls[0], len(clocks) - 1)
+        clock_calls[0] += 1
+        return clocks[i]
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 4:
+            raise asyncio.CancelledError
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        ws = FakeWebSocket([])  # immediate ConnectionClosed → transport error
+        yield ws
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                connect_fn=fake_connect,
+                clock=advancing_clock,
+                sleep=fake_sleep,
+            )
+
+    manifest_files = list(archive_dir.glob("*.manifest.json"))
+    assert len(manifest_files) >= 1, f"no manifest written; files: {list(archive_dir.iterdir())}"
+    manifest = json.loads(manifest_files[0].read_text())
+
+    assert len(manifest["gaps"]) == 1, (
+        f"expected exactly 1 gap (not {len(manifest['gaps'])}); gaps={manifest['gaps']}"
+    )
+    assert manifest["gaps"][0]["reason"] == "reconnect", manifest["gaps"]
+    assert manifest["gaps"][0]["to"] is None, manifest["gaps"]
+
+
+async def test_run_loop_startup_archive_dir_logged(caplog, tmp_path):
+    """run_loop logs the archive dir writability and free bytes at startup."""
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 1:
+            raise asyncio.CancelledError
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                clock=lambda: NOW_OUT,
+                sleep=fake_sleep,
+            )
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    startup_lines = [m for m in info_msgs if "flow: archive dir" in m]
+    assert len(startup_lines) >= 1, f"'flow: archive dir' startup line missing; caplog: {info_msgs}"
+    line = startup_lines[0]
+    assert "writable=True" in line, f"expected writable=True in: {line}"
+    assert "free_bytes=" in line, f"expected free_bytes= in: {line}"
+    assert "cap_bytes=" in line, f"expected cap_bytes= in: {line}"
+    assert "floor_bytes=" in line, f"expected floor_bytes= in: {line}"
+
+
+async def test_run_loop_startup_archive_dir_logged_unwritable(caplog, tmp_path):
+    """run_loop logs writable=False when the archive dir is not writable."""
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    archive_dir.chmod(0o500)  # read + execute only
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) >= 1:
+            raise asyncio.CancelledError
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+
+    with caplog.at_level(logging.INFO, logger="test.flow_main"):
+        with pytest.raises(asyncio.CancelledError):
+            await flow_main.run_loop(
+                key_id="k",
+                secret="s",
+                archive_dir=archive_dir,
+                dry_run=True,
+                heartbeat_path=heartbeat_path,
+                log=LOG,
+                clock=lambda: NOW_OUT,
+                sleep=fake_sleep,
+            )
+
+    # Restore permissions so tmp_path cleanup works
+    archive_dir.chmod(0o755)
+
+    info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    startup_lines = [m for m in info_msgs if "flow: archive dir" in m]
+    assert len(startup_lines) >= 1, f"'flow: archive dir' startup line missing; caplog: {info_msgs}"
+    assert "writable=False" in startup_lines[0], (
+        f"expected writable=False in: {startup_lines[0]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_loop_mid_session_drop_records_its_own_gap(tmp_path):
+    """406 → session authenticates then drops → session authenticates to the close.
+
+    Two separate gaps: the 406 outage closed when the first session authenticated, and the
+    drop closed when the second did. The drop must not reuse the first outage's start.
+    """
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    closing = [False]
+    tick = [0]
+
+    def clock() -> datetime:
+        if closing[0]:
+            return NOW_OUT
+        tick[0] += 1
+        return NOW_IN + timedelta(minutes=tick[0])
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        if closing[0] and len(sleeps) > 5:
+            raise asyncio.CancelledError
+
+    n = [0]
+
+    @asynccontextmanager
+    async def fake_connect(url: str, **kw: Any):  # type: ignore[misc]
+        n[0] += 1
+        if n[0] == 1:
+            yield FakeWebSocket([_greeting(), _error_406()])
+        elif n[0] == 2:
+            yield FakeWebSocket([_greeting(), _auth_success(), _sub_ack()])  # then drops
+        else:
+            closing[0] = True  # the window closes during this session
+            yield FakeWebSocket([_greeting(), _auth_success(), _sub_ack()])
+
+    heartbeat_path = tmp_path / "heartbeat"
+    heartbeat_path.touch()
+    with pytest.raises(asyncio.CancelledError):
+        await flow_main.run_loop(
+            key_id="k",
+            secret="s",
+            archive_dir=archive_dir,
+            dry_run=True,
+            heartbeat_path=heartbeat_path,
+            log=LOG,
+            connect_fn=fake_connect,
+            clock=clock,
+            sleep=fake_sleep,
+        )
+
+    manifest = json.loads(next(archive_dir.glob("*.manifest.json")).read_text())
+    gaps = manifest["gaps"]
+    assert [g["reason"] for g in gaps] == ["slot_held", "reconnect"], gaps
+    assert all(g["to"] is not None for g in gaps), gaps
+    assert gaps[0]["to"] <= gaps[1]["from"], gaps  # the drop opened a NEW gap
