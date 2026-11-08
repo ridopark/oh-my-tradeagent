@@ -708,6 +708,25 @@ class FlowMigrationIT {
                     100))
             .items());
 
+    // Several labels combine with OR: sweep+block returns both rows, nothing else.
+    assertThat(
+            repo.orders(
+                    new OrderQuery(
+                        oct29,
+                        "TSLA",
+                        null,
+                        Set.of("sweep", "block"),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        100))
+                .items())
+        .extracting(Order::orderId)
+        .containsExactlyInAnyOrder("IT:12:sweep", "IT:12:block");
+
     // option_right=P: exactly the put row.
     assertHasOnly(
         "IT:12:put",
