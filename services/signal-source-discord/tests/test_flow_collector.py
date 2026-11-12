@@ -130,6 +130,54 @@ def _make_quote_frame(
 
 
 # ---------------------------------------------------------------------------
+# parse_frame — the live OPRA feed sends ``t`` as a msgpack Timestamp (ext -1),
+# not a string; every message was dropped as parse_error on 2026-11-09..11.
+# ---------------------------------------------------------------------------
+
+_LIVE_TS = msgpack.Timestamp(seconds=1794407400, nanoseconds=2446006)
+
+
+def test_parse_frame_trade_with_msgpack_timestamp():
+    frame = msgpack.packb(
+        [
+            {
+                "T": "t",
+                "S": "SPY261111C00766000",
+                "p": 1.5,
+                "s": 3,
+                "x": "C",
+                "c": [],
+                "t": _LIVE_TS,
+            }
+        ]
+    )
+    (rec,) = parse_frame(frame)
+    assert isinstance(rec, Trade), rec
+    assert rec.ts == datetime(2026, 11, 11, 14, 30, 0, 2446, tzinfo=UTC)
+    assert rec.ts_raw == "2026-11-11T14:30:00.002446006Z"
+
+
+def test_parse_frame_quote_with_msgpack_timestamp():
+    frame = msgpack.packb(
+        [
+            {
+                "T": "q",
+                "S": "SPY261111C00766000",
+                "bp": 1.4,
+                "bs": 1,
+                "ap": 1.6,
+                "as": 2,
+                "t": _LIVE_TS,
+            }
+        ]
+    )
+    (rec,) = parse_frame(frame)
+    assert isinstance(rec, Quote), rec
+    assert rec.ts == datetime(2026, 11, 11, 14, 30, 0, 2446, tzinfo=UTC)
+    assert rec.ts_raw == "2026-11-11T14:30:00.002446006Z"
+
+
+# ---------------------------------------------------------------------------
 # parse_occ
 # ---------------------------------------------------------------------------
 

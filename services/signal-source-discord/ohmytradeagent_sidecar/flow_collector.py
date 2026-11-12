@@ -185,6 +185,20 @@ def parse_frame(data: bytes) -> list[Trade | Quote | Control]:
     return out
 
 
+def _parse_ts(value: object) -> tuple[datetime, str]:
+    """Return (UTC datetime, ISO-8601 string) for a stream ``t`` field.
+
+    The live OPRA feed sends a msgpack Timestamp (ext type -1); the string form is
+    kept for fixtures.  The Timestamp's ISO string keeps all nine nanosecond digits.
+    """
+    if isinstance(value, msgpack.Timestamp):
+        ts = value.to_datetime().astimezone(UTC)
+        ts_raw = ts.strftime("%Y-%m-%dT%H:%M:%S") + f".{value.nanoseconds:09d}Z"
+        return ts, ts_raw
+    ts_raw = str(value)
+    return datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(UTC), ts_raw
+
+
 def _parse_trade(item: dict) -> Trade | Control:
     contract = str(item.get("S", ""))
     parsed = parse_occ(contract)
@@ -192,8 +206,7 @@ def _parse_trade(item: dict) -> Trade | Control:
         return Control(action="bad_symbol", msg=contract)
     ticker, expiry_str, strike, right = parsed
     try:
-        ts_raw = str(item["t"])
-        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(UTC)
+        ts, ts_raw = _parse_ts(item["t"])
         price = float(item["p"])
         size = int(item["s"])
         exchange = str(item.get("x") or "")
@@ -221,8 +234,7 @@ def _parse_quote(item: dict) -> Quote | Control:
     if parsed is None:
         return Control(action="bad_symbol", msg=contract)
     try:
-        ts_raw = str(item["t"])
-        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(UTC)
+        ts, ts_raw = _parse_ts(item["t"])
         bid = float(item.get("bp") or 0)
         ask = float(item.get("ap") or 0)
         bid_size = int(item.get("bs") or 0)
