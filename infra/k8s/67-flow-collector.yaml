@@ -172,11 +172,15 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 50m
+              # 2026-11-12, first full RTH session: ~0.28 cores average at a 300m cap, throttled
+              # in 83% of CFS periods, loop lag up to 57 s → 28 keepalive-ping-timeout reconnects
+              # (813 s of tape lost) + Alpaca "407 slow client". Request covers the measured
+              # average; the limit leaves headroom for the open/close bursts (~24k quotes/s).
+              cpu: 300m
               # No Chromium, no Temporal client: msgpack + the bounded order/quote structures.
               memory: 256Mi
             limits:
-              cpu: 300m
+              cpu: 1500m
               # 400 Mi during the dry-run session so the peak rss_peak_mb is MEASURED before
               # the cap is applied. Step 2 lowers this to 300 Mi once the measurement confirms
               # rss_peak_mb <= 240 MB. See the go/no-go thresholds in the plan.
