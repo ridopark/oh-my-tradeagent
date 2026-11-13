@@ -293,3 +293,55 @@ def test_underlyingContext_darkpool404_isNullWithNote(test_binding):
     # Flow sections are still intact
     assert data["flow_summary"] is not None
     assert len(data["flow_orders"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# test 6b: get_underlying_context — flow 404 (flow reads not enabled on the BFF)
+# → flow sections null with a note; dark pool still returned. Seen live on 2026-11-13:
+# the prod BFF has the dark-pool flag on and the flow flag off, and the tool failed whole.
+# ---------------------------------------------------------------------------
+
+
+def _underlying_with(flow_status: int):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path in ("/api/flow/summary", "/api/flow/orders"):
+            return httpx.Response(flow_status, json={"status": flow_status})
+        if path == "/api/darkpool/summary":
+            return httpx.Response(200, json={"symbols": [{"symbol": "SMCI", "prints": 3}]})
+        if path == "/api/darkpool/prints":
+            return httpx.Response(200, json={"items": [{"symbol": "SMCI"}]})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    from ohmytradeagent_mcp.bff import BffClient
+
+    return BffClient("http://bff.test", TEST_TOKEN, TEST_TENANT, httpx.MockTransport(handler))
+
+
+def test_underlyingContext_flow404_isNullWithNote_darkpoolStillReturned(test_binding):
+    mcp = build_server(test_binding, _underlying_with(404))
+
+    async def run():
+        async with Client(mcp) as client:
+            return await client.call_tool("get_underlying_context", {"ticker": "SMCI"})
+
+    result = _run(run())
+    assert not result.is_error, result.content[0].text
+    data = json.loads(result.content[0].text)
+    assert data["flow_summary"] is None
+    assert data["flow_orders"] is None
+    assert data["underlying_price"] is None
+    assert "BFF 404" in data["flow_note"]
+    assert data["darkpool"]["summary"]["symbol"] == "SMCI"
+
+
+def test_underlyingContext_flow500_isStillAToolError(test_binding):
+    mcp = build_server(test_binding, _underlying_with(500))
+
+    async def run():
+        async with Client(mcp) as client:
+            return await client.call_tool("get_underlying_context", {"ticker": "SMCI"})
+
+    result = _run(run())
+    assert result.is_error
+    assert "500" in result.content[0].text
