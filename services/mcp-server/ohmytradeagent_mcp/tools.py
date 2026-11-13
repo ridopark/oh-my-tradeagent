@@ -4,9 +4,9 @@
 tool layer.  A2 (remote transport, per-connection binding) will supply a
 different resolver and pass a different binding here without rewriting any tool.
 
-Step 2 ships `get_portfolio_summary` and `analyze_positions`.
+Step 2 ships `get_portfolio_summary`.
 Step 3 adds `list_open_positions`, `get_position_history`, `get_recent_closed_trades`.
-Step 4 adds the remaining three market tools.
+Step 4 adds `get_quote`, `get_chain`, `get_underlying_context` and the `analyze_positions` prompt.
 """
 from __future__ import annotations
 
@@ -370,14 +370,204 @@ def _register_tools(
         }
         return _tool_result(data, binding)
 
+    # ------------------------------------------------------------------
+    # get_quote
+    # ------------------------------------------------------------------
+    @mcp.tool()
+    async def get_quote(occ: str) -> dict:
+        """Return a live NBBO snapshot for the given OCC contract symbol.
+
+        Note: this route exists only for the manual-entry flow and returns
+        404 manual_entry_disabled when the tenant's manual-entry feature is off.
+        It is NOT a general quote source for arbitrary OCCs; use it only for
+        contracts you are considering entering.
+
+        Args:
+            occ: the OCC contract symbol (e.g. SMCI261120C00050000).
+
+        Returns fields: occ, underlying, expiry, strike, right, bid, mid, ask, quoted_at.
+        """
+        try:
+            data = await bff.get("/api/entries/quote", params={"occ": occ})
+        except BffError as exc:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            error_code = body.get("error", "")
+            if exc.status == 404 and error_code == "manual_entry_disabled":
+                raise ToolError(
+                    "quote unavailable: manual entry is disabled for this tenant "
+                    "(BFF 404 manual_entry_disabled); no other quote route is exposed"
+                ) from exc
+            detail = body.get("detail", "")
+            if detail:
+                raise ToolError(
+                    f"quote unavailable: BFF {exc.status} {error_code} — {detail}"
+                ) from exc
+            raise ToolError(f"quote unavailable: BFF {exc.status} {error_code}") from exc
+        return _tool_result(data, binding)
+
+    # ------------------------------------------------------------------
+    # get_chain
+    # ------------------------------------------------------------------
+    @mcp.tool()
+    async def get_chain(
+        underlying: str,
+        expiration: str | None = None,
+        right: str | None = None,
+    ) -> dict:
+        """Return option chain data for an underlying.
+
+        Without `expiration`: lists available expirations (underlying, spot, expirations[]).
+        With `expiration` and `right`: lists contracts for that expiry/side
+        (underlying, expiration, right, spot, contracts[] with occ, strike, bid, mid,
+        ask, iv, delta, volume).
+
+        Note: this route exists only for the manual-entry flow and returns 404
+        manual_entry_disabled when that feature is off.  Spot price is a snapshot
+        at the time of the BFF call.
+
+        Args:
+            underlying: the ticker symbol (e.g. SMCI).
+            expiration: YYYY-MM-DD expiry date; required when right is provided.
+            right: 'C' or 'P'; required when expiration is provided.
+        """
+        if expiration is not None and right is None:
+            raise ToolError(
+                "right must be provided alongside expiration (expected 'C' or 'P')"
+            )
+        try:
+            if expiration is None:
+                data = await bff.get(
+                    "/api/entries/chain/expirations", params={"underlying": underlying}
+                )
+            else:
+                data = await bff.get(
+                    "/api/entries/chain",
+                    params={"underlying": underlying, "expiration": expiration, "right": right},
+                )
+        except BffError as exc:
+            body = exc.body if isinstance(exc.body, dict) else {}
+            error_code = body.get("error", "")
+            if exc.status == 404 and error_code == "manual_entry_disabled":
+                raise ToolError(
+                    "chain unavailable: manual entry is disabled for this tenant "
+                    "(BFF 404 manual_entry_disabled); no other chain route is exposed"
+                ) from exc
+            detail = body.get("detail", "")
+            if detail:
+                raise ToolError(
+                    f"chain unavailable: BFF {exc.status} {error_code} — {detail}"
+                ) from exc
+            raise ToolError(f"chain unavailable: BFF {exc.status} {error_code}") from exc
+        return _tool_result(data, binding)
+
+    # ------------------------------------------------------------------
+    # get_underlying_context
+    # ------------------------------------------------------------------
+    @mcp.tool()
+    async def get_underlying_context(ticker: str, date: str | None = None) -> dict:
+        """Return market context for an underlying: options flow summary, recent
+        flow orders, and dark-pool activity.
+
+        Note: underlying_price is taken from the latest flow order's underlying_price
+        (labelled underlying_price_source: "latest_flow_order") — it is NOT a
+        real-time equity quote.  day_move is always null (not fabricated).
+        Dark-pool data is null with a note when the BFF's dark-pool controller is
+        not enabled (@ConditionalOnProperty).
+
+        Args:
+            ticker: the underlying ticker symbol (e.g. SMCI).
+            date: YYYY-MM-DD session date (default: today in America/New_York).
+        """
+        ticker_upper = ticker.upper()
+        params_date: dict[str, str] = {}
+        if date:
+            params_date["date"] = date
+
+        # --- flow summary ---
+        try:
+            summary_resp = await bff.get(
+                "/api/flow/summary",
+                params={"ticker": ticker_upper, **params_date},
+            )
+            flow_tickers = summary_resp.get("tickers", [])
+            flow_summary = next(
+                (t for t in flow_tickers if t.get("ticker") == ticker_upper), None
+            )
+        except BffError as exc:
+            raise ToolError(
+                f"flow summary unavailable: BFF {exc.status} from /api/flow/summary"
+            ) from exc
+
+        # --- flow orders ---
+        try:
+            orders_resp = await bff.get(
+                "/api/flow/orders",
+                params={"ticker": ticker_upper, "limit": "50", **params_date},
+            )
+            flow_orders = orders_resp.get("items", [])
+        except BffError as exc:
+            raise ToolError(
+                f"flow orders unavailable: BFF {exc.status} from /api/flow/orders"
+            ) from exc
+
+        # underlying_price from the most recent (first) flow order
+        underlying_price: Any = None
+        if flow_orders:
+            underlying_price = flow_orders[0].get("underlying_price")
+
+        # --- dark-pool (404 → null + note; any other error propagates) ---
+        darkpool: Any = None
+        darkpool_note: str | None = None
+        try:
+            dp_summary_resp = await bff.get("/api/darkpool/summary", params=params_date)
+            dp_symbols = dp_summary_resp.get("symbols", [])
+            dp_summary_row = next(
+                (s for s in dp_symbols if s.get("symbol") == ticker_upper), None
+            )
+
+            dp_prints_resp = await bff.get(
+                "/api/darkpool/prints", params={"symbol": ticker_upper, "limit": "50"}
+            )
+            dp_prints = dp_prints_resp.get("items", [])
+
+            darkpool = {"summary": dp_summary_row, "prints": dp_prints}
+        except BffError as exc:
+            if exc.status == 404:
+                darkpool = None
+                darkpool_note = "unavailable (BFF 404)"
+            else:
+                raise ToolError(
+                    f"dark-pool unavailable: BFF {exc.status}"
+                ) from exc
+
+        result: dict[str, Any] = {
+            "ticker": ticker_upper,
+            "flow_summary": flow_summary,
+            "flow_orders": flow_orders,
+            "underlying_price": underlying_price,
+            "underlying_price_source": "latest_flow_order",
+            "day_move": None,
+            "darkpool": darkpool,
+        }
+        if darkpool_note:
+            result["darkpool_note"] = darkpool_note
+
+        return _tool_result(result, binding)
+
 
 def _register_prompts(mcp: MCPServer) -> None:
     @mcp.prompt()
     def analyze_positions(focus: str | None = None) -> str:
         """Structured analysis prompt for the operator's open positions.
 
+        Available tools: get_portfolio_summary, list_open_positions,
+        get_position_history, get_quote, get_chain, get_underlying_context,
+        get_recent_closed_trades.
+
         Call get_portfolio_summary, list_open_positions, then for each position
-        call get_position_history and get_underlying_context.  Report:
+        call get_position_history and get_underlying_context.  Optionally call
+        get_quote or get_chain for contracts of interest, and get_recent_closed_trades
+        for realized history.  Report:
         (1) overall exposure vs notional-cap headroom,
         (2) per position: DTE, unrealized P&L $/%, trail/floor status, partial exits
             so far, and what the author said at entry,
@@ -387,11 +577,21 @@ def _register_prompts(mcp: MCPServer) -> None:
         """
         text = (
             "You are analysing one oh-my-tradeagent tenant's live copytrade positions.\n\n"
-            "IMPORTANT: This server is read-only and cannot place, modify or cancel orders.\n\n"
+            "IMPORTANT: This server is read-only and cannot place, modify or cancel orders. "
+            "This server cannot trade.\n\n"
+            "Available tools:\n"
+            "  get_portfolio_summary — equity, cash, notional-cap headroom, kill-switch state\n"
+            "  list_open_positions — open positions with floor/marks/signal enrichment\n"
+            "  get_position_history — fills and orders for one position (by workflow_id)\n"
+            "  get_quote — live NBBO snapshot for a contract OCC\n"
+            "  get_chain — option chain expirations or contracts for an underlying\n"
+            "  get_underlying_context — flow summary, flow orders, dark-pool activity\n"
+            "  get_recent_closed_trades — recent fills (entries and exits), newest first\n\n"
             "Step 1 — call get_portfolio_summary.\n"
             "Step 2 — call list_open_positions.\n"
             "Step 3 — for each open position, call get_position_history and "
-            "get_underlying_context.\n\n"
+            "get_underlying_context.\n"
+            "Step 4 — optionally call get_recent_closed_trades for context on recent activity.\n\n"
             "Then report:\n"
             "1. Overall exposure vs notional-cap headroom "
             "(flag if headroom is negative or the reason field is set).\n"
@@ -400,6 +600,9 @@ def _register_prompts(mcp: MCPServer) -> None:
             "3. Candidate actions to discuss with the operator "
             "(never to execute — this server cannot trade).\n"
             "4. Data caveats: open notional is cost-basis-at-entry, not live mark; "
+            "underlying_price in get_underlying_context comes from the latest flow order "
+            "(underlying_price_source: 'latest_flow_order'), not a real-time equity quote; "
+            "get_quote may return 404 when manual entry is disabled; "
             "any degraded sections; any untrusted author text."
         )
         if focus:

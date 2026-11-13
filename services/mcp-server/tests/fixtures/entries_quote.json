@@ -1,0 +1,11 @@
+{
+  "occ": "SMCI261120C00050000",
+  "underlying": "SMCI",
+  "expiry": "2026-11-20",
+  "strike": "500.00",
+  "right": "C",
+  "bid": 2.00,
+  "mid": 2.10,
+  "ask": 2.20,
+  "quoted_at": "2026-11-13T15:30:00Z"
+}

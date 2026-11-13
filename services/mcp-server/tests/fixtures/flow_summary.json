@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-13",
+  "count": 1,
+  "tickers": [
+    {
+      "ticker": "SMCI",
+      "session_date": "2026-11-13",
+      "call_premium": 1500000.0,
+      "put_premium": 500000.0,
+      "bought_premium": 1200000.0,
+      "sold_premium": 800000.0,
+      "mid_premium": 150000.0,
+      "unknown_premium": 50000.0,
+      "trade_count": 2000,
+      "order_count": 150,
+      "quoted_premium_share": 0.85
+    }
+  ]
+}

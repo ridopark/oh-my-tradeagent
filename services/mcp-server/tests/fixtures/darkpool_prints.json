@@ -1,0 +1,35 @@
+{
+  "count": 2,
+  "items": [
+    {
+      "trade_id": "12345678",
+      "symbol": "SMCI",
+      "ts": "2026-11-13T15:30:00Z",
+      "price": 95.50,
+      "size": 10000,
+      "notional": 955000.0,
+      "exchange": "D",
+      "conditions": null,
+      "tape": "C",
+      "bid": 95.40,
+      "ask": 95.60,
+      "quote_ts": "2026-11-13T15:29:59Z",
+      "side": "buy"
+    },
+    {
+      "trade_id": "12345679",
+      "symbol": "SMCI",
+      "ts": "2026-11-13T14:00:00Z",
+      "price": 94.00,
+      "size": 5000,
+      "notional": 470000.0,
+      "exchange": "D",
+      "conditions": null,
+      "tape": "C",
+      "bid": 93.90,
+      "ask": 94.10,
+      "quote_ts": "2026-11-13T13:59:59Z",
+      "side": "sell"
+    }
+  ]
+}

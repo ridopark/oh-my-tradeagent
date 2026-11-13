@@ -291,6 +291,9 @@ _REDACTED_KEYS = ["account_number", "broker_order_id", "operator_id"]
 # Canonical args per tool (others take no arguments)
 _TOOL_ARGS: dict[str, dict] = {
     "get_position_history": {"workflow_id": WF_A},
+    "get_quote": {"occ": "SMCI261120C00050000"},
+    "get_chain": {"underlying": "SMCI"},  # no expiration → lists expirations (safe path)
+    "get_underlying_context": {"ticker": "SMCI"},
 }
 
 
@@ -310,8 +313,8 @@ def test_everyTool_isRedacted(test_binding, stub_bff):
 
     tool_names, results = _run(run())
 
-    # Must have exactly 4 tools at this step
-    assert len(tool_names) == 4, f"Expected 4 tools; got {tool_names}"
+    # Must have exactly 7 tools after Step 4
+    assert len(tool_names) == 7, f"Expected 7 tools; got {tool_names}"
 
     for name, result in results.items():
         assert not result.is_error, f"{name} unexpectedly errored: {result.content[0].text}"

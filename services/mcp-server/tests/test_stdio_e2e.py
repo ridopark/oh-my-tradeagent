@@ -123,8 +123,19 @@ async def test_stdio_endToEnd_listsToolsAndPrompt(stub_bff_port):
         prompts_result = await client.list_prompts()
         prompt_names = {p.name for p in prompts_result.prompts}
 
-    # Step 2 ships only get_portfolio_summary; steps 3-4 add more.
-    assert "get_portfolio_summary" in tool_names, f"got: {tool_names}"
+    # All 7 tools must be present after Step 4.
+    expected_tools = {
+        "get_portfolio_summary",
+        "list_open_positions",
+        "get_position_history",
+        "get_quote",
+        "get_chain",
+        "get_underlying_context",
+        "get_recent_closed_trades",
+    }
+    assert expected_tools == tool_names, (
+        f"Expected exactly {expected_tools}; got {tool_names}"
+    )
     assert "analyze_positions" in prompt_names, f"got: {prompt_names}"
 
 
@@ -238,4 +249,13 @@ def test_stdout_cleanliness_rawSubprocess(stub_bff_port):
     )
     tools_result = tools_responses[0].get("result", {})
     tool_names = {t["name"] for t in tools_result.get("tools", [])}
-    assert "get_portfolio_summary" in tool_names, f"expected get_portfolio_summary, got: {tool_names}"
+    expected = {
+        "get_portfolio_summary",
+        "list_open_positions",
+        "get_position_history",
+        "get_quote",
+        "get_chain",
+        "get_underlying_context",
+        "get_recent_closed_trades",
+    }
+    assert expected == tool_names, f"expected {expected}, got: {tool_names}"

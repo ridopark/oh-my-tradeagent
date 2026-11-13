@@ -68,6 +68,27 @@ def _stub_handler(request: httpx.Request) -> httpx.Response:
     if path == "/api/orders":
         return _json_response(_load("orders.json"))
 
+    if path == "/api/entries/quote":
+        return _json_response(_load("entries_quote.json"))
+
+    if path == "/api/entries/chain/expirations":
+        return _json_response(_load("entries_chain_expirations.json"))
+
+    if path == "/api/entries/chain":
+        return _json_response(_load("entries_chain.json"))
+
+    if path == "/api/flow/summary":
+        return _json_response(_load("flow_summary.json"))
+
+    if path == "/api/flow/orders":
+        return _json_response(_load("flow_orders.json"))
+
+    if path == "/api/darkpool/summary":
+        return _json_response(_load("darkpool_summary.json"))
+
+    if path == "/api/darkpool/prints":
+        return _json_response(_load("darkpool_prints.json"))
+
     return _json_response({"error": "not_found"}, 404)
 
 

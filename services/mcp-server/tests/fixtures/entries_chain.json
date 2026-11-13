@@ -1,0 +1,28 @@
+{
+  "underlying": "SMCI",
+  "expiration": "2026-11-20",
+  "right": "C",
+  "spot": 95.50,
+  "contracts": [
+    {
+      "occ": "SMCI261120C00090000",
+      "strike": "90.00",
+      "bid": 5.00,
+      "mid": 5.50,
+      "ask": 6.00,
+      "iv": 0.45,
+      "delta": 0.72,
+      "volume": 100
+    },
+    {
+      "occ": "SMCI261120C00095000",
+      "strike": "95.00",
+      "bid": 2.00,
+      "mid": 2.50,
+      "ask": 3.00,
+      "iv": 0.50,
+      "delta": 0.52,
+      "volume": 200
+    }
+  ]
+}
