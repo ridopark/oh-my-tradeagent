@@ -31,8 +31,6 @@ public class McpWhoamiController {
   public ResponseEntity<Map<String, Object>> whoami(HttpServletRequest req) {
     String tokenId = (String) req.getAttribute(ServiceTokenFilter.MCP_TOKEN_ID_ATTRIBUTE);
     if (tokenId == null) {
-      // The shared token reached this handler (filter rule 4 passes it through without setting
-      // the attribute). The shared token has no single tenant — return 403.
       return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "forbidden"));
     }
     Map<String, Object> body = new LinkedHashMap<>();

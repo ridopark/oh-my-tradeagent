@@ -136,14 +136,18 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
       return Map.of();
     }
     Map<String, String> map = new LinkedHashMap<>();
+    int pos = 0;
     for (String entry : raw.split(",", -1)) {
+      pos++;
       String trimmed = entry.trim();
       if (trimmed.isEmpty()) {
         continue;
       }
       if (!trimmed.matches("^[0-9a-fA-F]{64}:[A-Za-z0-9_-]+$")) {
         throw new IllegalStateException(
-            "Malformed bff.mcp-read-tokens entry (expected <64-hex>:<tenant>): " + trimmed);
+            "Malformed bff.mcp-read-tokens entry at position "
+                + pos
+                + " (expected <64-hex>:<tenant>)");
       }
       int colon = trimmed.indexOf(':');
       map.put(
@@ -167,7 +171,8 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   protected void doFilterInternal(
       HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
-    // Path-traversal guard, BEFORE any path-based decision (this filter makes two: the actuator
+    // Rule 1: Path-traversal guard, BEFORE any path-based decision (this filter makes two: the
+    // actuator
     // exemption and the ingest-token prefix). getRequestURI() is the RAW, un-normalized request
     // line, while Spring dispatches on the DECODED and NORMALIZED path — so the string this filter
     // authorizes and the handler that actually runs can disagree:
@@ -186,6 +191,7 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
       reject(response);
       return;
     }
+    // Rule 2: bearer absent or non-bearer scheme → 401.
     String header = request.getHeader("Authorization");
     if (header == null || !header.startsWith(BEARER_PREFIX)) {
       reject(response);

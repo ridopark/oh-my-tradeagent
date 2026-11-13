@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.mock.web.MockFilterChain;
@@ -522,13 +525,12 @@ class ServiceTokenFilterTest {
 
     assertThat(res.getStatus()).isEqualTo(200);
     assertThat(chain.getRequest()).isNotNull();
-    jakarta.servlet.http.HttpServletRequest downstream =
-        (jakarta.servlet.http.HttpServletRequest) chain.getRequest();
+    HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
     assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo("acme");
-    assertThat(java.util.Collections.list(downstream.getHeaders("X-Tenant-Id")))
+    assertThat(Collections.list(downstream.getHeaders("X-Tenant-Id")))
         .hasSize(1)
         .containsExactly("acme");
-    assertThat(java.util.Collections.list(downstream.getHeaderNames()))
+    assertThat(Collections.list(downstream.getHeaderNames()))
         .anyMatch(n -> n.equalsIgnoreCase("X-Tenant-Id"));
   }
 
@@ -679,8 +681,7 @@ class ServiceTokenFilterTest {
 
     assertThat(res.getStatus()).isEqualTo(200);
     assertThat(chain.getRequest()).isNotNull();
-    jakarta.servlet.http.HttpServletRequest downstream =
-        (jakarta.servlet.http.HttpServletRequest) chain.getRequest();
+    HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
     assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo("acme");
   }
 
@@ -696,8 +697,7 @@ class ServiceTokenFilterTest {
 
     assertThat(res.getStatus()).isEqualTo(200);
     assertThat(chain.getRequest()).isNotNull();
-    jakarta.servlet.http.HttpServletRequest downstream =
-        (jakarta.servlet.http.HttpServletRequest) chain.getRequest();
+    HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
     assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo("acme");
   }
 
@@ -712,11 +712,10 @@ class ServiceTokenFilterTest {
     mcpFilter.doFilter(req, res, chain);
 
     assertThat(res.getStatus()).isEqualTo(200);
-    jakarta.servlet.http.HttpServletRequest downstream =
-        (jakarta.servlet.http.HttpServletRequest) chain.getRequest();
+    HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
     assertThat(downstream.getHeader("X-Operator-Id")).isNull();
-    assertThat(java.util.Collections.list(downstream.getHeaders("X-Operator-Id"))).isEmpty();
-    assertThat(java.util.Collections.list(downstream.getHeaderNames()))
+    assertThat(Collections.list(downstream.getHeaders("X-Operator-Id"))).isEmpty();
+    assertThat(Collections.list(downstream.getHeaderNames()))
         .noneMatch(n -> n.equalsIgnoreCase("X-Operator-Id"));
   }
 
@@ -867,9 +866,7 @@ class ServiceTokenFilterTest {
     MockFilterChain betaChain = new MockFilterChain();
     twoTokenFilter.doFilter(betaReq, betaRes, betaChain);
     assertThat(betaRes.getStatus()).isEqualTo(200);
-    assertThat(
-            ((jakarta.servlet.http.HttpServletRequest) betaChain.getRequest())
-                .getHeader("X-Tenant-Id"))
+    assertThat(((HttpServletRequest) betaChain.getRequest()).getHeader("X-Tenant-Id"))
         .isEqualTo("beta");
 
     // Beta token with X-Tenant-Id: acme → 403 (forged cross-tenant header).
@@ -911,6 +908,19 @@ class ServiceTokenFilterTest {
   }
 
   @Test
+  void malformedMcpTokenEntry_errorMessage_hasPositionNotValue() {
+    // The error message must NOT echo the raw entry value back into the pod log (a mis-pasted
+    // token would appear there). It identifies the entry by its 1-based position only.
+    assertThatThrownBy(
+            () ->
+                new ServiceTokenFilter(
+                    TOKEN, INGEST_TOKEN, "rawsecrettoken123:acme", new MockEnvironment()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("position")
+        .hasMessageNotContaining("rawsecrettoken123");
+  }
+
+  @Test
   void wellFormedMcpTokenMap_withTrailingCommaAndSpaces_boots() {
     assertThatCode(
             () ->
@@ -925,7 +935,7 @@ class ServiceTokenFilterTest {
         new ServiceTokenFilter(
             TOKEN,
             INGEST_TOKEN,
-            MCP_ACME_HASH.toUpperCase(java.util.Locale.ROOT) + ":acme",
+            MCP_ACME_HASH.toUpperCase(Locale.ROOT) + ":acme",
             new MockEnvironment());
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
@@ -936,8 +946,7 @@ class ServiceTokenFilterTest {
 
     assertThat(res.getStatus()).isEqualTo(200);
     assertThat(chain.getRequest()).isNotNull();
-    assertThat(
-            ((jakarta.servlet.http.HttpServletRequest) chain.getRequest()).getHeader("X-Tenant-Id"))
+    assertThat(((HttpServletRequest) chain.getRequest()).getHeader("X-Tenant-Id"))
         .isEqualTo("acme");
   }
 }
