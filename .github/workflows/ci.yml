@@ -324,6 +324,34 @@ jobs:
       - name: pytest
         run: uv run pytest -q
 
+  mcp-server:
+    # Read-only MCP server for external-AI position analysis (#1053). Runs against stub BFFs
+    # only (MockTransport + a local http.server) — no network to the homelab.
+    name: Python mcp-server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: pytest
+        run: uv run pytest -q
+
   config-fields-manifest:
     name: Config fields manifest drift
     runs-on: ubuntu-latest
