@@ -72,7 +72,12 @@ public class AccountEquityClient {
       Long optionsApprovedLevel,
       Long optionsTradingLevel,
       BigDecimal multiplier,
-      BigDecimal pendingTransferIn) {
+      BigDecimal pendingTransferIn,
+      // #323 cost-basis capital base. The notional_cap_pct_of_capital_base gate uses
+      // (cash + sum_open_notional) as its denominator; the BFF's notional-cap read exposes this
+      // so the MCP server can present the same figure the gate sees. Null when the snapshot
+      // omits it (a producer predating #323 or a broker adapter without a cash endpoint).
+      BigDecimal cash) {
 
     /**
      * Back-compat convenience for the degraded/unavailable path (and tests) that carry no {@code
@@ -84,7 +89,32 @@ public class AccountEquityClient {
 
     /** Back-compat convenience for callers that carry no funding detail. */
     public BrokerAccount(BigDecimal equity, String accountNumber, BigDecimal lastEquity) {
-      this(equity, accountNumber, lastEquity, null, null, null, null, null);
+      this(equity, accountNumber, lastEquity, null, null, null, null, null, null);
+    }
+
+    /**
+     * Back-compat convenience for call sites that predate the {@code cash} field — delegates with
+     * null cash so callers that do not need the notional-cap read need not change.
+     */
+    public BrokerAccount(
+        BigDecimal equity,
+        String accountNumber,
+        BigDecimal lastEquity,
+        BigDecimal optionsBuyingPower,
+        Long optionsApprovedLevel,
+        Long optionsTradingLevel,
+        BigDecimal multiplier,
+        BigDecimal pendingTransferIn) {
+      this(
+          equity,
+          accountNumber,
+          lastEquity,
+          optionsBuyingPower,
+          optionsApprovedLevel,
+          optionsTradingLevel,
+          multiplier,
+          pendingTransferIn,
+          null);
     }
   }
 
@@ -129,7 +159,8 @@ public class AccountEquityClient {
               result.getOptionsApprovedLevel(),
               result.getOptionsTradingLevel(),
               result.getMultiplier(),
-              result.getPendingTransferIn());
+              result.getPendingTransferIn(),
+              result.getCash());
     } catch (TimeoutException e) {
       // We stopped waiting, but the workflow is still running. Cancel it so it doesn't linger as an
       // orphan — holding an orchestrator worker slot and re-hitting the broker account endpoint —

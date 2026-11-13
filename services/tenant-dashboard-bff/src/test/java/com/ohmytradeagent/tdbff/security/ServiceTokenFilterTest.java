@@ -567,7 +567,8 @@ class ServiceTokenFilterTest {
       "/api/flow/summary",
       "/api/darkpool/prints",
       "/api/darkpool/summary",
-      "/api/mcp/whoami"
+      "/api/mcp/whoami",
+      "/api/notional-cap"
     };
     for (String path : allowlisted) {
       MockHttpServletRequest req = new MockHttpServletRequest("GET", path);

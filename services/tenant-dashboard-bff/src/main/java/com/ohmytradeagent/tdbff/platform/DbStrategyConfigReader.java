@@ -66,6 +66,29 @@ public class DbStrategyConfigReader {
   }
 
   /**
+   * Issue #1053: the raw {@code notional_cap_pct_of_capital_base} for a (tenant, strategy), or
+   * {@code null} when no row exists, the config carries no such field, or the value does not parse
+   * as a number. DB errors propagate — the notional-cap controller catches and maps them to {@code
+   * config_unavailable} (its 3-state contract maps every failure to a safe outcome, never to "ok").
+   */
+  public java.math.BigDecimal notionalCapPctOfCapitalBase(String tenantId, String strategyId) {
+    Record1<String> row =
+        orchestratorDsl
+            .select(DSL.field("config->>'notional_cap_pct_of_capital_base'", String.class))
+            .from(DSL.table("strategy_config"))
+            .where(DSL.field("tenant_id").eq(tenantId).and(DSL.field("strategy_id").eq(strategyId)))
+            .fetchOne();
+    if (row == null || row.value1() == null || row.value1().isBlank()) {
+      return null;
+    }
+    try {
+      return new java.math.BigDecimal(row.value1().trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /**
    * Every distinct {@code (tenant_id, strategy_id, broker_target)} present in {@code
    * strategy_config}, ordered for a stable result. Mirrors the orchestrator's {@code
    * DbStrategyRegistry.list()} enumeration source (no {@code tenants} table) but also carries the
