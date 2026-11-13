@@ -206,6 +206,20 @@ spec:
             # Do NOT copy this into a real multi-tenant prod manifest.
             - name: BFF_EXPOSE_BROKER_ACCOUNT_NUMBER
               value: "true"
+            # Per-tenant read-only MCP tokens for external AI agents (e.g. Claude MCP server in
+            # step 2 of PLAN-2026-11-13-bff-mcp-read-token.md). Format: comma-separated
+            # <sha256-hex>:<tenant_id> entries. ServiceTokenFilter rejects any malformed entry at
+            # boot (fail-closed in every profile). The secret key is optional — if absent the pod
+            # boots with no MCP token accepted (fail-closed default). Enabling on the live cluster
+            # is a manual `kubectl set env deployment/tenant-dashboard-bff BFF_MCP_READ_TOKENS=...`
+            # or `kubectl patch`; deploy.yml does NOT apply this manifest (tenant-dashboard-bff is
+            # in RESTART_ONLY).
+            - name: BFF_MCP_READ_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_MCP_READ_TOKENS
+                  optional: true
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

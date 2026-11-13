@@ -145,6 +145,17 @@ flow:
 # operator runbook); SELECT-only grants mean even a query bug cannot mutate trading state.
 bff:
   service-token: ${BFF_SHARED_TOKEN:dev-shared-token}
+  # Per-tenant read-only MCP tokens for external AI agents (e.g. Claude MCP server in step 2).
+  # Format: comma-separated list of <sha256-hex>:<tenant_id> entries. Blank entries are skipped.
+  # Any malformed entry throws IllegalStateException at boot (fail-closed in every profile).
+  # Default EMPTY: no MCP token is accepted until the operator provisions one.
+  #
+  # To mint a token:
+  #   token=$(openssl rand -hex 32)
+  #   hash=$(printf %s "$token" | sha256sum | awk '{print $1}')
+  #   echo "BFF_MCP_READ_TOKENS=${hash}:<tenant_id>"
+  # Store the token (not the hash) in the client config; store the hash in dashboard-secrets.
+  mcp-read-tokens: ${BFF_MCP_READ_TOKENS:}
   portfolio:
     # Per-section budget for the concurrent portfolio sub-reads (position-state queries + account
     # snapshots). Part of an ordering invariant that MUST hold or /status 500s instead of degrading:
