@@ -222,3 +222,35 @@ def test_startup_urlWithoutScheme_exits2_oneLineNoTraceback(capsys):
     assert len(lines) == 1, f"Expected 1 stderr line, got {lines}"
     assert "Traceback" not in err
     assert "OMT_BFF_URL" in err
+
+
+def test_startup_tokenFile_tildePath_isExpanded(tmp_path, monkeypatch, capsys):
+    """OMT_MCP_TOKEN_FILE='~/…' (as the docs show) is expanded against $HOME."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "prod_real.token").write_text(TEST_TOKEN + "\n")
+    env = {
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN_FILE": "~/prod_real.token",
+        "OMT_BFF_URL": BFF_URL,
+    }
+    code = run(env, transport=_make_transport(), _on_ready=lambda b, s: None)
+    assert code == 0, capsys.readouterr().err
+
+
+def test_startup_whoamiNonObjectBody_exits1_oneLineNoTraceback(capsys):
+    """A 200 whoami whose JSON body is not an object (proxy/captive page) → one line, no Traceback."""
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[1, 2]))
+    code = run(_env(), transport=transport)
+    assert code == 1
+    _, err = capsys.readouterr()
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1, f"Expected 1 stderr line, got {lines}"
+    assert "Traceback" not in err
+
+
+def test_startup_401_hintNamesBothTokenSettings(capsys):
+    """The 401 hint must not send a token-file user to the wrong setting."""
+    code = run(_env(), transport=_make_transport(status=401))
+    assert code == 1
+    _, err = capsys.readouterr()
+    assert "OMT_MCP_TOKEN_FILE" in err

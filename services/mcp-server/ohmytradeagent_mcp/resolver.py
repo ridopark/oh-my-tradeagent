@@ -91,6 +91,8 @@ class StaticTokenResolver:
         except httpx.UnsupportedProtocol as exc:
             raise BffConfigError(self._bff.base_url, str(exc)) from exc
 
+        if not isinstance(data, dict):  # e.g. a proxy/captive page: report as a binding mismatch
+            data = {}
         bound = data.get("tenant_id", "")
         token_id = data.get("token_id", "")
 

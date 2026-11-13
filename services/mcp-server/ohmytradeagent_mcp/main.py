@@ -73,7 +73,7 @@ def run(
         return 1
     except Unauthorized as exc:
         print(
-            f"error: BFF rejected the token with {exc.status} — check OMT_MCP_TOKEN",
+            f"error: BFF rejected the token with {exc.status} — check the MCP token (OMT_MCP_TOKEN / OMT_MCP_TOKEN_FILE)",
             file=sys.stderr,
         )
         return 1

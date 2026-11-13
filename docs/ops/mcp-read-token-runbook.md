@@ -239,7 +239,7 @@ curl -s \
   -H "Authorization: Bearer $(cat ~/.config/omt-mcp/<tenant>.token.new)" \
   http://127.0.0.1:18080/api/mcp/whoami
 
-# 4. Replace old token file, remove new entry from BFF secret
+# 4. Replace old token file, remove the OLD entry from the BFF secret (keep only the new hash)
 mv ~/.config/omt-mcp/<tenant>.token.new ~/.config/omt-mcp/<tenant>.token
 kubectl -n copytrade patch secret dashboard-secrets --type merge \
   -p "{\"stringData\":{\"BFF_MCP_READ_TOKENS\":\"${new_hash}:<tenant>\"}}"

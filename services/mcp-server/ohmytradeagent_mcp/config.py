@@ -7,6 +7,8 @@ unreadable or empty.
 """
 from __future__ import annotations
 
+import os
+
 
 class ConfigError(Exception):
     """Raised when a required environment variable is missing, conflicting, or invalid."""
@@ -51,7 +53,7 @@ class Config:
             return env["OMT_MCP_TOKEN"].strip()
 
         # Read token from file
-        path = env["OMT_MCP_TOKEN_FILE"].strip()
+        path = os.path.expanduser(env["OMT_MCP_TOKEN_FILE"].strip())
         try:
             with open(path) as fh:
                 token = fh.read().strip()

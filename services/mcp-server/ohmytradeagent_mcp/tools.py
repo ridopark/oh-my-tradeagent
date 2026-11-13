@@ -14,7 +14,7 @@ import json
 import logging
 import zoneinfo
 from datetime import date
-from typing import Any
+from typing import Any, NoReturn
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 _MARKET_TZ = zoneinfo.ZoneInfo("America/New_York")
 
 
-def _raise_manual_entry_error(exc: BffError, context: str) -> None:
+def _raise_manual_entry_error(exc: BffError, context: str) -> NoReturn:
     """Map a BffError from a manual-entry route into a ToolError.
 
     Raises ToolError for 404 manual_entry_disabled; otherwise raises ToolError

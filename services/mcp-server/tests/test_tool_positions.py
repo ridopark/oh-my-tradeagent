@@ -274,7 +274,7 @@ def test_recentClosedTrades_newestFirst_keepsKind(test_binding, stub_bff):
 
 
 # ---------------------------------------------------------------------------
-# test 8: every tool (now 4) is fully redacted — sweep of sensitive literals
+# test 8: every tool is fully redacted — sweep of sensitive literals
 # ---------------------------------------------------------------------------
 
 # Sensitive id VALUES from fixtures that must never appear in tool output
