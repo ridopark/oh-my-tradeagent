@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-13",
+  "count": 2,
+  "symbols": [
+    {
+      "symbol": "SMCI",
+      "dp_volume": 50000,
+      "total_volume": 200000,
+      "dp_share": 0.25,
+      "buy_volume": 30000,
+      "sell_volume": 20000,
+      "buy_ratio": 0.60,
+      "late_buy_ratio": 0.55,
+      "large_count": 5,
+      "large_volume": 25000,
+      "levels": [
+        {"price": 95.0, "notional": 500000.0, "prints": 20},
+        {"price": 90.0, "notional": 300000.0, "prints": 15}
+      ]
+    },
+    {
+      "symbol": "NVDA",
+      "dp_volume": 100000,
+      "total_volume": 500000,
+      "dp_share": 0.20,
+      "buy_volume": 60000,
+      "sell_volume": 40000,
+      "buy_ratio": 0.60,
+      "late_buy_ratio": 0.50,
+      "large_count": 10,
+      "large_volume": 50000,
+      "levels": []
+    }
+  ]
+}

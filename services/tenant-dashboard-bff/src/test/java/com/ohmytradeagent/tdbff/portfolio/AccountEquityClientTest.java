@@ -67,6 +67,8 @@ class AccountEquityClientTest {
     result.setOptionsTradingLevel(1L);
     result.setMultiplier(BigDecimal.ONE);
     result.setPendingTransferIn(new BigDecimal("2500"));
+    // #323 cash plumbing — if getCash() is dropped from the constructor call, this assertion fails
+    result.setCash(new BigDecimal("3000"));
     when(stub.getResult(anyLong(), any(TimeUnit.class), eq(AccountSnapshotResult.class)))
         .thenReturn(result);
 
@@ -78,6 +80,9 @@ class AccountEquityClientTest {
     assertThat(acct.optionsTradingLevel()).isEqualTo(1L);
     assertThat(acct.multiplier()).isEqualByComparingTo("1");
     assertThat(acct.pendingTransferIn()).isEqualByComparingTo("2500");
+    // Verifies the cash field flows end-to-end from AccountSnapshotResult to BrokerAccount.
+    // A mutant that passes null instead of result.getCash() makes this fail.
+    assertThat(acct.cash()).isEqualByComparingTo("3000");
   }
 
   @Test

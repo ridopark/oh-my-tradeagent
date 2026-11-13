@@ -1,0 +1,42 @@
+{
+  "tenant_id": "acme",
+  "count": 2,
+  "items": [
+    {
+      "intent_key": "k-1",
+      "signal_id": "sig-1",
+      "strategy_id": "copytrade",
+      "broker_target": "alpaca-live",
+      "option_symbol": "SMCI 261120C00050000",
+      "side": "BUY",
+      "qty": 21,
+      "limit_price": 2.50,
+      "state": "FILLED",
+      "broker_order_id": "brk-entry-001",
+      "recorded_at": "2026-11-10T10:28:00Z",
+      "submitted_at": "2026-11-10T10:29:00Z",
+      "filled_qty": 21,
+      "avg_fill_price": 2.50,
+      "filled_at": "2026-11-10T10:30:00Z",
+      "last_error": null
+    },
+    {
+      "intent_key": "k-99",
+      "signal_id": "sig-99",
+      "strategy_id": "copytrade",
+      "broker_target": "alpaca-live",
+      "option_symbol": "NVDA 261220P00100000",
+      "side": "BUY",
+      "qty": 2,
+      "limit_price": 1.00,
+      "state": "FILLED",
+      "broker_order_id": "brk-nvda-001",
+      "recorded_at": "2026-11-09T10:58:00Z",
+      "submitted_at": "2026-11-09T10:59:00Z",
+      "filled_qty": 2,
+      "avg_fill_price": 1.00,
+      "filled_at": "2026-11-09T11:00:00Z",
+      "last_error": null
+    }
+  ]
+}

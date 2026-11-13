@@ -100,7 +100,8 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
           "/api/flow/summary",
           "/api/darkpool/prints",
           "/api/darkpool/summary",
-          "/api/mcp/whoami");
+          "/api/mcp/whoami",
+          "/api/notional-cap");
 
   private final String sharedToken;
   private final String optionsChatIngestToken;

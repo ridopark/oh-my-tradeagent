@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.platform;
 
+import java.math.BigDecimal;
 import java.util.List;
 import org.jooq.DSLContext;
 import org.jooq.Record1;
@@ -48,7 +49,7 @@ public class DbStrategyConfigReader {
    * DB errors propagate — the floor-breach controller catches and falls back to the 0.50 default
    * (its 3-state contract maps every failure to a safe outcome, never to "ok").
    */
-  public java.math.BigDecimal floorBreachAlertPct(String tenantId, String strategyId) {
+  public BigDecimal floorBreachAlertPct(String tenantId, String strategyId) {
     Record1<String> row =
         orchestratorDsl
             .select(DSL.field("config->>'floor_breach_alert_pct'", String.class))
@@ -59,7 +60,30 @@ public class DbStrategyConfigReader {
       return null;
     }
     try {
-      return new java.math.BigDecimal(row.value1().trim());
+      return new BigDecimal(row.value1().trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Issue #1053: the raw {@code notional_cap_pct_of_capital_base} for a (tenant, strategy), or
+   * {@code null} when no row exists, the config carries no such field, or the value does not parse
+   * as a number. DB errors propagate — the notional-cap controller catches and maps them to {@code
+   * config_unavailable} (its 3-state contract maps every failure to a safe outcome, never to "ok").
+   */
+  public BigDecimal notionalCapPctOfCapitalBase(String tenantId, String strategyId) {
+    Record1<String> row =
+        orchestratorDsl
+            .select(DSL.field("config->>'notional_cap_pct_of_capital_base'", String.class))
+            .from(DSL.table("strategy_config"))
+            .where(DSL.field("tenant_id").eq(tenantId).and(DSL.field("strategy_id").eq(strategyId)))
+            .fetchOne();
+    if (row == null || row.value1() == null || row.value1().isBlank()) {
+      return null;
+    }
+    try {
+      return new BigDecimal(row.value1().trim());
     } catch (NumberFormatException e) {
       return null;
     }

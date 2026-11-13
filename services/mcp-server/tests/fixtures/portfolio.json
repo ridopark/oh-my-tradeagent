@@ -1,0 +1,42 @@
+{
+  "trading_day": "2026-11-13",
+  "open_positions_count": 2,
+  "open_positions_degraded": false,
+  "sum_open_notional": 1200.0,
+  "sum_open_notional_basis": "cost_basis_at_entry",
+  "realized_pnl_today": 350.0,
+  "realized_pnl_all_time": 12500.0,
+  "account_equity": [
+    {
+      "broker_target": "alpaca-live",
+      "equity": 95000.0,
+      "last_equity": 94500.0,
+      "today_pl": 500.0,
+      "options_buying_power": 45000.0,
+      "account_number": "310056593"
+    }
+  ],
+  "open_positions": [
+    {
+      "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
+      "strategy_id": "copytrade",
+      "contract_symbol": "SMCI 261120C00050000",
+      "remaining_qty": 5,
+      "entry_premium": 2.50,
+      "open_notional": 1250.0,
+      "entry_qty": 21,
+      "realized_pl": null,
+      "unrealized_pl": -300.0,
+      "trailing_armed": false
+    },
+    {
+      "workflow_id": "t-acme/s-copytrade/pos/NVDA 261220P00100000/sig-99",
+      "strategy_id": "copytrade",
+      "contract_symbol": "NVDA 261220P00100000",
+      "remaining_qty": 2,
+      "entry_premium": 1.00,
+      "open_notional": 200.0,
+      "trailing_armed": false
+    }
+  ]
+}
