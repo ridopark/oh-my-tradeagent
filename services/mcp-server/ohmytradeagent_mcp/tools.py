@@ -29,6 +29,25 @@ log = logging.getLogger(__name__)
 _MARKET_TZ = zoneinfo.ZoneInfo("America/New_York")
 
 
+def _raise_manual_entry_error(exc: BffError, context: str) -> None:
+    """Map a BffError from a manual-entry route into a ToolError.
+
+    Raises ToolError for 404 manual_entry_disabled; otherwise raises ToolError
+    with detail or status/error_code as available.  Never returns.
+    """
+    body = exc.body if isinstance(exc.body, dict) else {}
+    error_code = body.get("error", "")
+    if exc.status == 404 and error_code == "manual_entry_disabled":
+        raise ToolError(
+            f"{context} unavailable: manual entry is disabled for this tenant "
+            "(BFF 404 manual_entry_disabled); no other quote route is exposed"
+        ) from exc
+    detail = body.get("detail", "")
+    if detail:
+        raise ToolError(f"{context} unavailable: BFF {exc.status} {error_code} — {detail}") from exc
+    raise ToolError(f"{context} unavailable: BFF {exc.status} {error_code}") from exc
+
+
 def build_server(
     binding: TenantBinding,
     bff: BffClient,
@@ -390,19 +409,7 @@ def _register_tools(
         try:
             data = await bff.get("/api/entries/quote", params={"occ": occ})
         except BffError as exc:
-            body = exc.body if isinstance(exc.body, dict) else {}
-            error_code = body.get("error", "")
-            if exc.status == 404 and error_code == "manual_entry_disabled":
-                raise ToolError(
-                    "quote unavailable: manual entry is disabled for this tenant "
-                    "(BFF 404 manual_entry_disabled); no other quote route is exposed"
-                ) from exc
-            detail = body.get("detail", "")
-            if detail:
-                raise ToolError(
-                    f"quote unavailable: BFF {exc.status} {error_code} — {detail}"
-                ) from exc
-            raise ToolError(f"quote unavailable: BFF {exc.status} {error_code}") from exc
+            _raise_manual_entry_error(exc, "quote")
         return _tool_result(data, binding)
 
     # ------------------------------------------------------------------
@@ -445,19 +452,7 @@ def _register_tools(
                     params={"underlying": underlying, "expiration": expiration, "right": right},
                 )
         except BffError as exc:
-            body = exc.body if isinstance(exc.body, dict) else {}
-            error_code = body.get("error", "")
-            if exc.status == 404 and error_code == "manual_entry_disabled":
-                raise ToolError(
-                    "chain unavailable: manual entry is disabled for this tenant "
-                    "(BFF 404 manual_entry_disabled); no other chain route is exposed"
-                ) from exc
-            detail = body.get("detail", "")
-            if detail:
-                raise ToolError(
-                    f"chain unavailable: BFF {exc.status} {error_code} — {detail}"
-                ) from exc
-            raise ToolError(f"chain unavailable: BFF {exc.status} {error_code}") from exc
+            _raise_manual_entry_error(exc, "chain")
         return _tool_result(data, binding)
 
     # ------------------------------------------------------------------

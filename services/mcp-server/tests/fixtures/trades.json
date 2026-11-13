@@ -6,11 +6,11 @@
       "event_id": "evt-1",
       "occurred_at": "2026-11-13T12:00:00Z",
       "kind": "PartialExitFilled",
-      "actor": "system",
+      "actor": "operator:tenant:acme:admin@example.com",
       "strategy_id": "copytrade",
       "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
       "correlation_id": "corr-1",
-      "subject": "{\"qty_filled\": 16, \"avg_fill_price\": 3.50, \"broker_order_id\": \"brk-exit-001\"}",
+      "subject": "{\"qty_filled\": 16, \"avg_fill_price\": 3.50, \"broker_order_id\": \"brk-exit-001\", \"notified\": \"admin@example.com\"}",
       "entry_basis": 2.50
     },
     {

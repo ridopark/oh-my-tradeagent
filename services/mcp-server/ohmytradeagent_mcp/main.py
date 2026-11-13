@@ -22,9 +22,10 @@ from typing import Any
 
 import httpx
 
-from ohmytradeagent_mcp.bff import BffClient
+from ohmytradeagent_mcp.bff import BffClient, BffError
 from ohmytradeagent_mcp.config import Config, ConfigError
 from ohmytradeagent_mcp.resolver import (
+    BffConfigError,
     BffUnreachable,
     StaticTokenResolver,
     TenantBinding,
@@ -54,7 +55,7 @@ def run(
     try:
         cfg = Config(env)
     except ConfigError as exc:
-        print(f"error: missing required environment variable {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     # --- BFF client and tenant resolver ---
@@ -79,6 +80,24 @@ def run(
     except BffUnreachable as exc:
         print(
             f"error: BFF unreachable at {exc.url} — check OMT_BFF_URL and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except BffConfigError as exc:
+        print(
+            f"error: invalid OMT_BFF_URL={exc.url!r} — check that it starts with http:// or https://",
+            file=sys.stderr,
+        )
+        return 2
+    except BffError as exc:
+        print(
+            f"error: BFF returned {exc.status} from {cfg.bff_url}/api/mcp/whoami — check the BFF",
+            file=sys.stderr,
+        )
+        return 1
+    except httpx.HTTPError as exc:
+        print(
+            f"error: HTTP error calling {cfg.bff_url}: {exc}",
             file=sys.stderr,
         )
         return 1

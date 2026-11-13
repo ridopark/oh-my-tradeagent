@@ -326,3 +326,6 @@ def test_everyTool_isRedacted(test_binding, stub_bff):
         for key in _REDACTED_KEYS:
             # Check the key string as a JSON key (always followed by ": " or ":") is absent
             assert f'"{key}"' not in raw, f"Tool {name!r}: key {key!r} not redacted"
+
+        # Finding C: email addresses must not reach the AI provider
+        assert "@example.com" not in raw, f"Tool {name!r}: email address not redacted"

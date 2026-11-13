@@ -33,12 +33,14 @@ For the live cluster, start a port-forward first (see §Port-forward) and use
 | Variable | Required | Description |
 |---|---|---|
 | `OMT_TENANT` | yes | The tenant ID the token is bound to (e.g. `prod_real`). |
-| `OMT_MCP_TOKEN` | yes | The read-only MCP token minted by the runbook. |
+| `OMT_MCP_TOKEN` | one of | The raw MCP token value; set exactly one of this or `OMT_MCP_TOKEN_FILE`. |
+| `OMT_MCP_TOKEN_FILE` | one of | Absolute path to a file containing the token (e.g. `~/.config/omt-mcp/prod_real.token`); preferred for client configs — the file path is stored in config, not the token. |
 | `OMT_BFF_URL` | yes | Base URL of the tenant-dashboard-bff (e.g. `http://127.0.0.1:18080`). |
 
-Any missing variable causes the server to exit with code 2 and a one-line error naming the
-variable. A token that the BFF rejects (401) or that is bound to a different tenant (mismatch)
-causes exit code 1 with a one-line message naming the problem.
+Exactly one of `OMT_MCP_TOKEN` or `OMT_MCP_TOKEN_FILE` must be set; both or neither causes exit
+code 2. Any other missing variable also causes exit code 2 with a one-line error. A token that the
+BFF rejects (401) or that is bound to a different tenant (mismatch) causes exit code 1 with a
+one-line message.
 
 ---
 
@@ -138,14 +140,16 @@ Verified against `claude mcp add --help` (Claude Code 2.1.325).
 claude mcp add omt-mcp \
   --scope user \
   -e OMT_TENANT=prod_real \
-  -e "OMT_MCP_TOKEN=$(cat ~/.config/omt-mcp/prod_real.token)" \
+  -e OMT_MCP_TOKEN_FILE="$HOME/.config/omt-mcp/prod_real.token" \
   -e OMT_BFF_URL=http://127.0.0.1:18080 \
-  -- uv --directory /home/ridopark/src/oh-my-tradeagent/services/mcp-server run omt-mcp
+  -- uv --directory <repo>/services/mcp-server run omt-mcp
 ```
 
-This stores the env vars (including the resolved token value) in `~/.claude.json` under the
-`user` scope. If you rotate the token, re-run the command with the new value. Use `--scope local`
-to restrict to the current project instead.
+Replace `<repo>` with the absolute path to the repository root. This stores the env vars in
+`~/.claude.json` under the `user` scope. Because the env var holds the **file path**, not the
+token value, `~/.claude.json` never contains the raw token — the file is read at startup each
+time. Rotation means overwriting `~/.config/omt-mcp/prod_real.token`; no config change needed.
+Use `--scope local` to restrict to the current project instead.
 
 The port-forward must be running in a separate terminal whenever you start a Claude Code session
 that uses `omt-mcp`.
@@ -158,20 +162,8 @@ https://docs.anthropic.com/en/docs/claude-code/mcp).
 Verified against the Gemini CLI MCP docs at https://www.geminicli.com/docs/tools/mcp-server
 (accessed 2026-11-13).
 
-> **Note:** Gemini CLI was superseded by Antigravity CLI on 2026-06-18 for free-tier and
-> Google AI Pro/Ultra users. Code Assist Standard/Enterprise users continue on Gemini CLI.
-> Confirm which tool your account uses before applying this config.
-
-Gemini CLI's `mcpServers` block in `~/.gemini/settings.json` supports `$VAR` references to host
-environment variables. Export the token from your shell profile so Gemini CLI can pass it
-through:
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc
-export OMT_MCP_TOKEN=$(cat ~/.config/omt-mcp/prod_real.token)
-```
-
-Then add to `~/.gemini/settings.json`:
+Gemini CLI's `mcpServers` block in `~/.gemini/settings.json` passes `env` entries directly to
+the server process. Use `OMT_MCP_TOKEN_FILE` so the token stays in the file, not in the config:
 
 ```json
 {
@@ -180,13 +172,13 @@ Then add to `~/.gemini/settings.json`:
       "command": "uv",
       "args": [
         "--directory",
-        "/home/ridopark/src/oh-my-tradeagent/services/mcp-server",
+        "/absolute/path/to/repo/services/mcp-server",
         "run",
         "omt-mcp"
       ],
       "env": {
         "OMT_TENANT": "prod_real",
-        "OMT_MCP_TOKEN": "$OMT_MCP_TOKEN",
+        "OMT_MCP_TOKEN_FILE": "/home/YOUR_USER/.config/omt-mcp/prod_real.token",
         "OMT_BFF_URL": "http://127.0.0.1:18080"
       }
     }
@@ -194,20 +186,10 @@ Then add to `~/.gemini/settings.json`:
 }
 ```
 
-The Gemini CLI docs note that host variables matching patterns `*TOKEN*`, `*SECRET*`,
-`*PASSWORD*`, `*KEY*` are stripped from the environment passed to MCP servers unless you list
-them explicitly in `env` — the snippet above lists `OMT_MCP_TOKEN` explicitly, so it is passed
-through.
+Replace `/absolute/path/to/repo` with the repository root and `/home/YOUR_USER` with your home
+directory. JSON does not expand `~` or `$HOME`, so the full path is required.
 
-Alternatively, `gemini mcp add` writes the same block from the command line:
-
-```bash
-gemini mcp add omt-mcp \
-  -e OMT_TENANT=prod_real \
-  -e "OMT_MCP_TOKEN=$OMT_MCP_TOKEN" \
-  -e OMT_BFF_URL=http://127.0.0.1:18080 \
-  uv -- --directory /home/ridopark/src/oh-my-tradeagent/services/mcp-server run omt-mcp
-```
+Rotation means overwriting the token file; no config change needed.
 
 ### Codex CLI
 
@@ -216,25 +198,29 @@ https://developers.openai.com/codex/config-reference (redirects to
 https://learn.chatgpt.com/docs/config-file/config-reference, accessed 2026-11-13).
 
 User-level config lives in `~/.codex/config.toml`. The MCP section uses `[mcp_servers.<id>]`
-with `command`, `args`, `env` (literal key/value pairs) and `env_vars` (host variable names to
-whitelist). Export the token from your shell profile first (same as the Gemini step above), then
-add:
+with `command`, `args`, and `env` (literal key/value pairs). Set `OMT_MCP_TOKEN_FILE` so the
+token stays in the file, not in the config:
 
 ```toml
 [mcp_servers.omt-mcp]
 command = "uv"
 args = [
   "--directory",
-  "/home/ridopark/src/oh-my-tradeagent/services/mcp-server",
+  "/absolute/path/to/repo/services/mcp-server",
   "run",
   "omt-mcp"
 ]
-env = { OMT_TENANT = "prod_real", OMT_BFF_URL = "http://127.0.0.1:18080" }
-env_vars = ["OMT_MCP_TOKEN"]
+env = {
+  OMT_TENANT = "prod_real",
+  OMT_MCP_TOKEN_FILE = "/home/YOUR_USER/.config/omt-mcp/prod_real.token",
+  OMT_BFF_URL = "http://127.0.0.1:18080"
+}
 ```
 
-`env_vars` whitelists `OMT_MCP_TOKEN` from the host environment and passes it to the server
-process. The token value is never stored in the TOML file.
+Replace `/absolute/path/to/repo` with the repository root and `/home/YOUR_USER` with your home
+directory. TOML does not expand `~`, so the full path is required.
+
+Rotation means overwriting the token file; no config change needed.
 
 ---
 

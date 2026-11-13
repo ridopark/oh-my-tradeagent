@@ -47,6 +47,15 @@ class BffUnreachable(Exception):
         super().__init__(f"BFF unreachable at {url}: {cause}")
 
 
+class BffConfigError(Exception):
+    """The BFF URL is misconfigured (e.g. missing http:// scheme)."""
+
+    def __init__(self, url: str, detail: str) -> None:
+        self.url = url
+        self.detail = detail
+        super().__init__(f"BFF config error for OMT_BFF_URL={url!r}: {detail}")
+
+
 @runtime_checkable
 class TenantResolver(Protocol):
     async def resolve(self) -> TenantBinding: ...
@@ -78,7 +87,9 @@ class StaticTokenResolver:
                 raise Unauthorized(exc.status, detail) from exc
             raise
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise BffUnreachable(self._bff._base_url, str(exc)) from exc
+            raise BffUnreachable(self._bff.base_url, str(exc)) from exc
+        except httpx.UnsupportedProtocol as exc:
+            raise BffConfigError(self._bff.base_url, str(exc)) from exc
 
         bound = data.get("tenant_id", "")
         token_id = data.get("token_id", "")

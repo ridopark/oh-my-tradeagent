@@ -114,3 +114,111 @@ def test_startup_missingEnv_exits2(capsys):
         assert code == 2, f"expected exit 2 for missing {missing}"
         _, err = capsys.readouterr()
         assert missing in err, f"stderr should name {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Finding A — OMT_MCP_TOKEN_FILE mutual-exclusion and file-read cases
+# ---------------------------------------------------------------------------
+
+
+def test_startup_bothTokenAndFile_exits2_namesBoth(capsys):
+    """Both OMT_MCP_TOKEN and OMT_MCP_TOKEN_FILE set → exit 2, stderr names both vars."""
+    env = {
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN": TEST_TOKEN,
+        "OMT_MCP_TOKEN_FILE": "/some/path.token",
+        "OMT_BFF_URL": BFF_URL,
+    }
+    code = run(env, transport=_make_transport())
+
+    assert code == 2
+    _, err = capsys.readouterr()
+    assert "OMT_MCP_TOKEN" in err
+    assert "OMT_MCP_TOKEN_FILE" in err
+
+
+def test_startup_tokenFileUnreadable_exits2_namesPath(capsys):
+    """OMT_MCP_TOKEN_FILE points to a nonexistent path → exit 2, stderr names the path."""
+    path = "/nonexistent/token-abc123.token"
+    env = {
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN_FILE": path,
+        "OMT_BFF_URL": BFF_URL,
+    }
+    code = run(env, transport=_make_transport())
+
+    assert code == 2
+    _, err = capsys.readouterr()
+    assert path in err
+
+
+def test_startup_tokenFileEmpty_exits2_namesPath(tmp_path, capsys):
+    """OMT_MCP_TOKEN_FILE points to an empty file → exit 2, stderr names the path."""
+    token_file = tmp_path / "empty.token"
+    token_file.write_text("")
+    env = {
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN_FILE": str(token_file),
+        "OMT_BFF_URL": BFF_URL,
+    }
+    code = run(env, transport=_make_transport())
+
+    assert code == 2
+    _, err = capsys.readouterr()
+    assert str(token_file) in err
+
+
+def test_startup_tokenFile_success(tmp_path, capsys):
+    """OMT_MCP_TOKEN_FILE with a valid token (trailing newline stripped) → exit 0, serves."""
+    token_file = tmp_path / "prod_real.token"
+    token_file.write_text(TEST_TOKEN + "\n")  # trailing newline must be stripped by config
+
+    captured_binding = []
+
+    def on_ready(binding, server):
+        captured_binding.append(binding)
+
+    env = {
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN_FILE": str(token_file),
+        "OMT_BFF_URL": BFF_URL,
+    }
+    code = run(env, transport=_make_transport(), _on_ready=on_ready)
+
+    assert code == 0
+    assert len(captured_binding) == 1
+    assert captured_binding[0].tenant_id == TEST_TENANT
+
+
+# ---------------------------------------------------------------------------
+# Finding B — startup must never produce a traceback
+# ---------------------------------------------------------------------------
+
+
+def test_startup_502_exits1_oneLineNoTraceback(capsys):
+    """BFF returns 502 on whoami → exit 1, exactly one stderr line, no Traceback."""
+    transport = _make_transport(status=502)
+    code = run(_env(), transport=transport)
+
+    assert code == 1
+    _, err = capsys.readouterr()
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1, f"Expected 1 stderr line, got {lines}"
+    assert "Traceback" not in err
+    assert "502" in err
+
+
+def test_startup_urlWithoutScheme_exits2_oneLineNoTraceback(capsys):
+    """URL without http:// scheme raises UnsupportedProtocol → exit 2, one line, no Traceback."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.UnsupportedProtocol("URL scheme 'localhost' is not supported")
+
+    code = run(_env(bff_url="localhost:9999"), transport=httpx.MockTransport(handler))
+
+    assert code == 2
+    _, err = capsys.readouterr()
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1, f"Expected 1 stderr line, got {lines}"
+    assert "Traceback" not in err
+    assert "OMT_BFF_URL" in err

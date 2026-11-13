@@ -40,6 +40,11 @@ class BffClient:
         }
         self._transport = transport
 
+    @property
+    def base_url(self) -> str:
+        """The base URL this client was constructed with."""
+        return self._base_url
+
     async def get(self, path: str, params: dict[str, str] | None = None) -> dict:
         """Make a GET request to `path` and return the JSON body.
 

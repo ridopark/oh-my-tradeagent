@@ -60,7 +60,21 @@ public class NotionalCapController {
   @GetMapping
   public ResponseEntity<Map<String, Object>> notionalCap(HttpServletRequest req) {
     String tenantId = ctx.tenantId(req);
-    List<String> strategyIds = strategyResolver.strategyIdsForTenant(tenantId);
+    List<String> strategyIds;
+    try {
+      strategyIds = strategyResolver.strategyIdsForTenant(tenantId);
+    } catch (RuntimeException e) {
+      Map<String, Object> body = new LinkedHashMap<>();
+      body.put("tenant_id", tenantId);
+      body.put("formula", FORMULA);
+      body.put("sum_open_notional", null);
+      body.put("sum_open_notional_basis", "cost_basis_at_entry");
+      body.put("open_positions_count", null);
+      body.put(
+          "strategies",
+          List.of(strategyRow(null, null, null, null, null, null, null, "config_unavailable")));
+      return ResponseEntity.ok(body);
+    }
 
     // Read positions (fail-soft for the display: positions_unavailable, never 500).
     // PositionsReader.openPositions is called directly — PortfolioCache's degraded path would
@@ -112,17 +126,47 @@ public class NotionalCapController {
     // cannot compute anything meaningful — but we still read and report cash so the operator can
     // see the account state independently of the Temporal read.
     if (positionsUnavailable) {
-      String bt = configReader.brokerTarget(tenantId, strategyId);
+      String bt;
+      try {
+        bt = configReader.brokerTarget(tenantId, strategyId);
+      } catch (RuntimeException e) {
+        return strategyRow(strategyId, null, null, null, null, null, null, "config_unavailable");
+      }
       BigDecimal cash = cashForTarget(tenantId, bt, snapshotCache);
       return strategyRow(strategyId, bt, null, cash, null, null, null, "positions_unavailable");
     }
 
-    String brokerTarget = configReader.brokerTarget(tenantId, strategyId);
+    String brokerTarget;
+    try {
+      brokerTarget = configReader.brokerTarget(tenantId, strategyId);
+    } catch (RuntimeException e) {
+      return strategyRow(strategyId, null, null, null, null, null, null, "config_unavailable");
+    }
     if (brokerTarget == null) {
       return strategyRow(strategyId, null, null, null, null, null, null, "broker_target_unknown");
     }
 
     BigDecimal cash = cashForTarget(tenantId, brokerTarget, snapshotCache);
+
+    // Check pct BEFORE the cash-dependent path: if the gate is disabled (pct null),
+    // report cap_not_configured regardless of cash state — matching the risk gate's precedence.
+    // Cash is still read (above) so we can report it if available; we just never start the
+    // cash-dependent failure path when the gate itself is off.
+    BigDecimal pct;
+    try {
+      pct = configReader.notionalCapPctOfCapitalBase(tenantId, strategyId);
+    } catch (RuntimeException e) {
+      BigDecimal capitalBase = cash != null ? cash.add(sumOpenNotional) : null;
+      return strategyRow(
+          strategyId, brokerTarget, null, cash, capitalBase, null, null, "config_unavailable");
+    }
+
+    if (pct == null) {
+      // Gate disabled (no pct configured); report cash/capital_base if available, never compute.
+      BigDecimal capitalBase = cash != null ? cash.add(sumOpenNotional) : null;
+      return strategyRow(
+          strategyId, brokerTarget, null, cash, capitalBase, null, null, "cap_not_configured");
+    }
 
     // Gate's exact fail-closed condition: null OR signum() <= 0.
     if (cash == null || cash.signum() <= 0) {
@@ -130,24 +174,7 @@ public class NotionalCapController {
           strategyId, brokerTarget, null, cash, null, null, null, "cash_unavailable");
     }
 
-    // DB errors from the pct read propagate here and are mapped to config_unavailable.
-    BigDecimal pct;
-    try {
-      pct = configReader.notionalCapPctOfCapitalBase(tenantId, strategyId);
-    } catch (RuntimeException e) {
-      BigDecimal capitalBase = cash.add(sumOpenNotional);
-      return strategyRow(
-          strategyId, brokerTarget, null, cash, capitalBase, null, null, "config_unavailable");
-    }
-
     BigDecimal capitalBase = cash.add(sumOpenNotional);
-
-    if (pct == null) {
-      // Gate disabled (no pct configured); capital_base and cash are still informative.
-      return strategyRow(
-          strategyId, brokerTarget, null, cash, capitalBase, null, null, "cap_not_configured");
-    }
-
     BigDecimal cap = capitalBase.multiply(pct);
     BigDecimal headroom = cap.subtract(sumOpenNotional);
     return strategyRow(strategyId, brokerTarget, pct, cash, capitalBase, cap, headroom, null);

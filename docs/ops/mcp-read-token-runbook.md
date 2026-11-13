@@ -11,7 +11,9 @@ call the BFF's allowlisted routes (`/api/portfolio`, `/api/notional-cap`, `/api/
 read a different tenant's data.
 
 > **Golden rules**
-> 1. Store the **token**, not the hash, in the client config file (read by the MCP server).
+> 1. The token lives only in `~/.config/omt-mcp/<tenant>.token` (mode 600) on the workstation.
+>    Client configs hold the **file path** (`OMT_MCP_TOKEN_FILE=~/.config/omt-mcp/<tenant>.token`),
+>    never the raw token value. Rotation = overwrite the file; no config change needed.
 > 2. Store the **hash**, not the token, in `dashboard-secrets` (read by the BFF).
 > 3. Never commit either value to git. `~/.config/omt-mcp/` is on the workstation only.
 > 4. Restart the BFF **outside RTH** when open positions exist — the restart is fast but it
@@ -74,9 +76,10 @@ kubectl -n copytrade patch secret dashboard-secrets --type merge \
   -p '{"stringData":{"BFF_MCP_READ_TOKENS":"<hash1>:prod_real,<hash2>:staging_paper"}}'
 ```
 
-**Mirror to `infra/secrets-template/secrets.local.yaml`** (per `infra/k8s/README.md`): add or
-update the `BFF_MCP_READ_TOKENS` line in the `dashboard-secrets` block of your local copy of
-`secrets.local.yaml`. This is your personal operator backup; it is git-ignored.
+**Mirror to `infra/k8s/secrets.local.yaml`** (per `infra/k8s/README.md`): add or update the
+`BFF_MCP_READ_TOKENS` line in the `dashboard-secrets` block of your local copy. Files matching
+`infra/k8s/*.local.yaml` are git-ignored; that is the correct location for operator secrets
+backups. (`infra/secrets-template/secrets.local.yaml` is NOT git-ignored — do not use it.)
 
 ---
 
@@ -177,13 +180,28 @@ curl -s -o /dev/null -w '%{http_code}' \
 
 ## Revoke
 
-Remove the token's hash entry from the secret and restart:
+Remove **only** the target tenant's hash from `BFF_MCP_READ_TOKENS`, then restart.
+
+**If this is the only entry** (the value becomes empty):
 
 ```bash
-# Remove prod_real's token (leave others if any):
 kubectl -n copytrade patch secret dashboard-secrets --type merge \
   -p '{"stringData":{"BFF_MCP_READ_TOKENS":""}}'
+```
 
+**If other tenant entries remain** (replace the value with everything except the revoked entry;
+comma-separated, no trailing comma):
+
+```bash
+# Example: BFF_MCP_READ_TOKENS was "<hash1>:prod_real,<hash2>:staging_paper"
+# After revoking prod_real, set it to just the remaining entries:
+kubectl -n copytrade patch secret dashboard-secrets --type merge \
+  -p '{"stringData":{"BFF_MCP_READ_TOKENS":"<hash2>:staging_paper"}}'
+```
+
+Then restart to pick up the change:
+
+```bash
 kubectl -n copytrade rollout restart deployment/tenant-dashboard-bff
 kubectl -n copytrade rollout status deployment/tenant-dashboard-bff
 ```

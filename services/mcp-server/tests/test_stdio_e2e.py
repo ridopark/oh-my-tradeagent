@@ -136,7 +136,7 @@ async def test_stdio_endToEnd_listsToolsAndPrompt(stub_bff_port):
     assert expected_tools == tool_names, (
         f"Expected exactly {expected_tools}; got {tool_names}"
     )
-    assert "analyze_positions" in prompt_names, f"got: {prompt_names}"
+    assert prompt_names == {"analyze_positions"}, f"got: {prompt_names}"
 
 
 def test_stdout_cleanliness_rawSubprocess(stub_bff_port):

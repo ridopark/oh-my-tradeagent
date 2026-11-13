@@ -1,5 +1,6 @@
 package com.ohmytradeagent.tdbff.platform;
 
+import java.math.BigDecimal;
 import java.util.List;
 import org.jooq.DSLContext;
 import org.jooq.Record1;
@@ -48,7 +49,7 @@ public class DbStrategyConfigReader {
    * DB errors propagate — the floor-breach controller catches and falls back to the 0.50 default
    * (its 3-state contract maps every failure to a safe outcome, never to "ok").
    */
-  public java.math.BigDecimal floorBreachAlertPct(String tenantId, String strategyId) {
+  public BigDecimal floorBreachAlertPct(String tenantId, String strategyId) {
     Record1<String> row =
         orchestratorDsl
             .select(DSL.field("config->>'floor_breach_alert_pct'", String.class))
@@ -59,7 +60,7 @@ public class DbStrategyConfigReader {
       return null;
     }
     try {
-      return new java.math.BigDecimal(row.value1().trim());
+      return new BigDecimal(row.value1().trim());
     } catch (NumberFormatException e) {
       return null;
     }
@@ -71,7 +72,7 @@ public class DbStrategyConfigReader {
    * as a number. DB errors propagate — the notional-cap controller catches and maps them to {@code
    * config_unavailable} (its 3-state contract maps every failure to a safe outcome, never to "ok").
    */
-  public java.math.BigDecimal notionalCapPctOfCapitalBase(String tenantId, String strategyId) {
+  public BigDecimal notionalCapPctOfCapitalBase(String tenantId, String strategyId) {
     Record1<String> row =
         orchestratorDsl
             .select(DSL.field("config->>'notional_cap_pct_of_capital_base'", String.class))
@@ -82,7 +83,7 @@ public class DbStrategyConfigReader {
       return null;
     }
     try {
-      return new java.math.BigDecimal(row.value1().trim());
+      return new BigDecimal(row.value1().trim());
     } catch (NumberFormatException e) {
       return null;
     }

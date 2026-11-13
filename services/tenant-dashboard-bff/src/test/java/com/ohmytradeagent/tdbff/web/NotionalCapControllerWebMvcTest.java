@@ -133,6 +133,9 @@ class NotionalCapControllerWebMvcTest {
   void nullCash_isCashUnavailable_withNoNumbers() throws Exception {
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("copytrade"));
     when(configReader.brokerTarget("acme", "copytrade")).thenReturn("alpaca-live");
+    // pct must be non-null so we reach the cash-dependent path (pct null → cap_not_configured)
+    when(configReader.notionalCapPctOfCapitalBase("acme", "copytrade"))
+        .thenReturn(new BigDecimal("0.5"));
     when(equityClient.snapshotFor("acme", "alpaca-live"))
         .thenReturn(new AccountEquityClient.BrokerAccount(null, null));
     when(positionsReader.openPositions("acme")).thenReturn(twoPositions());
@@ -156,6 +159,9 @@ class NotionalCapControllerWebMvcTest {
   void zeroCash_isCashUnavailable() throws Exception {
     when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("copytrade"));
     when(configReader.brokerTarget("acme", "copytrade")).thenReturn("alpaca-live");
+    // pct must be non-null so we reach the cash-dependent path (pct null → cap_not_configured)
+    when(configReader.notionalCapPctOfCapitalBase("acme", "copytrade"))
+        .thenReturn(new BigDecimal("0.5"));
     when(equityClient.snapshotFor("acme", "alpaca-live")).thenReturn(acctWithCash(BigDecimal.ZERO));
     when(positionsReader.openPositions("acme")).thenReturn(twoPositions());
 
@@ -294,6 +300,61 @@ class NotionalCapControllerWebMvcTest {
     mvc.perform(get("/api/notional-cap"))
         .andExpect(status().isUnauthorized())
         .andExpect(jsonPath("$.error").value("missing_tenant"));
+  }
+
+  // -------------------------------------------------------------------------------------
+  // Test D-new-1 — pct null AND cash null → cap_not_configured (gate checked before cash)
+  // -------------------------------------------------------------------------------------
+
+  @Test
+  void nullPctAndNullCash_isCapNotConfigured() throws Exception {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("copytrade"));
+    when(configReader.brokerTarget("acme", "copytrade")).thenReturn("alpaca-live");
+    when(configReader.notionalCapPctOfCapitalBase("acme", "copytrade")).thenReturn(null);
+    when(equityClient.snapshotFor("acme", "alpaca-live"))
+        .thenReturn(new AccountEquityClient.BrokerAccount(null, null));
+    when(positionsReader.openPositions("acme")).thenReturn(twoPositions());
+
+    // Gate is disabled (pct null) → cap_not_configured regardless of cash state
+    mvc.perform(get("/api/notional-cap").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.strategies[0].cash").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(
+            jsonPath("$.strategies[0].capital_base").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.strategies[0].cap").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.strategies[0].headroom").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.strategies[0].reason").value("cap_not_configured"));
+  }
+
+  // -------------------------------------------------------------------------------------
+  // Test D-new-2 — strategyIdsForTenant throws → config_unavailable (not 500)
+  // -------------------------------------------------------------------------------------
+
+  @Test
+  void strategyIdsForTenantThrows_isConfigUnavailable() throws Exception {
+    when(strategyResolver.strategyIdsForTenant("acme"))
+        .thenThrow(new RuntimeException("DB unavailable"));
+    when(positionsReader.openPositions("acme")).thenReturn(twoPositions());
+
+    mvc.perform(get("/api/notional-cap").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.strategies[0].reason").value("config_unavailable"));
+  }
+
+  // -------------------------------------------------------------------------------------
+  // Test D-new-3 — brokerTarget throws → config_unavailable for that strategy (not 500)
+  // -------------------------------------------------------------------------------------
+
+  @Test
+  void brokerTargetThrows_isConfigUnavailable() throws Exception {
+    when(strategyResolver.strategyIdsForTenant("acme")).thenReturn(List.of("copytrade"));
+    when(configReader.brokerTarget("acme", "copytrade"))
+        .thenThrow(new RuntimeException("DB unavailable"));
+    when(positionsReader.openPositions("acme")).thenReturn(twoPositions());
+
+    mvc.perform(get("/api/notional-cap").header("X-Tenant-Id", "acme"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.strategies[0].reason").value("config_unavailable"));
   }
 
   // -------------------------------------------------------------------------------------
