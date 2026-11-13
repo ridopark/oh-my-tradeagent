@@ -466,8 +466,8 @@ def _register_tools(
         Note: underlying_price is taken from the latest flow order's underlying_price
         (labelled underlying_price_source: "latest_flow_order") — it is NOT a
         real-time equity quote.  day_move is always null (not fabricated).
-        Dark-pool data is null with a note when the BFF's dark-pool controller is
-        not enabled (@ConditionalOnProperty).
+        Flow data (and so underlying_price) and dark-pool data are each null with a
+        note when that BFF controller is not enabled (@ConditionalOnProperty).
 
         Args:
             ticker: the underlying ticker symbol (e.g. SMCI).
@@ -478,7 +478,10 @@ def _register_tools(
         if date:
             params_date["date"] = date
 
-        # --- flow summary ---
+        # --- flow summary + orders (404 → null + note; any other error propagates) ---
+        flow_summary: Any = None
+        flow_orders: Any = None
+        flow_note: str | None = None
         try:
             summary_resp = await bff.get(
                 "/api/flow/summary",
@@ -488,22 +491,16 @@ def _register_tools(
             flow_summary = next(
                 (t for t in flow_tickers if t.get("ticker") == ticker_upper), None
             )
-        except BffError as exc:
-            raise ToolError(
-                f"flow summary unavailable: BFF {exc.status} from /api/flow/summary"
-            ) from exc
-
-        # --- flow orders ---
-        try:
             orders_resp = await bff.get(
                 "/api/flow/orders",
                 params={"ticker": ticker_upper, "limit": "50", **params_date},
             )
             flow_orders = orders_resp.get("items", [])
         except BffError as exc:
-            raise ToolError(
-                f"flow orders unavailable: BFF {exc.status} from /api/flow/orders"
-            ) from exc
+            if exc.status != 404:
+                raise ToolError(f"options flow unavailable: BFF {exc.status}") from exc
+            flow_summary, flow_orders = None, None
+            flow_note = "unavailable (BFF 404: flow reads are not enabled on this BFF)"
 
         # underlying_price from the most recent (first) flow order
         underlying_price: Any = None
@@ -544,6 +541,8 @@ def _register_tools(
             "day_move": None,
             "darkpool": darkpool,
         }
+        if flow_note:
+            result["flow_note"] = flow_note
         if darkpool_note:
             result["darkpool_note"] = darkpool_note
 
