@@ -1,0 +1,8 @@
+{
+  "tripped": false,
+  "trippedAt": null,
+  "reason": null,
+  "resettableAt": null,
+  "openPositions": 2,
+  "openMtm": -150.0
+}

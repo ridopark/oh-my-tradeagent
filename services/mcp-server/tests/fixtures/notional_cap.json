@@ -1,0 +1,19 @@
+{
+  "tenant_id": "acme",
+  "formula": "capital_base = cash + sum_open_notional; cap = capital_base × notional_cap_pct_of_capital_base; headroom = cap − sum_open_notional",
+  "sum_open_notional": 1200.0,
+  "sum_open_notional_basis": "cost_basis_at_entry",
+  "open_positions_count": 2,
+  "strategies": [
+    {
+      "strategy_id": "copytrade",
+      "broker_target": "alpaca-live",
+      "notional_cap_pct_of_capital_base": 0.5,
+      "cash": 10000.0,
+      "capital_base": 11200.0,
+      "cap": 5600.0,
+      "headroom": 4400.0,
+      "reason": null
+    }
+  ]
+}
