@@ -132,6 +132,33 @@ Mint a token first: see `docs/ops/mcp-read-token-runbook.md`.
 The token file is at `~/.config/omt-mcp/<tenant>.token` (mode 600). **Never paste the token
 into a config file you commit to git.** The snippets below read it from the file.
 
+### Keep the tunnel up (optional, systemd user service)
+
+Instead of a port-forward in a spare terminal, a user service reconnects on its own. This one
+SSHes to the homelab and runs the port-forward there, forwarding local `127.0.0.1:18080`:
+
+```ini
+# ~/.config/systemd/user/omt-bff-tunnel.service
+[Unit]
+Description=SSH tunnel + kubectl port-forward to tenant-dashboard-bff (omt-mcp)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes \
+  -L 127.0.0.1:18080:127.0.0.1:18080 <user>@<homelab-host> \
+  kubectl -n copytrade port-forward --address 127.0.0.1 svc/tenant-dashboard-bff 18080:8083
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user daemon-reload && systemctl --user enable --now omt-bff-tunnel.service`, then
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/actuator/health` → `200`.
+Do **not** add `ssh -N`: it skips the remote command, so the port-forward never starts and every
+request fails with an empty reply.
+
 ### Claude Code
 
 Verified against `claude mcp add --help` (Claude Code 2.1.325).
@@ -204,18 +231,16 @@ token stays in the file, not in the config:
 ```toml
 [mcp_servers.omt-mcp]
 command = "uv"
-args = [
-  "--directory",
-  "/absolute/path/to/repo/services/mcp-server",
-  "run",
-  "omt-mcp"
-]
-env = {
-  OMT_TENANT = "prod_real",
-  OMT_MCP_TOKEN_FILE = "/home/YOUR_USER/.config/omt-mcp/prod_real.token",
-  OMT_BFF_URL = "http://127.0.0.1:18080"
-}
+args = ["--directory", "/absolute/path/to/repo/services/mcp-server", "run", "omt-mcp"]
+
+[mcp_servers.omt-mcp.env]
+OMT_TENANT = "prod_real"
+OMT_MCP_TOKEN_FILE = "/home/YOUR_USER/.config/omt-mcp/prod_real.token"
+OMT_BFF_URL = "http://127.0.0.1:18080"
 ```
+
+Use a `[mcp_servers.omt-mcp.env]` table, not a multi-line inline `env = { … }`: TOML 1.0 inline
+tables must be on one line, and a multi-line one fails to parse.
 
 Replace `/absolute/path/to/repo` with the repository root and `/home/YOUR_USER` with your home
 directory. TOML does not expand `~`, so the full path is required.
