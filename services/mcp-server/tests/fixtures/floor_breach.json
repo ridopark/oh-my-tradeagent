@@ -1,0 +1,14 @@
+{
+  "tenant_id": "acme",
+  "positions": [
+    {
+      "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
+      "contract_symbol": "SMCI 261120C00050000",
+      "floor_status": "ok",
+      "loss_pct": null,
+      "entry_premium": 2.50,
+      "current_bid": 2.10,
+      "floor_line": 1.25
+    }
+  ]
+}

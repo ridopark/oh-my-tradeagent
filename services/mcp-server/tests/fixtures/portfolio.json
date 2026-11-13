@@ -16,5 +16,27 @@
       "account_number": "310056593"
     }
   ],
-  "open_positions": []
+  "open_positions": [
+    {
+      "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
+      "strategy_id": "copytrade",
+      "contract_symbol": "SMCI 261120C00050000",
+      "remaining_qty": 5,
+      "entry_premium": 2.50,
+      "open_notional": 1250.0,
+      "entry_qty": 21,
+      "realized_pl": null,
+      "unrealized_pl": -300.0,
+      "trailing_armed": false
+    },
+    {
+      "workflow_id": "t-acme/s-copytrade/pos/NVDA 261220P00100000/sig-99",
+      "strategy_id": "copytrade",
+      "contract_symbol": "NVDA 261220P00100000",
+      "remaining_qty": 2,
+      "entry_premium": 1.00,
+      "open_notional": 200.0,
+      "trailing_armed": false
+    }
+  ]
 }

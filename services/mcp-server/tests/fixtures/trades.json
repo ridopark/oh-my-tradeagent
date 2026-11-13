@@ -1,0 +1,39 @@
+{
+  "tenant_id": "acme",
+  "count": 3,
+  "items": [
+    {
+      "event_id": "evt-1",
+      "occurred_at": "2026-11-13T12:00:00Z",
+      "kind": "PartialExitFilled",
+      "actor": "system",
+      "strategy_id": "copytrade",
+      "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
+      "correlation_id": "corr-1",
+      "subject": "{\"qty_filled\": 16, \"avg_fill_price\": 3.50, \"broker_order_id\": \"brk-exit-001\"}",
+      "entry_basis": 2.50
+    },
+    {
+      "event_id": "evt-2",
+      "occurred_at": "2026-11-10T10:30:00Z",
+      "kind": "EntryFilled",
+      "actor": "system",
+      "strategy_id": "copytrade",
+      "workflow_id": "t-acme/s-copytrade/pos/SMCI 261120C00050000/sig-1",
+      "correlation_id": "corr-1",
+      "subject": "{\"filled_qty\": 21, \"avg_fill_price\": 2.50, \"broker_order_id\": \"brk-entry-001\"}",
+      "entry_basis": null
+    },
+    {
+      "event_id": "evt-3",
+      "occurred_at": "2026-11-09T11:00:00Z",
+      "kind": "EntryFilled",
+      "actor": "system",
+      "strategy_id": "copytrade",
+      "workflow_id": "t-acme/s-copytrade/pos/NVDA 261220P00100000/sig-99",
+      "correlation_id": "corr-2",
+      "subject": "{\"filled_qty\": 2, \"avg_fill_price\": 1.00, \"broker_order_id\": \"brk-nvda-001\"}",
+      "entry_basis": null
+    }
+  ]
+}

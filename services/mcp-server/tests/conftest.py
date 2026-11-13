@@ -53,6 +53,21 @@ def _stub_handler(request: httpx.Request) -> httpx.Response:
     if path == "/api/notional-cap":
         return _json_response(_load("notional_cap.json"))
 
+    if path == "/api/floor-breach":
+        return _json_response(_load("floor_breach.json"))
+
+    if path == "/api/live/marks":
+        return _json_response(_load("live_marks.json"))
+
+    if path == "/api/signals":
+        return _json_response(_load("signals.json"))
+
+    if path == "/api/trades":
+        return _json_response(_load("trades.json"))
+
+    if path == "/api/orders":
+        return _json_response(_load("orders.json"))
+
     return _json_response({"error": "not_found"}, 404)
 
 

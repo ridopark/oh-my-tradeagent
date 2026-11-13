@@ -1,0 +1,16 @@
+{
+  "tenant_id": "acme",
+  "count": 2,
+  "items": [
+    {
+      "occurred_at": "2026-11-10T10:00:00Z",
+      "strategy_id": "copytrade",
+      "subject": "{\"signal_id\": \"sig-1\", \"author\": \"TradingGuru\", \"raw_line\": \"BTO SMCI 261120C50 @2.50\", \"tail\": \"SL @1.25\", \"operator_id\": \"operator@example.com\"}"
+    },
+    {
+      "occurred_at": "2026-11-09T10:00:00Z",
+      "strategy_id": "copytrade",
+      "subject": "{\"signal_id\": \"sig-other\", \"author\": \"AnotherTrader\", \"raw_line\": \"BTO AAPL put\"}"
+    }
+  ]
+}
