@@ -203,13 +203,36 @@ def test_stdout_cleanliness_rawSubprocess(stub_bff_port):
         cwd=PACKAGE_ROOT,
     )
 
+    # Keep stdin OPEN until the tools/list reply (id=2) has arrived, as a real client does.
+    # Closing stdin right after writing (communicate(input=...)) races the server: on EOF
+    # it may shut down before handling tools/list, which made this test fail ~1 run in 4.
+    seen: list[bytes] = []
+    got_reply = threading.Event()
+
+    def _read_stdout() -> None:
+        for raw in iter(proc.stdout.readline, b""):
+            seen.append(raw)
+            if b'"id":2' in raw.replace(b" ", b""):
+                got_reply.set()
+
+    reader = threading.Thread(target=_read_stdout, daemon=True)
+    reader.start()
+    proc.stdin.write(messages)
+    proc.stdin.flush()
+    replied = got_reply.wait(timeout=15)
+    proc.stdin.close()
     try:
-        stdout_bytes, stderr_bytes = proc.communicate(input=messages, timeout=15)
+        proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
-        stdout_bytes, stderr_bytes = proc.communicate()
+        proc.wait()
+    reader.join(timeout=5)
+    stderr_bytes = proc.stderr.read()
+    stdout_bytes = b"".join(seen)
+    if not replied:
         pytest.fail(
-            f"Server timed out.\nstderr: {stderr_bytes.decode(errors='replace')}"
+            "tools/list reply (id=2) never arrived within 15s.\n"
+            f"stdout: {stdout_bytes!r}\nstderr: {stderr_bytes.decode(errors='replace')}"
         )
 
     # Split on newlines; ignore empty lines (trailing \n etc.).
