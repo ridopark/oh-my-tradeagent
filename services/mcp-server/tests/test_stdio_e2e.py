@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -125,3 +126,116 @@ async def test_stdio_endToEnd_listsToolsAndPrompt(stub_bff_port):
     # Step 2 ships only get_portfolio_summary; steps 3-4 add more.
     assert "get_portfolio_summary" in tool_names, f"got: {tool_names}"
     assert "analyze_positions" in prompt_names, f"got: {prompt_names}"
+
+
+def test_stdout_cleanliness_rawSubprocess(stub_bff_port):
+    """Seam G (raw subprocess): every stdout line must be valid JSON-RPC 2.0.
+
+    Unlike `test_stdio_endToEnd_listsToolsAndPrompt`, which drives the server
+    through the MCP SDK's stdio client (which tolerates non-JSON stdout lines by
+    wrapping them as Exception values and continuing), this test reads the raw
+    bytes from the subprocess stdout pipe and asserts that every non-empty line
+    is a valid JSON-RPC 2.0 object.
+
+    A bare ``print("starting")`` or any stdout log handler causes this test to
+    fail.  Stderr is captured separately via PIPE — logging output there does
+    NOT cause failure.
+    """
+    env = {
+        **os.environ,
+        "OMT_TENANT": TEST_TENANT,
+        "OMT_MCP_TOKEN": TEST_TOKEN,
+        "OMT_BFF_URL": f"http://127.0.0.1:{stub_bff_port}",
+    }
+
+    # MCP stdio format: one JSON-RPC message per line (\n-delimited).
+    # Sequence: initialize → notifications/initialized → tools/list
+    messages = (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-raw", "version": "0.1"},
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            }
+        )
+        + "\n"
+    ).encode()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "ohmytradeagent_mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=PACKAGE_ROOT,
+    )
+
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(input=messages, timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_bytes, stderr_bytes = proc.communicate()
+        pytest.fail(
+            f"Server timed out.\nstderr: {stderr_bytes.decode(errors='replace')}"
+        )
+
+    # Split on newlines; ignore empty lines (trailing \n etc.).
+    lines = [line for line in stdout_bytes.decode("utf-8").split("\n") if line.strip()]
+
+    assert lines, (
+        f"Server produced no stdout output.\n"
+        f"stderr: {stderr_bytes.decode(errors='replace')}"
+    )
+
+    # Every non-empty stdout line must be a valid JSON-RPC 2.0 object.
+    # This assertion catches both bare print() calls and stdout log handlers:
+    # any stray text that is not a JSON object with "jsonrpc":"2.0" fails here.
+    parsed: list[dict] = []
+    for line in lines:
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError as exc:
+            pytest.fail(
+                f"stdout line is not valid JSON — this would happen with a bare "
+                f"print() or a stdout log handler.\n"
+                f"Line: {line!r}\n"
+                f"Error: {exc}\n"
+                f"Full stderr: {stderr_bytes.decode(errors='replace')}"
+            )
+        assert isinstance(msg, dict) and msg.get("jsonrpc") == "2.0", (
+            f"stdout line is not JSON-RPC 2.0: {line!r}"
+        )
+        parsed.append(msg)
+
+    # The tools/list response (id=2) must arrive.
+    tools_responses = [m for m in parsed if m.get("id") == 2]
+    assert tools_responses, (
+        f"tools/list response (id=2) not found in stdout.\n"
+        f"stdout lines: {lines}\n"
+        f"stderr: {stderr_bytes.decode(errors='replace')}"
+    )
+    tools_result = tools_responses[0].get("result", {})
+    tool_names = {t["name"] for t in tools_result.get("tools", [])}
+    assert "get_portfolio_summary" in tool_names, f"expected get_portfolio_summary, got: {tool_names}"

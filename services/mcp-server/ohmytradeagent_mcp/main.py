@@ -34,7 +34,10 @@ from ohmytradeagent_mcp.resolver import (
 from ohmytradeagent_mcp.tools import build_server
 
 # Redirect all logging to stderr so stdout stays clean for the MCP transport.
+# This call must precede any MCPServer instantiation; MCPServer.__init__ calls
+# configure_logging() which is a no-op when the root logger already has handlers.
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+log = logging.getLogger(__name__)
 
 
 def run(
@@ -82,6 +85,7 @@ def run(
 
     # --- build server ---
     server = build_server(binding, bff)
+    log.warning("omt-mcp: serving tenant=%r", binding.tenant_id)
 
     # _on_ready hook: used by in-process tests that must not block on stdio.
     if _on_ready is not None:

@@ -528,7 +528,7 @@ paragraph + "see Step 5"), `ohmytradeagent_mcp/{__init__,__main__,config,bff,res
       | --- | --- | --- |
       | mismatch | skip the `tenant_id != expected` compare | test 2 |
       | 401 | treat non-2xx whoami as success | tests 3, 4 |
-      | stdout cleanliness | add a bare `print("starting")` in `main` | test 7 |
+      | stdout cleanliness | add a bare `print("starting")` in `main` | `test_stdout_cleanliness_rawSubprocess` (new raw test, Seam G) — test 7 (SDK client) stays GREEN (toothless), new raw test goes RED: `Failed: stdout line is not valid JSON — Line: 'starting'`; also confirmed with `stream=sys.stdout` mutation: `Line: "WARNING:ohmytradeagent_mcp.main:omt-mcp: serving tenant='acme'"` goes RED, stderr empty, SDK test still GREEN |
       | header plumbing | drop `X-Tenant-Id` from `BffClient` | test 11 |
       | redaction | skip the `account_number` key | test 8 (and 13) |
       | subject parse | stop parsing `subject` strings | test 13 |
