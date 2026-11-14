@@ -12,6 +12,8 @@ declare module "next-auth" {
     tenantIds?: string[];
     isOperator?: boolean;
     operatorId?: string;
+    /** Verified OAuth identity stamped at sign-in; used by the Connected AI apps page. */
+    identity?: { provider: string; subject: string };
     user?: DefaultSession["user"];
   }
 }
@@ -22,5 +24,9 @@ declare module "next-auth/jwt" {
     tenantIds?: string[];
     isOperator?: boolean;
     operatorId?: string;
+    /** OAuth provider id (e.g. "google"); stamped at initial sign-in. */
+    provider?: string;
+    /** OAuth subject (providerAccountId); stamped at initial sign-in. */
+    subject?: string;
   }
 }
