@@ -14,6 +14,7 @@ infra/k8s/
 ├── 53-market-data.yaml              # market-data-svc
 ├── 54-api-gateway.yaml              # api-gateway-svc + Traefik Ingress
 ├── 55-signal-source-discord.yaml    # Python sidecar (+ PVC for storage_state.json)
+├── 68-mcp-server.yaml               # Remote MCP gateway (Streamable HTTP + OAuth AS); ships dark, bootstrap-guarded
 └── README.md                        # this file
 
 # (Secret templates live one level up at infra/secrets-template/ so a
