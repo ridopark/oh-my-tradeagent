@@ -291,7 +291,7 @@ def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
         try:
             raw_body = await request.body()
             raw_dict = _json.loads(raw_body) if raw_body else {}
-        except Exception:
+        except Exception:  # noqa: BLE001
             return PydanticJSONResponse(
                 content=RegistrationErrorResponse(
                     error="invalid_client_metadata",

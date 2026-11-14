@@ -10,21 +10,21 @@ RED criteria:
 """
 from __future__ import annotations
 
+import secrets
+
 import httpx
 import pytest
 
 from ohmytradeagent_mcp.gateway.redirects import loopback_port_agnostic_match
 from tests.gateway.fixtures import PUBLIC_URL, make_app
 from tests.gateway.oauth_helpers import (
+    encode_form,
     extract_code_from_location,
     extract_csrf_from_html,
     extract_state_from_location,
     pkce_pair,
     register_client,
-    encode_form,
 )
-import secrets
-
 
 # ── unit tests ────────────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ async def test_loopback_portAgnosticMatch_authorizationAccepted():
         )
         client_id = reg["client_id"]
 
-        code_verifier, code_challenge = await pkce_pair()
+        _code_verifier, code_challenge = await pkce_pair()
         client_state = secrets.token_hex(8)
 
         # Authorize with a different port (ephemeral loopback port)

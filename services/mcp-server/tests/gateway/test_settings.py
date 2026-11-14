@@ -476,6 +476,7 @@ def test_uvicorn_accessLog_disabled(monkeypatch):
     GREEN: access_log=False is added to the uvicorn.run call.
     """
     import uvicorn
+
     from ohmytradeagent_mcp.gateway.main import run_gateway
 
     captured: dict = {}

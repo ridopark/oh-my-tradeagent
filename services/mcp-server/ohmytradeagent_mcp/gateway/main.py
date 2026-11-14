@@ -83,7 +83,7 @@ def run_gateway(
             import asyncio
             try:
                 asyncio.run(asyncio.wait_for(store.connect(), timeout=4.0))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 print(
                     "error: DB connection failed (check OMT_GATEWAY_DB_URL and MCP_GATEWAY_DB_PASSWORD)",
                     file=sys.stderr,
