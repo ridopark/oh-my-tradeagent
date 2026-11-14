@@ -245,6 +245,8 @@ def _patch_as_metadata(sdk_app: Starlette, issuer_url, auth_settings) -> None:
         auth_settings.revocation_options,
     )
     metadata.client_id_metadata_document_supported = True
+    metadata.token_endpoint_auth_methods_supported = ["none"]
+    metadata.revocation_endpoint_auth_methods_supported = ["none"]
 
     new_route = Route(
         "/.well-known/oauth-authorization-server",
@@ -259,6 +261,73 @@ def _patch_as_metadata(sdk_app: Starlette, issuer_url, auth_settings) -> None:
             return
     # Not found (shouldn't happen when auth_server_provider is set), just append
     routes.append(new_route)
+
+
+def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
+    """Replace the SDK's /register handler to enforce D5: public-PKCE-only DCR.
+
+    - body omitting token_endpoint_auth_method → treated as "none"
+    - explicit secret-based method → 400 invalid_client_metadata
+    """
+    import json as _json
+
+    from mcp.server.auth.handlers.register import RegistrationErrorResponse, RegistrationHandler
+    from mcp.server.auth.json_response import PydanticJSONResponse
+    from mcp.server.auth.routes import cors_middleware
+
+    sdk_register = RegistrationHandler(provider=provider, options=options)
+
+    routes = sdk_app.router.routes
+    existing_idx = None
+    for i, route in enumerate(routes):
+        if getattr(route, "path", None) == "/register":
+            existing_idx = i
+            break
+
+    if existing_idx is None:
+        return
+
+    async def patched_handler(request: Request) -> Response:
+        try:
+            raw_body = await request.body()
+            raw_dict = _json.loads(raw_body) if raw_body else {}
+        except Exception:
+            return PydanticJSONResponse(
+                content=RegistrationErrorResponse(
+                    error="invalid_client_metadata",
+                    error_description="Request body must be valid JSON",
+                ),
+                status_code=400,
+            )
+
+        auth_method = raw_dict.get("token_endpoint_auth_method")
+        if auth_method is None:
+            # Absent or null → treat as "none" (D5: override SDK default client_secret_post)
+            raw_dict["token_endpoint_auth_method"] = "none"
+        elif auth_method != "none":
+            return PydanticJSONResponse(
+                content=RegistrationErrorResponse(
+                    error="invalid_client_metadata",
+                    error_description=(
+                        f"token_endpoint_auth_method must be 'none'; got {auth_method!r}. "
+                        "This gateway only supports public PKCE clients."
+                    ),
+                ),
+                status_code=400,
+            )
+
+        normalized = _json.dumps(raw_dict).encode()
+
+        async def receive():
+            return {"type": "http.request", "body": normalized, "more_body": False}
+
+        return await sdk_register.handle(Request(request.scope, receive))
+
+    routes[existing_idx] = Route(
+        "/register",
+        endpoint=cors_middleware(patched_handler, ["POST", "OPTIONS"]),
+        methods=["POST", "OPTIONS"],
+    )
 
 
 def _make_google_callback_handler(
@@ -585,8 +654,10 @@ def build_gateway_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
-    # Patch AS metadata to add client_id_metadata_document_supported: true
+    # Patch AS metadata to add client_id_metadata_document_supported: true (D5: auth methods)
     _patch_as_metadata(sdk_app, issuer_url, auth_settings)
+    # Patch /register to treat absent token_endpoint_auth_method as "none" (D5)
+    _patch_register_route(sdk_app, provider, auth_settings.client_registration_options)
 
     lazy_sdk_app = _LazyLifespanApp(sdk_app)
 
