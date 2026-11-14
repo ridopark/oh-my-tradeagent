@@ -20,7 +20,6 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from ohmytradeagent_mcp.bff import BffClient
 from ohmytradeagent_mcp.gateway.assertion import Signer
-from ohmytradeagent_mcp.gateway.store import InMemoryStore
 from ohmytradeagent_mcp.resolver import TenantBinding
 
 
@@ -29,15 +28,17 @@ class OAuthIdentityResolver:
 
     def __init__(
         self,
-        store: InMemoryStore,
+        store,
         signer: Signer,
         bff_url: str,
         bff_transport=None,
+        tool_rate_limiter=None,
     ) -> None:
         self._store = store
         self._signer = signer
         self._bff_url = bff_url
         self._bff_transport = bff_transport
+        self._tool_rate_limiter = tool_rate_limiter
 
     async def __call__(
         self, tenant: str | None
@@ -48,6 +49,10 @@ class OAuthIdentityResolver:
 
         sub = access_token.subject or ""
         client_id = access_token.client_id
+
+        # Apply tool rate limit before any other work
+        if self._tool_rate_limiter is not None:
+            self._tool_rate_limiter.check(sub, client_id)
         claims = access_token.claims or {}
         grant_tenants: list[str] = claims.get("tenants", [])
         grant_id: str = claims.get("grant_id", "")

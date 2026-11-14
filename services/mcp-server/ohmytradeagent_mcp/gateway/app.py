@@ -464,6 +464,7 @@ def build_gateway_app(
     idp=None,
     fetch_cimd=None,
     auth_rate_limiter=None,
+    tool_rate_limiter=None,
 ):
     """Build and return the gateway ASGI app.
 
@@ -474,6 +475,7 @@ def build_gateway_app(
         idp: Identity provider (GoogleIdP or FakeIdP; None → build GoogleIdP).
         fetch_cimd: Optional injectable CIMD fetcher (None → real cached fetcher).
         auth_rate_limiter: Optional AuthRateLimiter for OAuth endpoints (None = no limit).
+        tool_rate_limiter: Optional ToolRateLimiter for tool calls (None = no limit).
 
     Returns:
         A callable ASGI app ready to serve.
@@ -525,6 +527,7 @@ def build_gateway_app(
         signer=signer,
         bff_url=settings.bff_url,
         bff_transport=bff_transport,
+        tool_rate_limiter=tool_rate_limiter,
     )
     build_server(resolver, mcp=mcp_server)
 
