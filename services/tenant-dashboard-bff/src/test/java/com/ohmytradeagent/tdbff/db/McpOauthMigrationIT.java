@@ -32,10 +32,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * Tests exercise the gateway's real query shapes so a missing grant fails here — not on the
  * cluster.
  *
- * <p>Column-level grants (Finding 1/2): V17 uses column-level SELECT/UPDATE on {@code
- * mcp_oauth_grant} and {@code mcp_oauth_client} so that {@code client_secret_hash} and other hash
- * columns are never accessible to the browser-facing or BFF roles. Tests assert the exact column
- * sets and that hash columns return 42501.
+ * <p>Column-level grants: V17 uses column-level SELECT/UPDATE on {@code mcp_oauth_grant} and {@code
+ * mcp_oauth_client} so that {@code client_secret_hash} and other hash columns are never accessible
+ * to the browser-facing or BFF roles. Tests assert the exact column sets and that hash columns
+ * return 42501.
  *
  * <p>Gated on {@code RUN_DB_ITS=true}; runs under {@code mvn verify} (failsafe). Docker is NOT
  * available on the development workstation, so these tests first run in CI.
@@ -95,7 +95,7 @@ class McpOauthMigrationIT {
         var st = c.createStatement()) {
 
       // Record the NOLOGIN state immediately after V18.  The assertion lives in the named test
-      // below (Finding 6: move NOLOGIN check into a named test, keep ALTER here so other tests
+      // below (the NOLOGIN check is its own named test; the ALTER stays here so other tests
       // can connect).
       try (var rs =
           st.executeQuery("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'mcp_gateway'")) {
@@ -280,7 +280,7 @@ class McpOauthMigrationIT {
       }
 
       // INSERT INTO mcp_oauth_grant RETURNING id (the gateway creates the grant at consent).
-      // client_name is captured at consent time and stored here (Finding 5: CIMD clients are not
+      // client_name is captured at consent time and stored here (CIMD clients are not
       // stored in mcp_oauth_client, so the name must be persisted in the grant row).
       String gwGrantId;
       try (var ps =
@@ -426,18 +426,34 @@ class McpOauthMigrationIT {
         var st = r.createStatement()) {
 
       // V17 grants column-level SELECT on mcp_oauth_grant to dashboard_readonly.
-      // List the exact columns from the grant — SELECT * is denied (column-level, not table-level).
-      // client_name is in the grant (Finding 5: captured at consent so the listing page has it).
+      // The grant names every current column, so this is column-level only to keep a FUTURE
+      // hash/secret column on this table from being implicitly exposed. client_name is captured at
+      // consent so the listing page can name CIMD clients.
       st.executeQuery(
               "SELECT id, client_id, client_name, provider, subject, tenants,"
                   + " created_at, last_used_at, revoked_at FROM mcp_oauth_grant")
           .close();
 
+      // PR 4's real listing shape (JOIN + WHERE + ORDER BY) must run under the column grants, so
+      // a PG16 column-privilege miss fails here rather than on the cluster.
+      try (var ps =
+          r.prepareStatement(
+              "SELECT g.id, g.client_name, g.client_id, g.tenants, g.created_at,"
+                  + " g.last_used_at, g.revoked_at, c.metadata"
+                  + " FROM mcp_oauth_grant g LEFT JOIN mcp_oauth_client c"
+                  + " ON c.client_id = g.client_id"
+                  + " WHERE g.provider = ? AND g.subject = ?"
+                  + " ORDER BY g.revoked_at NULLS FIRST, g.created_at DESC")) {
+        ps.setString(1, "google");
+        ps.setString(2, "sub-listing");
+        ps.executeQuery().close();
+      }
+
       // V17 grants column-level SELECT on mcp_oauth_client (excludes client_secret_hash).
       st.executeQuery("SELECT client_id, metadata, created_at, last_used_at FROM mcp_oauth_client")
           .close();
 
-      // client_secret_hash is NOT in the readonly grant — must return 42501 (Finding 1).
+      // client_secret_hash is NOT in the readonly grant — must return 42501.
       assertDenied(() -> st.executeQuery("SELECT client_secret_hash FROM mcp_oauth_client"));
 
       // SELECT * on mcp_oauth_client is denied: would implicitly access client_secret_hash.
@@ -490,11 +506,11 @@ class McpOauthMigrationIT {
         assertDenied(() -> st.executeQuery("SELECT count(*) FROM mcp_oauth_access_token"));
 
         // Cannot SELECT client_secret_hash — no grant on mcp_oauth_client for dashboard_writer
-        // at all (Finding 2: hash columns must be 42501).
+        // at all (hash columns must be 42501).
         assertDenied(() -> st.executeQuery("SELECT client_secret_hash FROM mcp_oauth_client"));
 
         // Cannot SELECT columns outside the writer's column grant on mcp_oauth_grant.
-        // client_id is NOT in (id, provider, subject, revoked_at) — must be denied (Finding 2).
+        // client_id is NOT in (id, provider, subject, revoked_at) — must be denied.
         assertDenied(() -> st.executeQuery("SELECT client_id FROM mcp_oauth_grant"));
       }
     }

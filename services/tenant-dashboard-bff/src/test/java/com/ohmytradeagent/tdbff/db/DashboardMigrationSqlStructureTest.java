@@ -566,11 +566,11 @@ class DashboardMigrationSqlStructureTest {
       assertThat(sql).as("V17 creates table %s", t).contains("CREATE TABLE " + t);
     }
 
-    // Finding 5: client_name column captured at consent time (nullable, stored in the grant row).
+    // client_name is captured at consent time (nullable) so CIMD grants can be named in a listing.
     assertThat(sql).as("V17 mcp_oauth_grant has client_name column").contains("client_name");
 
-    // dashboard_readonly gets COLUMN-LEVEL (not table-level) SELECT on mcp_oauth_grant so the
-    // Next.js pool cannot accidentally read hash/secret columns via SELECT *.
+    // dashboard_readonly gets COLUMN-LEVEL (not table-level) SELECT on mcp_oauth_grant so a future
+    // hash/secret column added to the table is not implicitly readable by the Next.js pool.
     assertThat(sql)
         .as("V17 grants column-level SELECT on mcp_oauth_grant to dashboard_readonly")
         .containsPattern(
