@@ -2,6 +2,7 @@ package com.ohmytradeagent.tdbff.mcp;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.sql.Array;
+import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 import org.jooq.DSLContext;
@@ -16,8 +17,10 @@ import org.springframework.stereotype.Repository;
  * dashboard_readonly} role. DARK by default — bean is absent when {@code
  * bff.mcp-delegated.enabled=false}.
  *
- * <p>D4: column-level grants on {@code mcp_oauth_grant} and {@code mcp_oauth_client}; this reader
- * projects exactly the granted columns (no {@code SELECT *}, no jOOQ {@code selectFrom}).
+ * <p>D4: {@code dashboard_readonly} has column-level grants on {@code mcp_oauth_grant}; this reader
+ * projects exactly granted columns (no {@code SELECT *}, no jOOQ {@code selectFrom}). The app name
+ * is {@code client_name}, captured on the grant at consent; the dashboard falls back to {@code
+ * client_id}.
  */
 @Repository
 @ConditionalOnProperty(name = "bff.mcp-delegated.enabled", havingValue = "true")
@@ -36,26 +39,22 @@ public class McpGrantsReader {
   public List<McpGrantRow> listForIdentity(String provider, String subject) {
     Result<Record> rows =
         dsl.fetch(
-            "SELECT g.id, g.client_name, g.client_id, g.tenants,"
-                + " g.created_at, g.last_used_at, g.revoked_at, c.metadata"
-                + " FROM mcp_oauth_grant g"
-                + " LEFT JOIN mcp_oauth_client c ON c.client_id = g.client_id"
-                + " WHERE g.provider = ? AND g.subject = ?"
-                + " ORDER BY g.revoked_at NULLS FIRST, g.created_at DESC",
+            "SELECT id, client_name, client_id, tenants, created_at, last_used_at, revoked_at"
+                + " FROM mcp_oauth_grant"
+                + " WHERE provider = ? AND subject = ?"
+                + " ORDER BY revoked_at NULLS FIRST, created_at DESC",
             provider,
             subject);
 
     return rows.map(
         r -> {
-          // tenants is a TEXT[] column; JDBC wraps it as java.sql.Array.
-          String[] tenantsArr = {};
+          // tenants is a TEXT[] column; JDBC hands it over as java.sql.Array.
+          String[] tenantsArr;
           try {
             Array arr = r.get("tenants", Array.class);
-            if (arr != null) {
-              tenantsArr = (String[]) arr.getArray();
-            }
-          } catch (Exception ignored) {
-            // Safety: if the array conversion fails, return an empty list rather than crashing.
+            tenantsArr = arr == null ? new String[0] : (String[]) arr.getArray();
+          } catch (SQLException e) {
+            throw new IllegalStateException("cannot read mcp_oauth_grant.tenants", e);
           }
           return new McpGrantRow(
               r.get("id", String.class),

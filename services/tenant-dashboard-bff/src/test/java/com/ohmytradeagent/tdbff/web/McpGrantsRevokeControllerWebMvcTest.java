@@ -32,10 +32,11 @@ class McpGrantsRevokeControllerWebMvcTest {
 
   @Test
   void revoke_ownGrant_204_andRevokerCalledWithIdentity() throws Exception {
-    when(revoker.revoke(eq("some-grant-id"), eq("google"), eq("sub-123"))).thenReturn(true);
+    when(revoker.revoke(eq("11111111-1111-4111-8111-111111111111"), eq("google"), eq("sub-123")))
+        .thenReturn(true);
 
     mvc.perform(
-            post("/api/mcp/grants/some-grant-id/revoke")
+            post("/api/mcp/grants/11111111-1111-4111-8111-111111111111/revoke")
                 .header("X-Identity-Provider", "google")
                 .header("X-Identity-Subject", "sub-123"))
         .andExpect(status().isNoContent());
@@ -45,13 +46,27 @@ class McpGrantsRevokeControllerWebMvcTest {
   void revoke_foreignOrUnknownGrant_404() throws Exception {
     // Revoker returns false when the UPDATE matched 0 rows — either not found or belongs to
     // another identity. Response is always 404 (no membership oracle).
-    when(revoker.revoke(eq("foreign-grant-id"), eq("google"), eq("sub-123"))).thenReturn(false);
+    when(revoker.revoke(eq("22222222-2222-4222-8222-222222222222"), eq("google"), eq("sub-123")))
+        .thenReturn(false);
 
     mvc.perform(
-            post("/api/mcp/grants/foreign-grant-id/revoke")
+            post("/api/mcp/grants/22222222-2222-4222-8222-222222222222/revoke")
                 .header("X-Identity-Provider", "google")
                 .header("X-Identity-Subject", "sub-123"))
         .andExpect(status().isNotFound());
+  }
+
+  @Test
+  void revoke_malformedGrantId_is404_andNeverReachesTheRevoker() throws Exception {
+    // A non-UUID id used to reach the ::uuid cast and surface as a 500.
+    for (String bad : new String[] {"some-id", "1-1-1-1-1", "%27%20OR%201=1"}) {
+      mvc.perform(
+              post("/api/mcp/grants/" + bad + "/revoke")
+                  .header("X-Identity-Provider", "google")
+                  .header("X-Identity-Subject", "sub-123"))
+          .andExpect(status().isNotFound());
+    }
+    verifyNoInteractions(revoker);
   }
 
   @Test

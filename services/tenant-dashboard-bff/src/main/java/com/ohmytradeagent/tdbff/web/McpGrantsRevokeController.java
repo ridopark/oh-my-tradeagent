@@ -35,6 +35,10 @@ public class McpGrantsRevokeController {
     this.revoker = revoker;
   }
 
+  private static final java.util.regex.Pattern GRANT_ID =
+      java.util.regex.Pattern.compile(
+          "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
   @PostMapping("/{id}/revoke")
   public ResponseEntity<?> revoke(@PathVariable("id") String id, HttpServletRequest request) {
     IdentityHeaders identity;
@@ -46,6 +50,11 @@ public class McpGrantsRevokeController {
       return ResponseEntity.badRequest().body(Map.of("error", "invalid_identity"));
     }
 
+    // A grant id is a UUID. Anything else cannot name a grant: answer the same 404 as an unknown
+    // id rather than let the ::uuid cast fail as a 500.
+    if (!GRANT_ID.matcher(id).matches()) {
+      return ResponseEntity.notFound().build();
+    }
     boolean revoked = revoker.revoke(id, identity.provider(), identity.subject());
     if (!revoked) {
       return ResponseEntity.notFound().build();

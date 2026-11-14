@@ -3,6 +3,7 @@ import { authConfig } from "@/auth.config";
 import { findTenantsForIdentity } from "@/lib/db";
 import { bindInvite } from "@/lib/provisioning";
 import { isOperatorEmail } from "@/lib/operator";
+import { identityFromAccount } from "@/lib/connectedApps";
 
 // DARK flag (default false). When off, an unprovisioned identity is denied exactly as before. Only
 // when "true" does signIn attempt an invite-bind against the BFF. Read fresh so flipping it takes
@@ -115,8 +116,9 @@ export const { handlers, auth, signIn, signOut, unstable_update } = NextAuth({
       // first, sorted) onto the token. Also stamp the verified OAuth identity so the Connected AI
       // apps page can pass it to the BFF as X-Identity-Provider / X-Identity-Subject.
       if (account?.provider && account.providerAccountId) {
-        token.provider = account.provider;
-        token.subject = account.providerAccountId;
+        const identity = identityFromAccount(account);
+        token.provider = identity?.provider;
+        token.subject = identity?.subject;
         const tenants = await findTenantsForIdentity(
           account.provider,
           account.providerAccountId,

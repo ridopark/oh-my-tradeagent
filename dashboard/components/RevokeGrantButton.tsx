@@ -5,8 +5,8 @@ import { revokeConnectedApp } from "@/app/connected-apps/actions";
 
 /**
  * "Revoke" button for a connected AI app grant. Shows a browser confirm dialog
- * before submitting, then calls the server action. Disables itself during the
- * pending transition so double-clicks are ignored.
+ * before submitting, then calls the server action. A second click during the
+ * request is harmless: the revoke only matches a grant that is not yet revoked.
  */
 export function RevokeGrantButton({
   grantId,

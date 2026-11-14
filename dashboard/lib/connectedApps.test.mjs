@@ -8,6 +8,7 @@ import {
   isRevoked,
   sortGrants,
   needsReauth,
+  identityFromAccount,
 } from "./connectedApps.ts";
 
 /** @type {import('./connectedApps.ts').McpGrant} */
@@ -68,4 +69,14 @@ test("connectedApps_rendersSignInAgain_whenIdentityMissing", () => {
   // the member signed in before provider/subject were added to the token).
   assert.equal(needsReauth(undefined), true);
   assert.equal(needsReauth({ provider: "google", subject: "sub-123" }), false);
+});
+
+test("identityFromAccount_usesProviderAccountId_neverEmail", () => {
+  assert.deepEqual(
+    identityFromAccount({ provider: "google", providerAccountId: "1099", email: "a@b.c" }),
+    { provider: "google", subject: "1099" },
+  );
+  assert.equal(identityFromAccount({ provider: "google", email: "a@b.c" }), undefined);
+  assert.equal(identityFromAccount({ providerAccountId: "1099" }), undefined);
+  assert.equal(identityFromAccount(null), undefined);
 });

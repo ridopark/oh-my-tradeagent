@@ -39,3 +39,15 @@ export function sortGrants(grants: McpGrant[]): McpGrant[] {
 export function needsReauth(identity: { provider: string; subject: string } | undefined): boolean {
   return identity === undefined;
 }
+
+/**
+ * The identity the BFF keys MCP grants on: the OAuth provider and its stable subject id
+ * (`providerAccountId`, the OAuth `sub`) — never the email, which is not the grant key and can
+ * change. Returns undefined when either part is missing.
+ */
+export function identityFromAccount(
+  account: { provider?: string; providerAccountId?: string; email?: string } | null | undefined,
+): { provider: string; subject: string } | undefined {
+  if (!account?.provider || !account.providerAccountId) return undefined;
+  return { provider: account.provider, subject: account.providerAccountId };
+}
