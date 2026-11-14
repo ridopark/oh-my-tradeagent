@@ -17,6 +17,27 @@ from mcp.server.auth.provider import RegistrationError
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
+def loopback_port_agnostic_match(registered_uri: str, request_uri: str) -> bool:
+    """Return True if both URIs are loopback and match ignoring port (RFC 8252 §7.3).
+
+    Native apps bind an ephemeral loopback port at runtime; the port is unknown at
+    registration time, so the AS MUST compare loopback redirect URIs without the port.
+    Both URIs must have scheme http, the same loopback host, the same path, and the
+    same query string.
+    """
+    r = urlparse(registered_uri)
+    q = urlparse(request_uri)
+    if r.scheme != "http" or q.scheme != "http":
+        return False
+    r_host = r.hostname or ""
+    q_host = q.hostname or ""
+    if r_host not in _LOOPBACK_HOSTS or q_host not in _LOOPBACK_HOSTS:
+        return False
+    if r_host != q_host:
+        return False
+    return r.path == q.path and r.query == q.query
+
+
 def _is_ip_address(host: str) -> bool:
     """Return True if *host* is an IPv4 or IPv6 address literal."""
     # urlparse strips brackets from IPv6; try both forms

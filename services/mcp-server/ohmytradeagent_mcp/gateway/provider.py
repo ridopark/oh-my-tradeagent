@@ -37,12 +37,23 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 
 from ohmytradeagent_mcp.gateway.cimd import is_cimd_url
-from ohmytradeagent_mcp.gateway.redirects import validate_redirect_uri
+from ohmytradeagent_mcp.gateway.redirects import loopback_port_agnostic_match, validate_redirect_uri
 from ohmytradeagent_mcp.gateway.store import RefreshTokenRecord
 
 _ACCESS_TOKEN_LIFETIME = 3600       # 1 hour (seconds)
 _REFRESH_TOKEN_LIFETIME = 30 * 86400  # 30 days (seconds)
 _CLIENT_LIFETIME = 30 * 86400       # 30 days (seconds)
+
+
+class _LoopbackAwareClientInfo(OAuthClientInformationFull):
+    """OAuthClientInformationFull with RFC 8252 §7.3 loopback port-agnostic redirect matching."""
+
+    def validate_redirect_uri(self, redirect_uri: Any) -> Any:
+        if redirect_uri is not None:
+            for registered in (self.redirect_uris or []):
+                if loopback_port_agnostic_match(str(registered), str(redirect_uri)):
+                    return redirect_uri
+        return super().validate_redirect_uri(redirect_uri)
 
 
 class OmtAuthorizationServerProvider:
@@ -88,11 +99,15 @@ class OmtAuthorizationServerProvider:
                 # fetch_cimd_document already, but re-check here for injected fetchers)
                 if doc.get("client_id") != client_id:
                     return None
-                return _make_client_from_cimd_doc(doc)
+                base = _make_client_from_cimd_doc(doc)
             except Exception:  # noqa: BLE001
                 return None
+        else:
+            base = await self._store.get_client_record(client_id)
+            if base is None:
+                return None
 
-        return await self._store.get_client_record(client_id)
+        return _LoopbackAwareClientInfo.model_validate(base.model_dump(mode="json"))
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         """Validate redirect URIs and auth method, then save the client.
