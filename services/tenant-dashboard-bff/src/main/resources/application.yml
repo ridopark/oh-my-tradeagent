@@ -231,10 +231,12 @@ bff:
     # can point at different hosts (e.g. a read replica) without changing the migration target.
     dashboard-readonly:
       jdbc-url: ${DASHBOARD_READONLY_URL:jdbc:postgresql://localhost:5432/dashboard}
-      username: ${DASHBOARD_READONLY_USER:dashboard_readonly}
+      username: dashboard_readonly
       password: ${DASHBOARD_READONLY_PASSWORD:}
       maximum-pool-size: 2
       minimum-idle: 0
+      # Short timeout so a stalled DB denies quickly instead of hanging the auth path.
+      connection-timeout: 2000
       read-only: true
 
 server:

@@ -45,8 +45,7 @@ import org.springframework.test.web.servlet.MockMvc;
 @TestPropertySource(
     properties = {
       "bff.mcp-delegated.enabled=true",
-      // Primary public key — DelegatedAssertionTestKeys.PRIMARY_PUBLIC_KEY_B64
-      "bff.mcp-delegated.public-key=MCowBQYDK2VwAyEAHisUEeiCZJqA+lLdttZH5el0TQdI3kdV7z9sDK1X0Ck="
+      "bff.mcp-delegated.public-key=" + DelegatedAssertionTestKeys.PRIMARY_PUBLIC_KEY_B64
     })
 class McpDelegatedEndToEndWebMvcTest {
 

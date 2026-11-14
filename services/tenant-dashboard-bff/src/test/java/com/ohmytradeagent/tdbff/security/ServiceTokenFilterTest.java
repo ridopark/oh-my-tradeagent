@@ -7,8 +7,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
@@ -1419,6 +1421,112 @@ class ServiceTokenFilterTest {
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("position")
         .hasMessageNotContaining("rawsecrettoken123");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Finding 2 — null/non-object JSON in header or payload must NOT escape as 500.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void delegated_nullHeaderJson_is401() throws Exception {
+    // header segment decodes to JSON null — with the original code decodeJsonObject returns null
+    // and header.get("alg") throws NPE, propagating out of doFilter (500 in production).
+    // After the fix decodeJsonObject throws → NOT_AN_ASSERTION → 401.
+    String nullHeaderB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("null".getBytes(StandardCharsets.UTF_8));
+    String validPayloadB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("{\"iss\":\"x\"}".getBytes(StandardCharsets.UTF_8));
+    String token = nullHeaderB64 + "." + validPayloadB64 + ".AAAA";
+    // RED: NullPointerException propagates; GREEN: 401.
+    assertThat(runWithDelegated(token, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_nullPayloadJson_is401() throws Exception {
+    // payload segment decodes to JSON null.  With a dummy sig the sig check catches it first
+    // (INVALID → 401); the fix makes it NOT_AN_ASSERTION → 401 — either way never 500.
+    String validHeaderB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
+    String nullPayloadB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("null".getBytes(StandardCharsets.UTF_8));
+    String token = validHeaderB64 + "." + nullPayloadB64 + ".AAAA";
+    assertThat(runWithDelegated(token, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_arrayHeaderJson_is401() throws Exception {
+    // header segment decodes to a JSON array — not an object → NOT_AN_ASSERTION → 401.
+    String arrayHeaderB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("[1,2,3]".getBytes(StandardCharsets.UTF_8));
+    String validPayloadB64 =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString("{\"iss\":\"x\"}".getBytes(StandardCharsets.UTF_8));
+    String token = arrayHeaderB64 + "." + validPayloadB64 + ".AAAA";
+    assertThat(runWithDelegated(token, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Finding 3 — lifetime cap: iat > exp is accepted (negative diff passes > 300 check), and
+  // extreme iat/exp values overflow long, making exp-iat appear small/negative.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void delegated_iatAfterExp_is401() throws Exception {
+    // iat is slightly in future (within 30 s tolerance, so iat-too-far check passes), exp is
+    // also in future but earlier than iat — a logically impossible token.
+    // Current code: exp-iat = -5 > 300 is false → token accepted (200). Fixed: 401.
+    long now = Instant.now().getEpochSecond();
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("iat", now + 10); // slightly in future, within tolerance
+    claims.put("exp", now + 5); // in future but < iat
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    // RED: 200 (accepted); GREEN: 401.
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_extremeIatExp_is401() throws Exception {
+    // iat = -9e18, exp = 9e18: exp > now (not expired), iat < now+30 (not future-iat),
+    // but exp - iat overflows → wraps to negative → current check -N > 300 is false → accepted.
+    // Math.subtractExact must throw ArithmeticException → INVALID → 401.
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("iat", -9_000_000_000_000_000_000L);
+    claims.put("exp", 9_000_000_000_000_000_000L);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    // RED: 200 (overflow bypasses the check); GREEN: 401.
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Finding 4 — client_id charset: a newline can inject a header into the log line.
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  void delegated_newlineInClientId_is401() throws Exception {
+    // A newline in client_id would let log-injection fabricate additional log fields.
+    // Current code has no charset guard → token accepted (200). Fixed: 401.
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("client_id", "valid-client\nX-Injected: spoofed-header");
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    // RED: 200; GREEN: 401.
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
   }
 
   @Test

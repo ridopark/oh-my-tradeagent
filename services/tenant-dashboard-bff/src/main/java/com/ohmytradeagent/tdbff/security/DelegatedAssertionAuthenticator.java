@@ -1,6 +1,5 @@
 package com.ohmytradeagent.tdbff.security;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -49,6 +48,9 @@ public class DelegatedAssertionAuthenticator {
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final String TENANT_PATTERN = "[A-Za-z0-9_-]+";
+  // Safe charset for client_id: covers DCR uuid4 values and CIMD https:// URLs.
+  // Excludes newlines and other control characters that could be injected into log lines.
+  private static final String CLIENT_ID_PATTERN = "[A-Za-z0-9_.:/@-]{1,512}";
 
   private final PublicKey publicKey;
   private final DashboardMembershipReader membershipReader;
@@ -140,14 +142,22 @@ public class DelegatedAssertionAuthenticator {
       if (!tenant.matches(TENANT_PATTERN)) return new Result(Status.INVALID, null, null, null);
 
       String clientId = requireString(payload, "client_id");
-      if (clientId.length() > 512) return new Result(Status.INVALID, null, null, null);
+      if (!clientId.matches(CLIENT_ID_PATTERN)) return new Result(Status.INVALID, null, null, null);
 
       long now = Instant.now().getEpochSecond();
       long iat = requireLong(payload, "iat");
       long exp = requireLong(payload, "exp");
       if (exp <= now) return new Result(Status.INVALID, null, null, null);
       if (iat > now + 30) return new Result(Status.INVALID, null, null, null);
-      if (exp - iat > 300) return new Result(Status.INVALID, null, null, null);
+      // Guard against iat > exp and long overflow (e.g. iat=-9e18, exp=9e18 → subtractExact
+      // throws).
+      long lifetime;
+      try {
+        lifetime = Math.subtractExact(exp, iat);
+      } catch (ArithmeticException e) {
+        return new Result(Status.INVALID, null, null, null);
+      }
+      if (lifetime < 0 || lifetime > 300) return new Result(Status.INVALID, null, null, null);
 
       String credentialId = "dlg-" + sha256prefix(provider + ":" + sub, 12);
       if (!membershipReader.isMember(provider, sub, tenant)) {
@@ -160,14 +170,17 @@ public class DelegatedAssertionAuthenticator {
   }
 
   // ---------------------------------------------------------------------------
-  // Private helpers — independent of the production class's own outputs so a
-  // bug in those outputs cannot self-cancel in a test that calls back through here.
-  // ---------------------------------------------------------------------------
 
   private static Map<String, Object> decodeJsonObject(String b64url) throws Exception {
     byte[] json = Base64.getUrlDecoder().decode(addPadding(b64url));
-    Map<String, Object> map = MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
-    return map;
+    Object parsed = MAPPER.readValue(json, Object.class);
+    if (!(parsed instanceof Map<?, ?> m)) {
+      throw new IllegalArgumentException(
+          "not a JSON object: " + (parsed == null ? "null" : parsed.getClass().getSimpleName()));
+    }
+    @SuppressWarnings("unchecked")
+    Map<String, Object> result = (Map<String, Object>) m;
+    return result;
   }
 
   private static String requireString(Map<String, Object> map, String key) {

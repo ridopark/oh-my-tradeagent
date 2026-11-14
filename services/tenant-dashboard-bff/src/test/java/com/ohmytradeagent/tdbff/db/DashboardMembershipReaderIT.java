@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Map;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.flywaydb.core.Flyway;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -33,6 +34,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Runs V1–V16 via Flyway (the production migration sequence; no extra SQL is applied). Flyway
  * connects as the superuser; the membership reader connects as {@code dashboard_readonly} with the
  * test password below. Gated on {@code RUN_DB_ITS=true}; runs under {@code mvn verify} (failsafe).
+ *
+ * <p>Structure matches the sibling ITs ({@code DashboardWriterMigrationIT}, {@code
+ * TradeContextMigrationIT}, {@code DarkpoolMigrationIT}): one {@code @BeforeAll} that migrates AND
+ * seeds, an {@code assertDenied} helper that checks {@code getSQLState()} (not the message text,
+ * since pgjdbc keeps the SQLState out of the exception message).
  */
 @Testcontainers
 @EnabledIfEnvironmentVariable(named = "RUN_DB_ITS", matches = "true")
@@ -46,8 +52,9 @@ class DashboardMembershipReaderIT {
   @Container
   static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
 
+  /** Single @BeforeAll: Flyway migration followed immediately by the seed inserts. */
   @BeforeAll
-  static void migrate() {
+  static void migrate() throws SQLException {
     Flyway.configure()
         .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
         .locations("classpath:db/dashboard")
@@ -58,10 +65,7 @@ class DashboardMembershipReaderIT {
                 "trade_context_writer_password", TC_WRITER_PW))
         .load()
         .migrate();
-  }
 
-  @BeforeAll
-  static void seedDashboardUser() throws SQLException {
     // Insert two rows as the superuser: one that the reader should find, one it should not.
     try (Connection c = asSuperuser();
         var st = c.createStatement()) {
@@ -76,47 +80,66 @@ class DashboardMembershipReaderIT {
   }
 
   @Test
-  void isMember_trueForExistingRow_falseOtherwise() throws SQLException {
-    DashboardMembershipReader reader = readerAsReadonly();
+  void isMember_trueForExistingRow_falseOtherwise() throws Exception {
+    // Use try-with-resources so the HikariDataSource is closed after the assertions.
+    try (com.zaxxer.hikari.HikariDataSource ds = readonlyDataSource()) {
+      DashboardMembershipReader reader =
+          new DashboardMembershipReader(DSL.using(ds, SQLDialect.POSTGRES));
 
-    // Exact triple exists → true.
-    assertThat(reader.isMember("google", "sub-1", "acme")).isTrue();
-    // Different tenant — same sub, different tenant_id → false.
-    assertThat(reader.isMember("google", "sub-1", "other-tenant")).isFalse();
-    // Different subject → false.
-    assertThat(reader.isMember("google", "sub-not-exist", "acme")).isFalse();
-    // Different provider → false.
-    assertThat(reader.isMember("github", "sub-1", "acme")).isFalse();
+      // Exact triple exists → true.
+      assertThat(reader.isMember("google", "sub-1", "acme")).isTrue();
+      // Different tenant — same sub, different tenant_id → false.
+      assertThat(reader.isMember("google", "sub-1", "other-tenant")).isFalse();
+      // Different subject → false.
+      assertThat(reader.isMember("google", "sub-not-exist", "acme")).isFalse();
+      // Different provider → false.
+      assertThat(reader.isMember("github", "sub-1", "acme")).isFalse();
+    }
   }
 
   @Test
   void readonlyRole_cannotUpdateDashboardUser() throws SQLException {
     // The SELECT grant lets isMember() work; there must be no UPDATE or DELETE privilege.
     try (Connection c =
-            DriverManager.getConnection(postgres.getJdbcUrl(), "dashboard_readonly", READONLY_PW);
-        var st = c.createStatement()) {
-      assertThatThrownBy(
-              () ->
-                  st.executeUpdate(
-                      "UPDATE dashboard_user SET email = 'x@y.com' WHERE tenant_id = 'acme'"))
-          .hasMessageContaining(INSUFFICIENT_PRIVILEGE);
+        DriverManager.getConnection(postgres.getJdbcUrl(), "dashboard_readonly", READONLY_PW)) {
+      var st = c.createStatement();
+      assertDenied(
+          () ->
+              st.executeUpdate(
+                  "UPDATE dashboard_user SET email = 'x@y.com' WHERE tenant_id = 'acme'"));
     }
   }
 
   // ---------------------------------------------------------------------------
 
-  private static DashboardMembershipReader readerAsReadonly() {
-    String url = postgres.getJdbcUrl();
+  /**
+   * Returns a fresh HikariDataSource connecting as {@code dashboard_readonly}. The caller is
+   * responsible for closing it (use try-with-resources).
+   */
+  private static com.zaxxer.hikari.HikariDataSource readonlyDataSource() {
     com.zaxxer.hikari.HikariDataSource ds = new com.zaxxer.hikari.HikariDataSource();
-    ds.setJdbcUrl(url);
+    ds.setJdbcUrl(postgres.getJdbcUrl());
     ds.setUsername("dashboard_readonly");
     ds.setPassword(READONLY_PW);
     ds.setMaximumPoolSize(2);
-    return new DashboardMembershipReader(DSL.using(ds, SQLDialect.POSTGRES));
+    return ds;
   }
 
   private static Connection asSuperuser() throws SQLException {
     return DriverManager.getConnection(
         postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+  }
+
+  /**
+   * Asserts that the action throws a {@link SQLException} with SQLState {@code 42501}
+   * (insufficient_privilege). Matches the pattern used in {@code DashboardWriterMigrationIT} and
+   * {@code DarkpoolMigrationIT}: checks {@code getSQLState()} not the message text, because pgjdbc
+   * keeps the SQLState out of the exception message.
+   */
+  private static void assertDenied(ThrowingCallable action) {
+    assertThatThrownBy(action)
+        .isInstanceOf(SQLException.class)
+        .satisfies(
+            e -> assertThat(((SQLException) e).getSQLState()).isEqualTo(INSUFFICIENT_PRIVILEGE));
   }
 }
