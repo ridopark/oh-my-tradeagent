@@ -97,4 +97,25 @@ public class DataSourceConfig {
       @Qualifier("dashboardWriterDataSource") DataSource dashboardWriterDataSource) {
     return DSL.using(dashboardWriterDataSource, SQLDialect.POSTGRES);
   }
+
+  // Read-only connection to the `dashboard` DB for the MCP delegated-assertion credential class
+  // (PLAN-2026-11-13-mcp-remote-oauth.md, PR 1). Connects as the existing `dashboard_readonly`
+  // role (V2 grants it SELECT ON dashboard_user). DARK by default: absent when
+  // bff.mcp-delegated.enabled=false, so a cluster without the MCP gateway never opens a pool to
+  // the dashboard DB via this path. The password reuses DASHBOARD_READONLY_PASSWORD — the same
+  // secret that V2's migration placeholder creates the role with and that the Next.js web app
+  // also uses to connect. Not @Primary.
+  @Bean
+  @ConditionalOnProperty(name = "bff.mcp-delegated.enabled", havingValue = "true")
+  @ConfigurationProperties("bff.datasource.dashboard-readonly")
+  public DataSource dashboardReadonlyDataSource() {
+    return new HikariDataSource();
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "bff.mcp-delegated.enabled", havingValue = "true")
+  public DSLContext dashboardReadonlyDsl(
+      @Qualifier("dashboardReadonlyDataSource") DataSource dashboardReadonlyDataSource) {
+    return DSL.using(dashboardReadonlyDataSource, SQLDialect.POSTGRES);
+  }
 }

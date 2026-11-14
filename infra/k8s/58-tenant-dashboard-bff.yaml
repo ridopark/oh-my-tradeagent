@@ -220,6 +220,24 @@ spec:
                   name: dashboard-secrets
                   key: BFF_MCP_READ_TOKENS
                   optional: true
+            # MCP delegated-assertion credential class (PLAN-2026-11-13-mcp-remote-oauth.md, PR 1).
+            # BFF_MCP_DELEGATED_ENABLED is NOT set here (default false) — enabling is a manual
+            # `kubectl set env deployment/tenant-dashboard-bff BFF_MCP_DELEGATED_ENABLED=true`
+            # after the operator has provisioned the signing key and verified the gateway is ready.
+            # The key is optional so the pod boots without it when the flag is off; when enabled with
+            # an absent key the BFF will fail to start (the DelegatedAssertionAuthenticator constructor
+            # throws IllegalStateException on a blank key — intentional fail-closed).
+            - name: BFF_MCP_DELEGATED_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_MCP_DELEGATED_PUBLIC_KEY
+                  optional: true
+            # Read-only datasource for the membership check (dashboard_readonly role, V2 grants it
+            # SELECT ON dashboard_user). Same DB as the Flyway target; kept as a separate env var
+            # so a read replica can be substituted without touching the migration URL.
+            - name: DASHBOARD_READONLY_URL
+              value: jdbc:postgresql://postgres:5432/dashboard
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
