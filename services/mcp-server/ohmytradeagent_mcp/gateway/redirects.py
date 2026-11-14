@@ -29,6 +29,11 @@ def loopback_port_agnostic_match(registered_uri: str, request_uri: str) -> bool:
     q = urlparse(request_uri)
     if r.scheme != "http" or q.scheme != "http":
         return False
+    # RFC 6749 §3.1.2: no fragment; and never userinfo (http://evil.com@127.0.0.1/ is loopback
+    # to a parser but misleading to a human) — on either URI.
+    for u in (r, q):
+        if u.username or u.password or u.fragment:
+            return False
     r_host = r.hostname or ""
     q_host = q.hostname or ""
     if r_host not in _LOOPBACK_HOSTS or q_host not in _LOOPBACK_HOSTS:

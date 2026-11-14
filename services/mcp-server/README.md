@@ -305,13 +305,18 @@ set.
 | `OMT_PUBLIC_URL` | yes | HTTPS URL of the gateway (e.g. `https://tradeagent-mcp.ridopark.com`) |
 | `OMT_BFF_URL` | yes | Internal URL of the tenant-dashboard-bff |
 | `MCP_GATEWAY_SIGNING_KEY` | yes | Ed25519 private key PEM for delegated assertions |
-| `OMT_GATEWAY_DB_URL` | yes | PostgreSQL DSN for the OAuth store (e.g. `postgresql://mcp_gateway@pg/dashboard`) |
-| `OMT_GOOGLE_CLIENT_ID` | yes | Google OAuth 2.0 client ID |
-| `OMT_GOOGLE_CLIENT_SECRET` | yes | Google OAuth 2.0 client secret |
-| `MCP_GATEWAY_DB_PASSWORD` | no | Injected into DSN if provided (avoids secrets in env) |
-| `OMT_GATEWAY_DISABLED` | no | Set to `1` to run in disabled mode (health check only, no /mcp) |
+| `OMT_GATEWAY_DB_URL` | yes* | PostgreSQL DSN for the OAuth store, without a password (e.g. `postgresql://mcp_gateway@pg/dashboard`) |
+| `OMT_GOOGLE_CLIENT_ID` | yes* | Google OAuth 2.0 client ID |
+| `OMT_GOOGLE_CLIENT_SECRET` | yes* | Google OAuth 2.0 client secret |
+| `MCP_GATEWAY_DB_PASSWORD` | yes* | Password of the `mcp_gateway` role. Passed to the driver as a separate argument, never spliced into the DSN |
+| `OMT_GATEWAY_DISABLED` | no | `true`, `1` or `yes`: disabled mode (kill switch) — `/healthz` only, everything else 503 |
+| `OMT_TRUSTED_PROXY_CIDRS` | no | CIDRs whose `CF-Connecting-IP` header is trusted for per-IP rate limits. Default empty: the header is ignored and the socket peer is used |
+| `OMT_RATE_TOOLS_PER_MIN_SUBJECT` / `_CLIENT` | no | Tool-call limits per signed-in user / per client (default 60 / 300 per minute) |
+| `OMT_RATE_AUTH_PER_MIN_IP` | no | Per-IP limit on the OAuth endpoints (default 30 per minute) |
 | `OMT_ALLOWED_HOSTS` | no | Comma-separated host allow-list (defaults to host of `OMT_PUBLIC_URL`) |
 | `OMT_LISTEN` | no | `host:port` to bind (default `0.0.0.0:8000`) |
+
+\* Required unless `OMT_GATEWAY_DISABLED` is set. A missing or invalid value exits 2 with one line; so does an unreachable database.
 
 ### Generating the signing key
 
@@ -330,5 +335,5 @@ OMT_GATEWAY_DISABLED=1 \
   uv run python -m ohmytradeagent_mcp.gateway
 ```
 
-The server starts, serves `GET /healthz` → `{"status":"ok","disabled":true}`, and
+The server starts, serves `GET /healthz` → `{"status":"ok"}`, and
 rejects all `/mcp` requests with 503.

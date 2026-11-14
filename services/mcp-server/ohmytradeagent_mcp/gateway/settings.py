@@ -13,8 +13,8 @@ Optional:
   OMT_GOOGLE_CLIENT_ID    — Google OAuth 2.0 client id (required in production)
   OMT_GOOGLE_CLIENT_SECRET — Google OAuth 2.0 client secret (required in production)
   OMT_GATEWAY_DB_URL      — asyncpg DSN for PostgresStore (required in production)
-  MCP_GATEWAY_DB_PASSWORD — password for the mcp_gateway DB role; appended to the
-                            DSN when present
+  MCP_GATEWAY_DB_PASSWORD — password for the mcp_gateway DB role (required in production);
+                            passed to asyncpg as a keyword argument, never spliced into the DSN
   OMT_RATE_TOOLS_PER_MIN_SUBJECT — per-subject tool call RPM (default 60)
   OMT_RATE_TOOLS_PER_MIN_CLIENT  — per-client tool call RPM (default 300)
   OMT_RATE_AUTH_PER_MIN_IP       — per-IP auth endpoint RPM (default 30)

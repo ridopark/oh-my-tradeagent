@@ -75,20 +75,30 @@ def run_gateway(
         store = PostgresStore(db_url, password=db_password)
         # connect() is called by build_gateway_app via the ASGI lifespan event
 
-    # Finding C: eagerly connect to DB before starting uvicorn so a bad URL
-    # exits 2 immediately rather than failing silently during ASGI lifespan.
+    # Probe the DB before starting uvicorn so a bad URL/password exits 2 with one line instead
+    # of failing inside the ASGI lifespan. The probe uses its OWN one-shot connection: the
+    # store's pool must be created later, on uvicorn's event loop (a pool created under
+    # asyncio.run here would be bound to a loop that is closed before the first request).
     if not settings.disabled:
-        from ohmytradeagent_mcp.gateway.store_postgres import PostgresStore
-        if isinstance(store, PostgresStore):
-            import asyncio
+        import asyncio
+
+        import asyncpg
+
+        async def _probe_db() -> None:
+            conn = await asyncpg.connect(db_url, password=db_password, timeout=4.0)
             try:
-                asyncio.run(asyncio.wait_for(store.connect(), timeout=4.0))
-            except Exception:  # noqa: BLE001
-                print(
-                    "error: DB connection failed (check OMT_GATEWAY_DB_URL and MCP_GATEWAY_DB_PASSWORD)",
-                    file=sys.stderr,
-                )
-                return 2
+                await conn.execute("SELECT 1")
+            finally:
+                await conn.close()
+
+        try:
+            asyncio.run(asyncio.wait_for(_probe_db(), timeout=5.0))
+        except Exception:  # noqa: BLE001 — any failure is the same operator action
+            print(
+                "error: DB connection failed (check OMT_GATEWAY_DB_URL and MCP_GATEWAY_DB_PASSWORD)",
+                file=sys.stderr,
+            )
+            return 2
 
     app = _build_app_from_settings(settings, store)
 

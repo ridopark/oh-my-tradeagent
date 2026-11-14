@@ -36,13 +36,19 @@ from mcp.server.auth.settings import (
     RevocationOptions,
 )
 from mcp.server.mcpserver import MCPServer
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import (
+    DEFAULT_MAX_REQUEST_BODY_SIZE,
+    RequestBodyLimitMiddleware,
+    TransportSecuritySettings,
+)
+from mcp.shared.inbound import MCP_PROTOCOL_VERSION_HEADER
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.datastructures import Headers as _Headers
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, request_response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ohmytradeagent_mcp.gateway.assertion import Signer
@@ -182,6 +188,52 @@ def _is_peer_trusted(peer_ip: str, cidrs: list) -> bool:
     return False
 
 
+def _cors_body_limited(handler, allow_methods: list[str]) -> ASGIApp:
+    """Wrap a replacement auth route exactly as the SDK wraps the route it replaces:
+    request handler → body cap (413 over 4 MiB) → CORS."""
+    return CORSMiddleware(
+        app=RequestBodyLimitMiddleware(request_response(handler), DEFAULT_MAX_REQUEST_BODY_SIZE),
+        allow_origins="*",
+        allow_methods=allow_methods,
+        allow_headers=[MCP_PROTOCOL_VERSION_HEADER],
+    )
+
+
+async def _unavailable(_request: Request, _exc: Exception) -> Response:
+    return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+
+
+class _UnavailableOnError:
+    """Outermost ASGI wrapper: an unhandled exception (e.g. the store's DB is down) ends as a
+    generic 503, never a 500 with a traceback. Only the exception type is logged."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message: dict) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._app(scope, receive, _send)
+        except Exception as exc:  # noqa: BLE001 — fail closed with a generic body
+            _LOG.error("request failed: %s path=%s", type(exc).__name__, scope.get("path", ""))
+            if not started:
+                resp = JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+                await resp(scope, receive, send)
+            # If a response was already started (Starlette's error middleware responds with our
+            # 503 handler and then re-raises), the client has its answer: do not re-raise, so
+            # the server never prints a traceback that could carry connection details.
+
+
 class _AuthRateLimitMiddleware:
     """ASGI middleware that enforces per-IP rate limits on OAuth auth endpoints.
 
@@ -273,7 +325,6 @@ def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
 
     from mcp.server.auth.handlers.register import RegistrationErrorResponse, RegistrationHandler
     from mcp.server.auth.json_response import PydanticJSONResponse
-    from mcp.server.auth.routes import cors_middleware
 
     sdk_register = RegistrationHandler(provider=provider, options=options)
 
@@ -296,6 +347,15 @@ def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
                 content=RegistrationErrorResponse(
                     error="invalid_client_metadata",
                     error_description="Request body must be valid JSON",
+                ),
+                status_code=400,
+            )
+
+        if not isinstance(raw_dict, dict):
+            return PydanticJSONResponse(
+                content=RegistrationErrorResponse(
+                    error="invalid_client_metadata",
+                    error_description="Request body must be a JSON object",
                 ),
                 status_code=400,
             )
@@ -325,7 +385,7 @@ def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
 
     routes[existing_idx] = Route(
         "/register",
-        endpoint=cors_middleware(patched_handler, ["POST", "OPTIONS"]),
+        endpoint=_cors_body_limited(patched_handler, ["POST", "OPTIONS"]),
         methods=["POST", "OPTIONS"],
     )
 
@@ -338,7 +398,6 @@ def _patch_revoke_route(sdk_app: Starlette, store) -> None:
     return None for expired tokens, making revocation a no-op for them.
     This handler looks up the token in the store directly and revokes the grant.
     """
-    from mcp.server.auth.routes import cors_middleware
 
     routes = sdk_app.router.routes
     existing_idx = None
@@ -377,7 +436,7 @@ def _patch_revoke_route(sdk_app: Starlette, store) -> None:
 
     routes[existing_idx] = Route(
         "/revoke",
-        endpoint=cors_middleware(patched_handler, ["POST", "OPTIONS"]),
+        endpoint=_cors_body_limited(patched_handler, ["POST", "OPTIONS"]),
         methods=["POST", "OPTIONS"],
     )
 
@@ -714,13 +773,16 @@ def build_gateway_app(
     _patch_register_route(sdk_app, provider, auth_settings.client_registration_options)
     # Patch /revoke to handle expired and membership-lapsed tokens (Finding H)
     _patch_revoke_route(sdk_app, store)
+    # Unhandled errors inside the SDK app (store/DB failures) answer 503, not Starlette's 500.
+    sdk_app.add_exception_handler(Exception, _unavailable)
 
     lazy_sdk_app = _LazyLifespanApp(sdk_app)
 
     # Build extra routes (health, readyz, root protected-resource metadata)
     _resource_metadata = {
         "resource": settings.mcp_resource_url,
-        "authorization_servers": [settings.public_url],
+        # Exactly the issuer string the AS metadata serialises (clients compare byte-for-byte).
+        "authorization_servers": [str(issuer_url)],
         "scopes_supported": ["read"],
         "bearer_methods_supported": ["header"],
     }
@@ -804,4 +866,4 @@ def build_gateway_app(
                 return
             await wrapped(scope, receive, send)
 
-    return _GatewayApp()  # type: ignore[return-value]
+    return _UnavailableOnError(_GatewayApp())  # type: ignore[return-value]

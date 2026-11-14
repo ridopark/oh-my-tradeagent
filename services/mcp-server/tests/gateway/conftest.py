@@ -67,6 +67,15 @@ def _make_dsn(base: str, *, user: str, password: str | None, dbname: str) -> str
     return f"{p.scheme}://{netloc}/{dbname}"
 
 
+def _dsn_for_db(base: str, dbname: str) -> str:
+    """Return *base* pointed at *dbname*, keeping its user, password, host and port.
+
+    CI's superuser DSN carries a password (local trust-auth clusters do not); dropping it
+    made every connection after CREATE DATABASE fail with InvalidPasswordError.
+    """
+    return urlparse(base)._replace(path=f"/{dbname}").geturl()
+
+
 # ------------------------------------------------------------------
 # Async helpers (run via asyncio.run from the synchronous fixture)
 # ------------------------------------------------------------------
@@ -84,7 +93,7 @@ async def _create_db_and_migrate(superuser_dsn: str, db_name: str) -> None:
         await conn.close()
 
     # Connect to new DB as superuser and migrate
-    new_super_dsn = _make_dsn(superuser_dsn, user="postgres", password=None, dbname=db_name)
+    new_super_dsn = _dsn_for_db(superuser_dsn, db_name)
     conn = await asyncpg.connect(new_super_dsn)
     try:
         for f in sorted(_MIGRATIONS_DIR.glob("V*.sql"), key=_migration_key):
@@ -148,7 +157,7 @@ def pg_dsns():
     db_name = f"mcp_test_{uuid.uuid4().hex[:12]}"
     asyncio.run(_create_db_and_migrate(base_dsn, db_name))
 
-    super_dsn = _make_dsn(base_dsn, user="postgres", password=None, dbname=db_name)
+    super_dsn = _dsn_for_db(base_dsn, db_name)
     gw_dsn = _make_dsn(base_dsn, user="mcp_gateway", password=MCP_GW_TEST_PW, dbname=db_name)
 
     yield super_dsn, gw_dsn
