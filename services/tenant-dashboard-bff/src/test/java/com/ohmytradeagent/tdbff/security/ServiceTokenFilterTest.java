@@ -645,7 +645,9 @@ class ServiceTokenFilterTest {
       "/api/positions/arm-anchors",
       "/api/entries/watchlist",
       "/api/live/connection",
-      "/internal/provisioning/bind"
+      "/internal/provisioning/bind",
+      // PR 4: MCP grants routes are NOT in MCP_ALLOWLIST — an MCP token must never reach them.
+      "/api/mcp/grants"
     };
     for (String path : paths) {
       MockHttpServletRequest req = new MockHttpServletRequest("GET", path);
@@ -928,6 +930,42 @@ class ServiceTokenFilterTest {
                 new ServiceTokenFilter(
                     TOKEN, INGEST_TOKEN, "nothex:acme", new MockEnvironment(), null))
         .isInstanceOf(IllegalStateException.class);
+  }
+
+  // PR 4: MCP grants routes are NOT in MCP_ALLOWLIST — an MCP token must never reach them.
+
+  @Test
+  void mcpToken_postRevoke_is403() throws Exception {
+    // POST /api/mcp/grants/{id}/revoke: an MCP read token cannot revoke anything — the route is
+    // not in MCP_ALLOWLIST and the method is POST (which the method gate would block anyway).
+    MockHttpServletRequest req =
+        new MockHttpServletRequest("POST", "/api/mcp/grants/some-id/revoke");
+    req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    mcpFilter.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(403);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void mcpToken_grantsSubpaths_are403() throws Exception {
+    // No /api/mcp/grants sub-path is in MCP_ALLOWLIST — only /api/mcp/whoami is.
+    // An MCP token on any grants URL must never reach a handler.
+    String[] paths = {"/api/mcp/grants", "/api/mcp/grants/some-id/revoke"};
+    for (String path : paths) {
+      MockHttpServletRequest req = new MockHttpServletRequest("GET", path);
+      req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = new MockFilterChain();
+
+      mcpFilter.doFilter(req, res, chain);
+
+      assertThat(res.getStatus()).as("GET %s", path).isEqualTo(403);
+      assertThat(chain.getRequest()).as("chain not invoked for %s", path).isNull();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
