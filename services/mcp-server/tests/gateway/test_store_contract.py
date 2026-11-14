@@ -142,10 +142,9 @@ async def test_clientSweep_expiredUnused_removed(store):
     )
     await store.put_client(client)
 
-    # Artificially expire it (InMemoryStore: set private attr; PostgresStore: bypass)
+    # Artificially expire it
     if isinstance(store, InMemoryStore):
-        c = await store.get_client_record("test-sweep-cli")
-        c._expires_at = time.time() - 1  # already expired
+        store._client_expires_at["test-sweep-cli"] = time.time() - 1
 
     elif isinstance(store, PostgresStore):
         async with store._pool.acquire() as conn:
@@ -162,15 +161,7 @@ async def test_clientSweep_expiredUnused_removed(store):
 
 @pytest.mark.asyncio
 async def test_clientSweep_withActiveGrant_notRemoved(store):
-    """An expired client that has an active grant must NOT be swept.
-
-    RED: sweep_expired_clients uses `not hasattr(c, '_last_used_at')` which is
-         always True (attr never set), so even clients with active grants are swept.
-    GREEN: sweep checks the grants collection; a client with a live grant survives.
-    """
-    if not isinstance(store, InMemoryStore):
-        pytest.skip("InMemoryStore-only test; PostgresStore uses DB-level logic")
-
+    """An expired client that has an active grant must NOT be swept."""
     from mcp.shared.auth import OAuthClientInformationFull
     from pydantic import AnyUrl
 
@@ -194,9 +185,15 @@ async def test_clientSweep_withActiveGrant_notRemoved(store):
         client_name="Sweep Active",
     )
 
-    # Mark the client record as expired
-    c = await store.get_client_record("test-sweep-active")
-    c._expires_at = time.time() - 1
+    # Mark the client as expired
+    if isinstance(store, InMemoryStore):
+        store._client_expires_at["test-sweep-active"] = time.time() - 1
+    elif isinstance(store, PostgresStore):
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE mcp_oauth_client SET expires_at = now() - interval '1 day' "
+                "WHERE client_id = 'test-sweep-active'"
+            )
 
     await store.sweep_expired_clients()
 
@@ -614,3 +611,125 @@ async def test_isHealthy(store):
     """is_healthy returns True for a connected store."""
     ok = await store.is_healthy()
     assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# 10. Finding D — bump_client_used + sweep uses store-managed expiry dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bump_client_used_setsLastUsed(store):
+    """bump_client_used exists and updates the client's last-used tracking.
+
+    RED: InMemoryStore and PostgresStore have no bump_client_used method.
+    GREEN: method is added; subsequent sweep respects last_used_at IS NOT NULL.
+    """
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
+
+    client = OAuthClientInformationFull(
+        client_id="test-bump-cli",
+        redirect_uris=[AnyUrl("https://example.com/cb")],
+        client_name="Bump Test",
+        grant_types=["authorization_code"],
+        response_types=["code"],
+        scope="read",
+        token_endpoint_auth_method="none",
+    )
+    await store.put_client(client)
+
+    # Must not raise; must update internal tracking
+    await store.bump_client_used("test-bump-cli")
+
+    # After bump, an expired client should NOT be swept if last_used_at IS NOT NULL
+    if isinstance(store, InMemoryStore):
+        store._client_expires_at["test-bump-cli"] = time.time() - 1
+
+    elif isinstance(store, PostgresStore):
+        async with store._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE mcp_oauth_client SET expires_at = now() - interval '1 day' "
+                "WHERE client_id = 'test-bump-cli'"
+            )
+
+    await store.sweep_expired_clients()
+    # bump_client_used set last_used_at, so the client must survive the sweep
+    rec = await store.get_client_record("test-bump-cli")
+    assert rec is not None, "bumped client must not be swept even after expiry"
+
+
+@pytest.mark.asyncio
+async def test_clientSweep_usesDictExpiry(store):
+    """InMemory sweep uses _client_expires_at dict, not hasattr on the client object.
+
+    RED: put_client does not populate _client_expires_at; sweep uses hasattr so
+         an unmodified registered client is never swept.
+    GREEN: put_client writes to _client_expires_at; expiring via the dict works.
+    """
+    if not isinstance(store, InMemoryStore):
+        pytest.skip("dict-expiry path is InMemoryStore-specific")
+
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
+
+    client = OAuthClientInformationFull(
+        client_id="test-dict-expiry",
+        redirect_uris=[AnyUrl("https://example.com/cb")],
+        client_name="Dict Expiry",
+        grant_types=["authorization_code"],
+        response_types=["code"],
+        scope="read",
+        token_endpoint_auth_method="none",
+    )
+    await store.put_client(client)
+
+    # _client_expires_at must exist and have an entry for the new client
+    assert hasattr(store, "_client_expires_at"), (
+        "InMemoryStore must have a _client_expires_at dict"
+    )
+    assert "test-dict-expiry" in store._client_expires_at, (
+        "put_client must add an entry to _client_expires_at"
+    )
+
+    # Expire via the dict (not via c._expires_at)
+    store._client_expires_at["test-dict-expiry"] = time.time() - 1
+    await store.sweep_expired_clients()
+    assert await store.get_client_record("test-dict-expiry") is None, (
+        "dict-expired client must be swept"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. Finding J — code double-consume returns False
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_code_consumeSecondTime_returnsFalse(store):
+    """consume_code returns False when the code was already consumed (mutation guard).
+
+    Verifies that the conditional in consume_code (consumed_at is not None → return
+    False) is load-bearing and cannot be dropped.
+    """
+    grant_id = await _make_grant(store)
+    now = time.time()
+    code = CodeRecord(
+        code="raw-code-double",
+        grant_id=grant_id,
+        client_id="cli-1",
+        code_challenge="ch-double",
+        redirect_uri="https://example.com/cb",
+        redirect_uri_provided_explicitly=True,
+        resource=None,
+        scopes=["read"],
+        subject="sub-1",
+        expires_at=now + 300,
+    )
+    await store.put_code(code)
+
+    first = await store.consume_code("raw-code-double")
+    assert first is True, "first consume must succeed"
+
+    second = await store.consume_code("raw-code-double")
+    assert second is False, "second consume must return False (already consumed)"

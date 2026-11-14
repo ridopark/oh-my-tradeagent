@@ -162,6 +162,10 @@ class OAuthStore(Protocol):
         """
         ...
 
+    async def bump_client_used(self, client_id: str) -> None:
+        """Mark a client as used (prevents sweep of still-active clients)."""
+        ...
+
     async def sweep_expired_clients(self) -> None:
         """Remove expired-and-never-used DCR clients."""
         ...
@@ -199,6 +203,10 @@ class InMemoryStore:
         self._refresh_tokens: dict[str, RefreshTokenRecord] = {}
         # {client_id: OAuthClientInformationFull}
         self._clients: dict = {}
+        # {client_id: float} — expires_at epoch; set by put_client
+        self._client_expires_at: dict[str, float] = {}
+        # {client_id: float} — last_used_at epoch; set by bump_client_used
+        self._client_last_used: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # OAuthStore protocol
@@ -416,10 +424,15 @@ class InMemoryStore:
     async def put_client(self, client) -> None:  # client: OAuthClientInformationFull
         """Store a registered DCR client."""
         self._clients[client.client_id] = client
+        self._client_expires_at[client.client_id] = time.time() + 30 * 86400
 
     async def get_client_record(self, client_id: str):  # -> OAuthClientInformationFull | None
         """Return a registered client, or None."""
         return self._clients.get(client_id)
+
+    async def bump_client_used(self, client_id: str) -> None:
+        """Mark a client as used (sets last_used_at so it is not swept as abandoned)."""
+        self._client_last_used[client_id] = time.time()
 
     async def sweep_expired_clients(self) -> None:
         """Remove clients whose ``expires_at`` has passed and have no active grants."""
@@ -432,11 +445,11 @@ class InMemoryStore:
         }
         to_delete = [
             cid
-            for cid, c in self._clients.items()
-            if hasattr(c, "_expires_at")
-            and c._expires_at is not None
-            and c._expires_at < now
+            for cid, exp in self._client_expires_at.items()
+            if exp < now
             and cid not in active_clients
+            and cid not in self._client_last_used
         ]
         for cid in to_delete:
             del self._clients[cid]
+            del self._client_expires_at[cid]

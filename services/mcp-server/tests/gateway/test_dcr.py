@@ -187,9 +187,9 @@ async def test_register_unusedClientExpires_afterSweep():
         c = await store.get_client_record(client_id)
         assert c is not None
 
-        # Artificially mark it as expired + never used
-        c._expires_at = time.time() - 1
-        # (last_used_at not set means never used)
+        # Artificially mark it as expired + never used (via store expiry dict)
+        store._client_expires_at[client_id] = time.time() - 1
+        # (never bumped via authorize → not in _client_last_used)
 
         # Register another client to trigger the sweep
         await client.post(

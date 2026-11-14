@@ -178,6 +178,7 @@ class OmtAuthorizationServerProvider:
             client_name=client.client_name,
         )
         await self._store.put_pending_auth(pending)
+        await self._store.bump_client_used(client.client_id)
         return self._idp.authorize_url(our_state, our_nonce, self._google_callback_url)
 
     # ------------------------------------------------------------------
@@ -267,6 +268,7 @@ class OmtAuthorizationServerProvider:
             )
         )
 
+        await self._store.bump_client_used(client.client_id)
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",
@@ -361,6 +363,7 @@ class OmtAuthorizationServerProvider:
             )
         )
 
+        await self._store.bump_client_used(client.client_id)
         return OAuthToken(
             access_token=new_access,
             token_type="Bearer",
