@@ -284,3 +284,51 @@ cd services/mcp-server
 uv run ruff check .
 uv run pytest -q
 ```
+
+---
+
+## Remote (OAuth) mode
+
+The gateway exposes the same read-only MCP tools over Streamable HTTP so that
+hosted AI clients (Claude.ai, Gemini web app, ChatGPT) can connect without a
+local CLI.  Members sign in with Google; the gateway federates to Google OIDC
+and issues short-lived MCP access tokens that are scoped to the member's tenant
+set.
+
+> **Status:** Step 3c (implemented in PR 3).  Full setup docs, k8s manifests,
+> and a Cloudflare runbook are delivered in PR 5.
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OMT_PUBLIC_URL` | yes | HTTPS URL of the gateway (e.g. `https://tradeagent-mcp.ridopark.com`) |
+| `OMT_BFF_URL` | yes | Internal URL of the tenant-dashboard-bff |
+| `MCP_GATEWAY_SIGNING_KEY` | yes | Ed25519 private key PEM for delegated assertions |
+| `OMT_GATEWAY_DB_URL` | yes | PostgreSQL DSN for the OAuth store (e.g. `postgresql://mcp_gateway@pg/dashboard`) |
+| `OMT_GOOGLE_CLIENT_ID` | yes | Google OAuth 2.0 client ID |
+| `OMT_GOOGLE_CLIENT_SECRET` | yes | Google OAuth 2.0 client secret |
+| `MCP_GATEWAY_DB_PASSWORD` | no | Injected into DSN if provided (avoids secrets in env) |
+| `OMT_GATEWAY_DISABLED` | no | Set to `1` to run in disabled mode (health check only, no /mcp) |
+| `OMT_ALLOWED_HOSTS` | no | Comma-separated host allow-list (defaults to host of `OMT_PUBLIC_URL`) |
+| `OMT_LISTEN` | no | `host:port` to bind (default `0.0.0.0:8000`) |
+
+### Generating the signing key
+
+```bash
+openssl genpkey -algorithm ed25519 -out mcp-signing-key.pem
+# Store in k8s Secret; pass as MCP_GATEWAY_SIGNING_KEY (the PEM text)
+```
+
+### Local smoke test (disabled mode)
+
+```bash
+OMT_PUBLIC_URL=https://tradeagent-mcp.ridopark.com \
+OMT_BFF_URL=http://127.0.0.1:18080 \
+MCP_GATEWAY_SIGNING_KEY="$(openssl genpkey -algorithm ed25519 2>/dev/null)" \
+OMT_GATEWAY_DISABLED=1 \
+  uv run python -m ohmytradeagent_mcp.gateway
+```
+
+The server starts, serves `GET /healthz` → `{"status":"ok","disabled":true}`, and
+rejects all `/mcp` requests with 503.

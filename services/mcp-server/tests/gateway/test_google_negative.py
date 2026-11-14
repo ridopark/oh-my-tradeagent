@@ -316,3 +316,30 @@ async def test_exchange_happyPath_returnsIdentity():
     assert identity.sub == "user-123"
     assert identity.email_verified is True
     assert identity.nonce == "nonce-abc"
+
+
+# ---------------------------------------------------------------------------
+# Item 13: Accept both Google issuer forms
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exchange_legacyIssuer_accepted():
+    """Token with legacy issuer 'accounts.google.com' (no https://) is accepted.
+
+    Google historically issued both 'https://accounts.google.com' and
+    'accounts.google.com' as the iss claim.  The gateway must accept both.
+
+    RED: google.py passes issuer='https://accounts.google.com' to pyjwt.decode
+         which rejects the legacy form → raises InvalidIssuerError.
+    GREEN: google.py accepts both forms.
+    """
+    token = _make_token(iss="accounts.google.com")
+    idp, mock_jwks_cls = _make_idp(token, _PUBLIC_KEY)
+
+    with patch("jwt.PyJWKClient", mock_jwks_cls):
+        identity = await idp.exchange("code", _REDIRECT_URI)
+
+    assert identity.sub == "user-sub-123", (
+        f"Expected sub='user-sub-123', got {identity.sub!r}"
+    )

@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import ipaddress
+import logging
 import secrets
 import time
+
+_LOG = logging.getLogger(__name__)
 
 from mcp.server.auth.settings import (
     AuthSettings,
@@ -377,7 +381,13 @@ def _make_consent_handler(
                 {"error": "forbidden", "detail": "origin mismatch"},
                 status_code=403,
             )
-        # If neither header present, we still proceed (direct API calls, e.g. curl tests)
+        elif not origin:
+            # Both Sec-Fetch-Site and Origin are absent — reject to prevent CSRF
+            # from non-browser contexts that strip both headers.
+            return JSONResponse(
+                {"error": "forbidden", "detail": "missing origin"},
+                status_code=403,
+            )
 
         form = await request.form()
         state = form.get("state", "")
@@ -395,9 +405,9 @@ def _make_consent_handler(
         if pending.csrf_hash is None:
             return JSONResponse({"error": "csrf_not_set"}, status_code=400)
 
-        # Verify CSRF
+        # Verify CSRF (constant-time comparison prevents timing attacks)
         actual_hash = hashlib.sha256(csrf.encode()).hexdigest()
-        if actual_hash != pending.csrf_hash:
+        if not hmac.compare_digest(actual_hash, pending.csrf_hash):
             return JSONResponse({"error": "invalid_csrf"}, status_code=400)
 
         # Consume pending auth (also invalidates the CSRF — single-use)
@@ -406,6 +416,11 @@ def _make_consent_handler(
         from mcp.server.auth.provider import construct_redirect_uri
 
         if action == "deny":
+            _LOG.info(
+                "consent denied: outcome=denied client_id=%s subject=%s",
+                pending.client_id,
+                pending.subject or "<unknown>",
+            )
             redirect_url = construct_redirect_uri(
                 pending.redirect_uri,
                 error="access_denied",

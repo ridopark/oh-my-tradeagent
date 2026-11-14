@@ -49,6 +49,10 @@ _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_JWKS_URI = "https://www.googleapis.com/oauth2/v3/certs"
 _GOOGLE_ISSUER = "https://accounts.google.com"
+# Legacy issuer form used before ~2015; still accepted for compatibility.
+_GOOGLE_LEGACY_ISSUER = "accounts.google.com"
+
+_VALID_GOOGLE_ISSUERS = frozenset({_GOOGLE_ISSUER, _GOOGLE_LEGACY_ISSUER})
 
 
 class GoogleIdP:
@@ -72,6 +76,9 @@ class GoogleIdP:
         self._jwks_uri = jwks_uri or _GOOGLE_JWKS_URI
         self._token_uri = token_uri or _GOOGLE_TOKEN_URL
         self._transport = _transport
+        # PyJWKClient is created lazily on first exchange() so that test patches
+        # applied to jwt.PyJWKClient are active when the client is instantiated.
+        self._jwks_client = None
 
     def authorize_url(self, state: str, nonce: str, redirect_uri: str) -> str:
         params = {
@@ -88,7 +95,7 @@ class GoogleIdP:
     async def exchange(self, code: str, redirect_uri: str) -> Identity:
         import httpx
         import jwt as pyjwt
-        from jwt import PyJWKClient
+        from jwt import InvalidIssuerError, PyJWKClient
 
         async with httpx.AsyncClient(transport=self._transport) as client:
             resp = await client.post(
@@ -107,16 +114,24 @@ class GoogleIdP:
 
         id_token: str = tokens["id_token"]
 
-        jwks_client = PyJWKClient(self._jwks_uri)
-        signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+        # Reuse cached JWKS client across calls to avoid re-fetching the key set.
+        if self._jwks_client is None:
+            self._jwks_client = PyJWKClient(self._jwks_uri)
+        signing_key = self._jwks_client.get_signing_key_from_jwt(id_token)
+
+        # Decode without built-in issuer check; we accept both Google issuer forms.
         claims = pyjwt.decode(
             id_token,
             signing_key.key,
             algorithms=["RS256"],
             audience=self._client_id,
-            issuer=_GOOGLE_ISSUER,
-            options={"verify_exp": True},
+            options={"verify_exp": True, "verify_iss": False},
         )
+        iss = claims.get("iss", "")
+        if iss not in _VALID_GOOGLE_ISSUERS:
+            raise InvalidIssuerError(
+                f"Invalid issuer {iss!r}; expected one of {sorted(_VALID_GOOGLE_ISSUERS)}"
+            )
 
         return Identity(
             sub=claims["sub"],

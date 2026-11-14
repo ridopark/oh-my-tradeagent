@@ -230,3 +230,37 @@ async def test_consent_approve_yieldsCodeAndClientState():
     parsed = parse_qs(urlparse(location).query)
     assert "code" in parsed, f"No code in redirect: {location}"
     assert parsed.get("state", [""])[0] == "cs", f"Wrong state in redirect: {location}"
+
+
+# ---------------------------------------------------------------------------
+# Item 13: Reject consent POST when both Origin and Sec-Fetch-Site are absent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_consent_neitherHeader_is403():
+    """Consent POST with neither Sec-Fetch-Site nor Origin must be rejected (403).
+
+    RED: app.py proceeds when both headers are absent ("direct API calls").
+    GREEN: app.py rejects with 403 when both headers are absent.
+    """
+    app = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        our_state, csrf = await _get_consent_page(client)
+
+        # Send consent POST with no Sec-Fetch-Site and no Origin header
+        fields = [("state", our_state), ("csrf", csrf), ("tenants", "acme"), ("action", "approve")]
+        body, ct = encode_form(fields)
+        resp = await client.post(
+            "/oauth/consent",
+            content=body,
+            headers={"Content-Type": ct},  # no Sec-Fetch-Site, no Origin
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 403, (
+        f"expected 403 when both headers absent, got {resp.status_code}; "
+        f"body: {resp.text[:200]}"
+    )

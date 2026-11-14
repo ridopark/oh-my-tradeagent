@@ -422,15 +422,21 @@ class InMemoryStore:
         return self._clients.get(client_id)
 
     async def sweep_expired_clients(self) -> None:
-        """Remove clients whose ``expires_at`` has passed and have never been used."""
+        """Remove clients whose ``expires_at`` has passed and have no active grants."""
         now = time.time()
+        # Clients that have at least one non-revoked grant must not be swept
+        active_clients = {
+            gr.client_id
+            for gr in self._grants.values()
+            if gr.revoked_at is None
+        }
         to_delete = [
             cid
             for cid, c in self._clients.items()
             if hasattr(c, "_expires_at")
             and c._expires_at is not None
             and c._expires_at < now
-            and not hasattr(c, "_last_used_at")
+            and cid not in active_clients
         ]
         for cid in to_delete:
             del self._clients[cid]

@@ -245,3 +245,139 @@ async def test_token_happyPath_returnsAccessAndRefresh():
     assert "refresh_token" in tokens, tokens
     assert tokens.get("token_type", "").lower() == "bearer"
     assert tokens.get("expires_in", 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Item 14: /token edge cases — missing verifier, redirect_uri mismatch, wrong client
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_missingVerifier_isError():
+    """POST /token without code_verifier must fail (PKCE is required).
+
+    The SDK enforces PKCE for public clients (token_endpoint_auth_method=none).
+    RED: If the SDK does not enforce this, the token exchange would succeed.
+    GREEN: Missing code_verifier returns an error (400 invalid_grant or similar).
+    """
+    app = make_app()
+    redirect_uri = "https://example.com/callback"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        reg = await register_client(client)
+        code_verifier, code_challenge = await pkce_pair()
+
+        code = await _do_authorize_and_consent(
+            client,
+            code_verifier=code_verifier,
+            code_challenge=code_challenge,
+            client_id=reg["client_id"],
+            client_secret=reg.get("client_secret", ""),
+        )
+
+        # Exchange WITHOUT code_verifier
+        body, ct = encode_form([
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", reg["client_id"]),
+            # no code_verifier
+        ])
+        resp = await client.post("/token", content=body, headers={"Content-Type": ct})
+
+    assert resp.status_code in (400, 401), (
+        f"expected 400/401 for missing verifier, got {resp.status_code}; body: {resp.text[:200]}"
+    )
+    assert resp.status_code != 200, "missing code_verifier must not yield a token"
+
+
+@pytest.mark.asyncio
+async def test_token_redirectUriMismatch_isError():
+    """POST /token with redirect_uri that doesn't match the authorization request.
+
+    RED: If the SDK does not validate redirect_uri, the exchange succeeds.
+    GREEN: Mismatched redirect_uri returns 400 invalid_grant.
+    """
+    app = make_app()
+    registered_redirect_uri = "https://example.com/callback"
+    different_redirect_uri = "https://attacker.example.com/callback"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        reg = await register_client(client, redirect_uris=[registered_redirect_uri])
+        code_verifier, code_challenge = await pkce_pair()
+
+        code = await _do_authorize_and_consent(
+            client,
+            code_verifier=code_verifier,
+            code_challenge=code_challenge,
+            client_id=reg["client_id"],
+            client_secret=reg.get("client_secret", ""),
+            redirect_uri=registered_redirect_uri,
+        )
+
+        body, ct = encode_form([
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", different_redirect_uri),  # mismatched
+            ("client_id", reg["client_id"]),
+            ("code_verifier", code_verifier),
+        ])
+        resp = await client.post("/token", content=body, headers={"Content-Type": ct})
+
+    assert resp.status_code in (400, 401), (
+        f"expected 400/401 for redirect_uri mismatch, got {resp.status_code}; "
+        f"body: {resp.text[:200]}"
+    )
+    assert resp.status_code != 200, "redirect_uri mismatch must not yield a token"
+
+
+@pytest.mark.asyncio
+async def test_token_wrongClientId_isError():
+    """POST /token with client_id that doesn't match the authorization request.
+
+    A different client must not be able to exchange a code it didn't initiate.
+
+    RED: If the SDK does not validate client_id, the exchange succeeds.
+    GREEN: Wrong client_id returns 400 invalid_grant.
+    """
+    app = make_app()
+    redirect_uri = "https://example.com/callback"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        # Register two distinct clients
+        reg1 = await register_client(client)
+        reg2 = await register_client(client, client_name="Second Client")
+
+        code_verifier, code_challenge = await pkce_pair()
+
+        # Obtain a code for client 1
+        code = await _do_authorize_and_consent(
+            client,
+            code_verifier=code_verifier,
+            code_challenge=code_challenge,
+            client_id=reg1["client_id"],
+            client_secret=reg1.get("client_secret", ""),
+            redirect_uri=redirect_uri,
+        )
+
+        # Try to exchange using client 2's id
+        body, ct = encode_form([
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", reg2["client_id"]),  # wrong client
+            ("code_verifier", code_verifier),
+        ])
+        resp = await client.post("/token", content=body, headers={"Content-Type": ct})
+
+    assert resp.status_code in (400, 401), (
+        f"expected 400/401 for wrong client_id, got {resp.status_code}; "
+        f"body: {resp.text[:200]}"
+    )
+    assert resp.status_code != 200, "wrong client_id must not yield a token"

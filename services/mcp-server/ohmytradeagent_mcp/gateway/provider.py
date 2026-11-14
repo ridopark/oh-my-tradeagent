@@ -110,6 +110,13 @@ class OmtAuthorizationServerProvider:
         for uri in redirect_uris:
             validate_redirect_uri(str(uri))
 
+        client_name = client_info.client_name or ""
+        if len(client_name) > 80:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="client_name must not exceed 80 characters",
+            )
+
         auth_method = client_info.token_endpoint_auth_method or "none"
         if auth_method != "none":
             raise RegistrationError(

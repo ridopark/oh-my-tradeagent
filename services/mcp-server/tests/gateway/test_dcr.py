@@ -246,3 +246,33 @@ async def test_register_emptyBody_is400():
         f"empty body must be 400 or 422, got {resp.status_code}"
     )
     assert resp.status_code != 500
+
+
+# ---------------------------------------------------------------------------
+# Item 13: Cap client_name at 80 chars
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_longClientName_is400():
+    """client_name longer than 80 chars must be rejected with 400 invalid_client_metadata.
+
+    RED: provider.register_client accepts any client_name length → 201 created.
+    GREEN: provider.register_client truncates or rejects names > 80 chars → 400.
+    """
+    async with _make_client() as client:
+        resp = await client.post(
+            "/register",
+            json={
+                "client_name": "A" * 81,  # 81 chars — one over the limit
+                "redirect_uris": ["https://example.com/cb"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+    assert resp.status_code == 400, (
+        f"client_name > 80 chars must be 400, got {resp.status_code}; body: {resp.text[:200]}"
+    )
+    body = resp.json()
+    assert body.get("error") == "invalid_client_metadata", f"unexpected: {body}"

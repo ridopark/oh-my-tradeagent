@@ -160,6 +160,53 @@ async def test_clientSweep_expiredUnused_removed(store):
     assert rec is None, "expired-never-used client should be swept"
 
 
+@pytest.mark.asyncio
+async def test_clientSweep_withActiveGrant_notRemoved(store):
+    """An expired client that has an active grant must NOT be swept.
+
+    RED: sweep_expired_clients uses `not hasattr(c, '_last_used_at')` which is
+         always True (attr never set), so even clients with active grants are swept.
+    GREEN: sweep checks the grants collection; a client with a live grant survives.
+    """
+    if not isinstance(store, InMemoryStore):
+        pytest.skip("InMemoryStore-only test; PostgresStore uses DB-level logic")
+
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
+
+    client = OAuthClientInformationFull(
+        client_id="test-sweep-active",
+        redirect_uris=[AnyUrl("https://example.com/cb")],
+        client_name="Sweep Active",
+        grant_types=["authorization_code"],
+        response_types=["code"],
+        scope="read",
+        token_endpoint_auth_method="none",
+    )
+    await store.put_client(client)
+
+    # Create an active grant for this client
+    await store.create_grant(
+        client_id="test-sweep-active",
+        provider="google",
+        subject="sweep-user",
+        tenants=["acme"],
+        client_name="Sweep Active",
+    )
+
+    # Mark the client record as expired
+    c = await store.get_client_record("test-sweep-active")
+    c._expires_at = time.time() - 1
+
+    await store.sweep_expired_clients()
+
+    # Must still exist because it has an active grant
+    rec = await store.get_client_record("test-sweep-active")
+    assert rec is not None, (
+        "client with an active grant must not be swept even after expiry"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. Pending auth create / consume / expire
 # ---------------------------------------------------------------------------
