@@ -126,6 +126,7 @@ def make_app(
     email_verified: bool = True,
     idp=None,
     auth_rate_limiter=None,
+    tool_rate_limiter=None,
     extra_env: dict | None = None,
 ) -> Any:
     """Create a gateway Starlette app for testing.
@@ -162,6 +163,7 @@ def make_app(
     app = build_gateway_app(
         settings, store, bff_transport=bff_transport, idp=idp,
         auth_rate_limiter=auth_rate_limiter,
+        tool_rate_limiter=tool_rate_limiter,
     )
 
     if capture_bff:

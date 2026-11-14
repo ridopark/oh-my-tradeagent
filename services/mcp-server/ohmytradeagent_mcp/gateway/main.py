@@ -75,23 +75,22 @@ def run_gateway(
         store = PostgresStore(db_url, password=db_password)
         # connect() is called by build_gateway_app via the ASGI lifespan event
 
-    # Build rate limiters from settings
-    from ohmytradeagent_mcp.gateway.ratelimit import AuthRateLimiter, ToolRateLimiter
-    tool_rate_limiter = ToolRateLimiter(
-        per_subject_rpm=settings.rate_tools_per_min_subject,
-        per_client_rpm=settings.rate_tools_per_min_client,
-    )
-    auth_rate_limiter = AuthRateLimiter(per_ip_rpm=settings.rate_auth_per_min_ip)
+    # Finding C: eagerly connect to DB before starting uvicorn so a bad URL
+    # exits 2 immediately rather than failing silently during ASGI lifespan.
+    if not settings.disabled:
+        from ohmytradeagent_mcp.gateway.store_postgres import PostgresStore
+        if isinstance(store, PostgresStore):
+            import asyncio
+            try:
+                asyncio.run(asyncio.wait_for(store.connect(), timeout=4.0))
+            except Exception:
+                print(
+                    "error: DB connection failed (check OMT_GATEWAY_DB_URL and MCP_GATEWAY_DB_PASSWORD)",
+                    file=sys.stderr,
+                )
+                return 2
 
-    # Build the app and start uvicorn
-    from ohmytradeagent_mcp.gateway.app import build_gateway_app
-
-    app = build_gateway_app(
-        settings,
-        store,
-        auth_rate_limiter=auth_rate_limiter,
-        tool_rate_limiter=tool_rate_limiter,
-    )
+    app = _build_app_from_settings(settings, store)
 
     import uvicorn
 
@@ -104,8 +103,31 @@ def run_gateway(
         host = listen
         port = 8000
 
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, access_log=False)
     return 0
+
+
+def _build_app_from_settings(settings, store):
+    """Build the gateway ASGI app from settings and store, wiring rate limiters.
+
+    Extracted from run_gateway so tests can build a fully-wired app without
+    starting uvicorn.
+    """
+    from ohmytradeagent_mcp.gateway.app import build_gateway_app
+    from ohmytradeagent_mcp.gateway.ratelimit import AuthRateLimiter, ToolRateLimiter
+
+    tool_rate_limiter = ToolRateLimiter(
+        per_subject_rpm=settings.rate_tools_per_min_subject,
+        per_client_rpm=settings.rate_tools_per_min_client,
+    )
+    auth_rate_limiter = AuthRateLimiter(per_ip_rpm=settings.rate_auth_per_min_ip)
+
+    return build_gateway_app(
+        settings,
+        store,
+        auth_rate_limiter=auth_rate_limiter,
+        tool_rate_limiter=tool_rate_limiter,
+    )
 
 
 def main() -> None:

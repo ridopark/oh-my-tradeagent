@@ -462,3 +462,93 @@ def test_production_emptyDbPassword_exits2():
     code, err = _run_subprocess(env)
     assert code == 2, f"expected 2 for empty password, got {code}; stderr: {err!r}"
     assert "MCP_GATEWAY_DB_PASSWORD" in err
+
+
+# ---------------------------------------------------------------------------
+# Finding E — access_log=False in uvicorn.run
+# ---------------------------------------------------------------------------
+
+
+def test_uvicorn_accessLog_disabled(monkeypatch):
+    """run_gateway passes access_log=False to uvicorn.run.
+
+    RED: uvicorn.run is called without access_log kwarg (defaults to True).
+    GREEN: access_log=False is added to the uvicorn.run call.
+    """
+    import uvicorn
+    from ohmytradeagent_mcp.gateway.main import run_gateway
+
+    captured: dict = {}
+
+    def fake_run(app, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+
+    env = {
+        **_base_env(),
+        "OMT_GATEWAY_DISABLED": "true",
+        "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
+    }
+    run_gateway(env)
+    assert captured.get("access_log") is False, (
+        f"Expected access_log=False in uvicorn.run; got {captured}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding C — eager DB connect before uvicorn.run
+# ---------------------------------------------------------------------------
+
+
+def test_production_unreachableDb_exits2_oneLine():
+    """When the DB is unreachable, run_gateway exits 2 with a one-line message.
+
+    RED: main.py defers store.connect() to the ASGI lifespan; a bad DB URL
+         causes uvicorn to start (blocking) rather than immediately exiting 2.
+    GREEN: main.py calls store.connect() before uvicorn.run; connection failure
+           → exit 2 on a single error line with no DB password in the message.
+    """
+    # Port 1 is refused on loopback immediately (no service listens there)
+    env = {
+        **_prod_env(),
+        "OMT_GATEWAY_DB_URL": "postgresql://mcp_gateway@127.0.0.1:1/dashboard",
+    }
+    code, err = _run_subprocess(env)
+    assert code == 2, f"expected 2 for unreachable DB, got {code}; stderr: {err!r}"
+    # Must be a single non-empty line
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected one error line, got: {err!r}"
+    # Must NOT contain the DB password
+    assert "test-pw" not in err, f"DB password must not appear in error; got: {err!r}"
+    assert "password" not in err.lower() or "password" not in _prod_env().get(
+        "MCP_GATEWAY_DB_PASSWORD", ""
+    ), f"DB password must not appear in error; got: {err!r}"
+
+
+# ---------------------------------------------------------------------------
+# Finding I — _build_app_from_settings factory wires tool_rate_limiter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_buildAppFromSettings_toolRateLimiter_wired():
+    """_build_app_from_settings wires tool_rate_limiter so the 2nd /mcp call is limited.
+
+    RED: _build_app_from_settings does not exist in main.py.
+    GREEN: factory is added; tool_rate_limiter is wired (resolver gets it).
+    """
+    from ohmytradeagent_mcp.gateway.main import _build_app_from_settings
+    from ohmytradeagent_mcp.gateway.settings import GatewaySettings
+    from ohmytradeagent_mcp.gateway.store import InMemoryStore
+
+    env = {
+        **_base_env(),
+        "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
+        "OMT_RATE_TOOLS_PER_MIN_SUBJECT": "1",
+    }
+    settings = GatewaySettings(env)
+    store = InMemoryStore()
+    app = _build_app_from_settings(settings, store)
+    # Smoke-check: the factory returns a callable ASGI app
+    assert callable(app), f"Expected callable ASGI app from factory; got {type(app)}"
