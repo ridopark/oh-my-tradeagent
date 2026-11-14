@@ -428,3 +428,37 @@ async def test_resolver_tokenId_usesBffFormula():
         f"token_id must be dlg-sha256('google:{sub}')[:12]; "
         f"expected {expected_token_id!r}, got {binding.token_id!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Item 3: MCP_GATEWAY_DB_PASSWORD required in production mode
+# ---------------------------------------------------------------------------
+
+
+def test_production_missingDbPassword_exits2():
+    """Production mode requires MCP_GATEWAY_DB_PASSWORD — exits 2 when absent.
+
+    RED: main.py does not check for MCP_GATEWAY_DB_PASSWORD; exits 0 or starts
+         uvicorn (blocked) rather than exiting 2 immediately.
+    GREEN: main.py adds MCP_GATEWAY_DB_PASSWORD to the production required-var list.
+    """
+    env = {k: v for k, v in _prod_env().items() if k != "MCP_GATEWAY_DB_PASSWORD"}
+    code, err = _run_subprocess(env)
+    assert code == 2, f"expected 2, got {code}; stderr: {err!r}"
+    assert "MCP_GATEWAY_DB_PASSWORD" in err, (
+        f"expected MCP_GATEWAY_DB_PASSWORD in error; got: {err!r}"
+    )
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected one error line, got: {err!r}"
+
+
+def test_production_emptyDbPassword_exits2():
+    """Production mode requires MCP_GATEWAY_DB_PASSWORD non-empty — exits 2 when empty.
+
+    RED: main.py allows empty string as a valid password.
+    GREEN: empty MCP_GATEWAY_DB_PASSWORD is treated as missing.
+    """
+    env = {**_prod_env(), "MCP_GATEWAY_DB_PASSWORD": ""}
+    code, err = _run_subprocess(env)
+    assert code == 2, f"expected 2 for empty password, got {code}; stderr: {err!r}"
+    assert "MCP_GATEWAY_DB_PASSWORD" in err

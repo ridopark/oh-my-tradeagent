@@ -199,3 +199,102 @@ async def test_auditLine_perToolCall(capsys):
     # Must not contain the raw subject or email
     assert ACME_SUB not in line
     assert "@" not in line
+
+
+# ---------------------------------------------------------------------------
+# Item 2: audit denied — tenant scope refusal emits outcome=denied
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auditLine_tenantDenied_emitsDenied(capsys):
+    """Refused tenant-scope tool call emits outcome=denied with no raw subject.
+
+    RED: OAuthIdentityResolver raises ToolError for tenant scope but emits no
+         audit line; stderr has no outcome=denied.
+    GREEN: resolver emits 'mcp tool ... outcome=denied' before the ToolError.
+    """
+    app, store = make_app(return_store=True)
+    # seed_two_tenant_token gives BETA_SUB (sub-2) with tenants [acme, beta]
+    from tests.gateway.fixtures import BETA_SUB, seed_two_tenant_token
+    token = seed_two_tenant_token(store, "tok-denied")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://tradeagent-mcp.ridopark.com",
+    ) as client:
+        # Call without required tenant= arg → resolver must deny
+        resp = await client.post(
+            "/mcp",
+            json=_mcp_call("get_portfolio_summary"),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    result = resp.json().get("result", {})
+    # Must be a ToolError (isError=True) for tenant-required
+    assert result.get("isError") is True, (
+        f"Expected ToolError for missing tenant arg, got: {result}"
+    )
+
+    captured = capsys.readouterr()
+    err = captured.err
+    denied_lines = [
+        line for line in err.splitlines()
+        if line.startswith("mcp tool ") and "outcome=denied" in line
+    ]
+    assert len(denied_lines) >= 1, (
+        f"Expected at least one 'mcp tool ... outcome=denied' audit line in stderr.\n"
+        f"stderr was:\n{err}"
+    )
+    line = denied_lines[0]
+    # Must not contain the raw subject
+    assert BETA_SUB not in line, f"Raw subject {BETA_SUB!r} in denied audit line: {line!r}"
+    # Must contain subject_hash
+    assert "subject_hash=" in line, f"subject_hash missing from denied audit line: {line!r}"
+    # Must contain client_id
+    assert "client_id=" in line, f"client_id missing from denied audit line: {line!r}"
+
+
+@pytest.mark.asyncio
+async def test_auditLine_tenantNotInGrant_emitsDenied(capsys):
+    """Wrong tenant arg (not in grant) also emits outcome=denied.
+
+    RED: no audit line emitted when tenant arg is not in the grant.
+    GREEN: resolver emits outcome=denied for tenant-not-in-grant.
+    """
+    app, store = make_app(return_store=True)
+    from tests.gateway.fixtures import ACME_SUB as _ACME_SUB
+    from tests.gateway.fixtures import seed_token
+    token = seed_token(store, "tok-wrong-tenant", sub=_ACME_SUB, tenants=["acme"])
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://tradeagent-mcp.ridopark.com",
+    ) as client:
+        # Call with wrong tenant= arg (not in grant)
+        resp = await client.post(
+            "/mcp",
+            json=_mcp_call("get_portfolio_summary", {"tenant": "wrong-tenant"}),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    result = resp.json().get("result", {})
+    assert result.get("isError") is True, (
+        f"Expected ToolError for wrong tenant, got: {result}"
+    )
+
+    captured = capsys.readouterr()
+    err = captured.err
+    denied_lines = [
+        line for line in err.splitlines()
+        if line.startswith("mcp tool ") and "outcome=denied" in line
+    ]
+    assert len(denied_lines) >= 1, (
+        f"Expected at least one 'mcp tool ... outcome=denied' audit line in stderr.\n"
+        f"stderr was:\n{err}"
+    )
+    line = denied_lines[0]
+    assert _ACME_SUB not in line, f"Raw subject {_ACME_SUB!r} in denied audit line: {line!r}"
+    assert "subject_hash=" in line

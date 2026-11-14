@@ -416,10 +416,13 @@ def _make_consent_handler(
         from mcp.server.auth.provider import construct_redirect_uri
 
         if action == "deny":
+            _sub_hash = hashlib.sha256(
+                f"google:{pending.subject or ''}".encode()
+            ).hexdigest()[:12]
             _LOG.info(
-                "consent denied: outcome=denied client_id=%s subject=%s",
+                "consent denied: outcome=denied client_id=%s subject_hash=%s",
                 pending.client_id,
-                pending.subject or "<unknown>",
+                _sub_hash,
             )
             redirect_url = construct_redirect_uri(
                 pending.redirect_uri,

@@ -70,8 +70,9 @@ class PostgresStore:
     ``connect()`` and ``close()`` are idempotent: calling them twice is safe.
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, password: str | None = None) -> None:
         self._dsn = dsn
+        self._password = password
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
@@ -98,7 +99,11 @@ class PostgresStore:
                     format="text",
                 )
 
-            self._pool = await asyncpg.create_pool(self._dsn, init=_init_conn)
+            self._pool = await asyncpg.create_pool(
+                self._dsn,
+                password=self._password,
+                init=_init_conn,
+            )
 
     async def close(self) -> None:
         """Drain and close the connection pool.  No-op if already closed."""

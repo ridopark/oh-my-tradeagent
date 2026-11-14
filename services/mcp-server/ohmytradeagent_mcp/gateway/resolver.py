@@ -23,6 +23,16 @@ from ohmytradeagent_mcp.gateway.assertion import Signer
 from ohmytradeagent_mcp.resolver import TenantBinding
 
 
+def _audit_denied(sub: str, client_id: str) -> None:
+    """Emit a denied audit line to stderr (same format as _do_audit in tools.py)."""
+    import sys
+    subject_hash = hashlib.sha256(sub.encode()).hexdigest()[:12]
+    print(
+        f"mcp tool subject_hash={subject_hash} client_id={client_id} outcome=denied",
+        file=sys.stderr,
+    )
+
+
 class OAuthIdentityResolver:
     """Callable scope for HTTP mode: (tenant: str | None) → (TenantBinding, BffClient)."""
 
@@ -62,15 +72,18 @@ class OAuthIdentityResolver:
         if len(grant_tenants) == 1:
             resolved = grant_tenants[0]
             if tenant is not None and tenant != resolved:
+                _audit_denied(sub, client_id or "unknown")
                 raise ToolError(f"not authorised for tenant {tenant!r}")
         else:
             # 2+ tenants: tenant arg required; must not reveal the grant's tenant list
             if tenant is None:
+                _audit_denied(sub, client_id or "unknown")
                 raise ToolError(
                     "tenant required: this token covers multiple tenants — "
                     "pass tenant= to identify which one"
                 )
             if tenant not in grant_tenants:
+                _audit_denied(sub, client_id or "unknown")
                 raise ToolError(f"not authorised for tenant {tenant!r}")
             resolved = tenant
 

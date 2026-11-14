@@ -47,7 +47,12 @@ def run_gateway(
     # DB URL and Google credentials are required — no InMemoryStore fallback.
     if not settings.disabled:
         prod_missing = []
-        for var in ("OMT_GATEWAY_DB_URL", "OMT_GOOGLE_CLIENT_ID", "OMT_GOOGLE_CLIENT_SECRET"):
+        for var in (
+            "OMT_GATEWAY_DB_URL",
+            "OMT_GOOGLE_CLIENT_ID",
+            "OMT_GOOGLE_CLIENT_SECRET",
+            "MCP_GATEWAY_DB_PASSWORD",
+        ):
             if not env.get(var, "").strip():
                 prod_missing.append(var)
         if prod_missing:
@@ -63,21 +68,11 @@ def run_gateway(
         from ohmytradeagent_mcp.gateway.store import InMemoryStore
         store = InMemoryStore()
     else:
-        # Production: PostgresStore; inject MCP_GATEWAY_DB_PASSWORD if present
+        # Production: PostgresStore; password passed as kwarg, never spliced into DSN
         from ohmytradeagent_mcp.gateway.store_postgres import PostgresStore
         db_url = settings.db_url  # validated above: not None
-        db_password = env.get("MCP_GATEWAY_DB_PASSWORD", "").strip()
-        if db_password and db_url:
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(db_url)
-            # Rebuild netloc with password injected
-            user = parsed.username or "mcp_gateway"
-            host = parsed.hostname or "localhost"
-            netloc = f"{user}:{db_password}@{host}"
-            if parsed.port:
-                netloc += f":{parsed.port}"
-            db_url = urlunparse(parsed._replace(netloc=netloc))
-        store = PostgresStore(db_url)
+        db_password = env.get("MCP_GATEWAY_DB_PASSWORD", "").strip() or None
+        store = PostgresStore(db_url, password=db_password)
         # connect() is called by build_gateway_app via the ASGI lifespan event
 
     # Build rate limiters from settings

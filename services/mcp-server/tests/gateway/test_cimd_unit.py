@@ -24,7 +24,7 @@ from mcp.server.auth.provider import RegistrationError
 from ohmytradeagent_mcp.gateway.cimd import _SIZE_CAP, _is_ssrf_forbidden, fetch_cimd_document
 
 # A public TEST-NET-3 address (RFC 5737) that is not in any SSRF-forbidden range.
-_PUBLIC_IP = "198.51.100.1"
+_PUBLIC_IP = "1.1.1.1"
 _PRIVATE_IP = "10.0.0.1"
 _CIMD_HOST = "example.com"
 _CIMD_URL = f"https://{_CIMD_HOST}/client/app"
@@ -386,8 +386,8 @@ def test_ipv6_ula_is_forbidden():
 
 
 def test_public_ip_is_not_forbidden():
-    """Public IP addresses must NOT be in the forbidden set."""
-    for ip in ("1.1.1.1", "8.8.8.8", "198.51.100.1", "2001:db8::1"):
+    """Globally-routable IP addresses must NOT be in the forbidden set."""
+    for ip in ("1.1.1.1", "8.8.8.8", "2001:4860:4860::8888"):
         assert not _is_ssrf_forbidden(ip), f"{ip} should NOT be forbidden"
 
 
@@ -441,3 +441,52 @@ async def test_ssrf_guard_invoked_via_fetch_cimd_document(monkeypatch):
         f"Expected 'forbidden' in error description; got: {exc_info.value.error_description!r}. "
         "SSRF guard may not be invoked on the real fetch path."
     )
+
+
+# ---------------------------------------------------------------------------
+# Item 4 (fix round): parametrized SSRF predicate tests
+#
+# RED: hand-written lists miss multicast (224.0.0.1), reserved class-E
+#      (240.0.0.1), 192.0.0.0/24, 198.18.0.0/15, NAT64 and 6to4 addresses.
+# GREEN: replace lists with ipaddress predicates + NAT64/6to4 unwrapping.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ip,expected_forbidden", [
+    # IPv4 ranges the hand-written list may miss
+    ("224.0.0.1",             True),   # multicast (is_multicast)
+    ("240.0.0.1",             True),   # class-E / reserved (is_reserved)
+    ("192.0.0.1",             True),   # IETF protocol (is_private/not global)
+    ("198.18.0.1",            True),   # benchmarking (is_private/not global)
+    ("100.64.0.1",            True),   # shared address space (not is_global)
+    # IPv6 special ranges
+    ("fd00::1",               True),   # ULA (is_private)
+    ("::ffff:127.0.0.1",      True),   # IPv4-mapped loopback (after unwrap)
+    # NAT64 and 6to4 — extract embedded IPv4 and apply the same rule
+    ("64:ff9b::a00:1",        True),   # NAT64 → 10.0.0.1 (private)
+    ("2002:a00:1::",          True),   # 6to4 → 10.0.0.1 (private)
+    # Public addresses — must NOT be forbidden
+    ("8.8.8.8",               False),  # Google DNS
+    ("2001:4860:4860::8888",  False),  # Google DNS IPv6
+])
+def test_ssrf_predicate_coverage(ip, expected_forbidden):
+    """Parametrized SSRF predicate coverage (fix round item 4).
+
+    Each address is verified against expected_forbidden:
+    True  → _is_ssrf_forbidden must return True (rejected)
+    False → _is_ssrf_forbidden must return False (allowed)
+    """
+    result = _is_ssrf_forbidden(ip)
+    if expected_forbidden:
+        assert result, (
+            f"{ip!r} should be SSRF-forbidden (expected_forbidden=True) "
+            f"but _is_ssrf_forbidden returned False. "
+            f"Fix: use ipaddress predicates (is_private, is_loopback, is_link_local, "
+            f"is_multicast, is_reserved, is_unspecified, not is_global) "
+            f"and unwrap NAT64/6to4 embedded IPv4 before checking."
+        )
+    else:
+        assert not result, (
+            f"{ip!r} should NOT be SSRF-forbidden (expected_forbidden=False) "
+            f"but _is_ssrf_forbidden returned True."
+        )

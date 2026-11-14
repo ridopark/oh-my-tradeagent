@@ -34,23 +34,21 @@ from mcp.server.auth.provider import RegistrationError
 _SIZE_CAP = 64 * 1024  # 64 KiB
 _TIMEOUT = 10.0  # seconds
 
-# Private / link-local / loopback ranges to block for SSRF protection
-_SSRF_FORBIDDEN_V4 = [
-    ipaddress.IPv4Network("10.0.0.0/8"),
-    ipaddress.IPv4Network("172.16.0.0/12"),
-    ipaddress.IPv4Network("192.168.0.0/16"),
-    ipaddress.IPv4Network("127.0.0.0/8"),
-    ipaddress.IPv4Network("169.254.0.0/16"),
-    ipaddress.IPv4Network("0.0.0.0/8"),
-    ipaddress.IPv4Network("100.64.0.0/10"),  # shared address space
-]
-_SSRF_FORBIDDEN_V6 = [
-    ipaddress.IPv6Network("::1/128"),
-    ipaddress.IPv6Network("fe80::/10"),
-    ipaddress.IPv6Network("fc00::/7"),
-    ipaddress.IPv6Network("::/128"),
-    ipaddress.IPv6Network("::ffff:0:0/96"),  # IPv4-mapped: ::ffff:10.0.0.1 → 10.0.0.1
-]
+_NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+_6TO4_PREFIX = ipaddress.IPv6Network("2002::/16")
+
+
+def _ipv4_forbidden(addr: ipaddress.IPv4Address) -> bool:
+    """Return True if the IPv4 address must be blocked for SSRF protection."""
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+        or not addr.is_global
+    )
 
 
 def _is_ssrf_forbidden(ip_str: str) -> bool:
@@ -58,9 +56,38 @@ def _is_ssrf_forbidden(ip_str: str) -> bool:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
         return True  # unparseable → reject
+
     if isinstance(addr, ipaddress.IPv4Address):
-        return any(addr in net for net in _SSRF_FORBIDDEN_V4)
-    return any(addr in net for net in _SSRF_FORBIDDEN_V6)
+        return _ipv4_forbidden(addr)
+
+    # IPv6
+    assert isinstance(addr, ipaddress.IPv6Address)
+
+    # Unwrap IPv4-mapped addresses (::ffff:a.b.c.d)
+    mapped = addr.ipv4_mapped
+    if mapped is not None:
+        return _ipv4_forbidden(mapped)
+
+    # Unwrap NAT64 (64:ff9b::/96) — embedded IPv4 in last 4 bytes
+    if addr in _NAT64_PREFIX:
+        embedded = ipaddress.IPv4Address(addr.packed[12:16])
+        return _ipv4_forbidden(embedded)
+
+    # Unwrap 6to4 (2002::/16) — embedded IPv4 in bytes 2–5
+    if addr in _6TO4_PREFIX:
+        embedded = ipaddress.IPv4Address(addr.packed[2:6])
+        return _ipv4_forbidden(embedded)
+
+    # Apply same predicates to the IPv6 address itself
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+        or not addr.is_global
+    )
 
 
 def is_cimd_url(client_id: str) -> bool:
