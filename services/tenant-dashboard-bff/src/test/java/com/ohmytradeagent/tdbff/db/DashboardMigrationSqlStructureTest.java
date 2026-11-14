@@ -546,4 +546,117 @@ class DashboardMigrationSqlStructureTest {
         .as("V16 must not touch the recorder role")
         .doesNotContain("trade_context_writer");
   }
+
+  // --- V17: mcp_oauth_* tables (PLAN-2026-11-13-mcp-remote-oauth, Step 2) ---
+
+  @Test
+  void v17CreatesSixTablesAndGrantsOnlyReadToReadonlyAndUpdateToWriter() throws IOException {
+    String sql = executableSql("/db/dashboard/V17__mcp_oauth.sql");
+
+    // All six mcp_oauth_* tables are created.
+    for (String t :
+        new String[] {
+          "mcp_oauth_client",
+          "mcp_oauth_pending_auth",
+          "mcp_oauth_grant",
+          "mcp_oauth_code",
+          "mcp_oauth_refresh_token",
+          "mcp_oauth_access_token"
+        }) {
+      assertThat(sql).as("V17 creates table %s", t).contains("CREATE TABLE " + t);
+    }
+
+    // The grant row that the Connected-AI-apps listing reads (PR 4). Two tables, SELECT only.
+    assertThat(sql)
+        .as("V17 grants SELECT on the two listing tables to dashboard_readonly")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s+ON\\s+mcp_oauth_grant\\s*,\\s*mcp_oauth_client"
+                    + "\\s+TO\\s+dashboard_readonly"));
+
+    // No write privilege to dashboard_readonly on any mcp_oauth_* table.
+    assertThat(sql)
+        .as("V17 never grants INSERT/UPDATE/DELETE/ALL to dashboard_readonly")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*(INSERT|UPDATE|DELETE|ALL)[^;]*dashboard_readonly",
+                Pattern.CASE_INSENSITIVE));
+
+    // The revoke path for PR 4: SELECT (WHERE needs it) + UPDATE (the actual write).
+    assertThat(privilegesGrantedOn(sql, "mcp_oauth_grant")).isEqualTo("SELECT, UPDATE");
+
+    // No INSERT/DELETE granted to dashboard_writer on mcp_oauth_grant — the gateway owns writes.
+    assertThat(sql)
+        .as("V17 must not grant INSERT to dashboard_writer on any mcp_oauth table")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*INSERT[A-Z, ]*\\s+ON\\s+mcp_oauth_", Pattern.CASE_INSENSITIVE));
+    assertThat(sql)
+        .as("V17 must not grant DELETE to dashboard_writer")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+[A-Z, ]*DELETE", Pattern.CASE_INSENSITIVE));
+  }
+
+  // --- V18: mcp_gateway role (D1: NOLOGIN, no password placeholder) ---
+
+  @Test
+  void v18CreatesGatewayRoleWithNologinNoPasswordAndColumnLevelSelect() throws IOException {
+    String sql = executableSql("/db/dashboard/V18__mcp_gateway_role.sql");
+
+    // Idempotent guard, same pattern as V5/V13.
+    assertThat(sql)
+        .containsPattern(
+            Pattern.compile(
+                "IF NOT EXISTS \\(SELECT 1 FROM pg_roles WHERE rolname = 'mcp_gateway'\\)"));
+
+    // D1: NOLOGIN — no LOGIN keyword in the CREATE ROLE, no password, no placeholder.
+    assertThat(sql)
+        .as("V18 creates the role as NOLOGIN (D1: operator sets the password at enablement)")
+        .contains("CREATE ROLE mcp_gateway NOLOGIN");
+    assertThat(sql)
+        .as("V18 must not use a Flyway placeholder for the password (D1)")
+        .doesNotContain("${mcp_gateway_password}");
+    assertThat(sql)
+        .as("V18 must not embed a LOGIN ... PASSWORD literal (D1)")
+        .doesNotContainPattern(Pattern.compile("LOGIN\\s+INHERIT\\s+PASSWORD"));
+
+    // Column-level SELECT on dashboard_user: exactly (provider, subject, tenant_id).
+    // This is the guard against the mutation "GRANT SELECT ON dashboard_user TO mcp_gateway"
+    // (table-level), which would expose email to the gateway.
+    assertThat(sql)
+        .as("V18 grants column-level SELECT (provider, subject, tenant_id) on dashboard_user")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\(\\s*provider\\s*,\\s*subject\\s*,\\s*tenant_id\\s*\\)"
+                    + "\\s+ON\\s+dashboard_user\\s+TO\\s+mcp_gateway"));
+
+    // No table-wide SELECT on dashboard_user (would expose email).
+    assertThat(sql)
+        .as("V18 must not grant table-wide SELECT ON dashboard_user TO mcp_gateway")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+SELECT\\s+ON\\s+dashboard_user\\s+TO\\s+mcp_gateway"));
+
+    // No access to dashboard_user_invite at all.
+    assertThat(sql)
+        .as("V18 must not grant anything on dashboard_user_invite to mcp_gateway")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT[^;]*dashboard_user_invite[^;]*mcp_gateway", Pattern.CASE_INSENSITIVE));
+
+    // The six OAuth tables must all be in the CRUD grant.
+    for (String t :
+        new String[] {
+          "mcp_oauth_client",
+          "mcp_oauth_pending_auth",
+          "mcp_oauth_grant",
+          "mcp_oauth_code",
+          "mcp_oauth_refresh_token",
+          "mcp_oauth_access_token"
+        }) {
+      assertThat(sql)
+          .as("V18 grants privileges to mcp_gateway on %s", t)
+          .containsPattern(
+              Pattern.compile("GRANT[^;]+" + t + "[^;]*TO\\s+mcp_gateway", Pattern.DOTALL));
+    }
+  }
 }
