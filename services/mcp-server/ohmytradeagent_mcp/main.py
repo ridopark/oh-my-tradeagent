@@ -32,7 +32,7 @@ from ohmytradeagent_mcp.resolver import (
     TenantMismatch,
     Unauthorized,
 )
-from ohmytradeagent_mcp.tools import build_server
+from ohmytradeagent_mcp.tools import build_server, make_constant_scope
 
 # Redirect all logging to stderr so stdout stays clean for the MCP transport.
 # This call must precede any MCPServer instantiation; MCPServer.__init__ calls
@@ -103,7 +103,7 @@ def run(
         return 1
 
     # --- build server ---
-    server = build_server(binding, bff)
+    server = build_server(make_constant_scope(binding, bff, strict=True))
     log.warning("omt-mcp: serving tenant=%r", binding.tenant_id)
 
     # _on_ready hook: used by in-process tests that must not block on stdio.

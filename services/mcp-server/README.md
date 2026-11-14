@@ -284,3 +284,56 @@ cd services/mcp-server
 uv run ruff check .
 uv run pytest -q
 ```
+
+---
+
+## Remote (OAuth) mode
+
+The gateway exposes the same read-only MCP tools over Streamable HTTP so that
+hosted AI clients (Claude.ai, Gemini web app, ChatGPT) can connect without a
+local CLI.  Members sign in with Google; the gateway federates to Google OIDC
+and issues short-lived MCP access tokens that are scoped to the member's tenant
+set.
+
+> **Status:** Step 3c (implemented in PR 3).  Full setup docs, k8s manifests,
+> and a Cloudflare runbook are delivered in PR 5.
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OMT_PUBLIC_URL` | yes | HTTPS URL of the gateway (e.g. `https://tradeagent-mcp.ridopark.com`) |
+| `OMT_BFF_URL` | yes | Internal URL of the tenant-dashboard-bff |
+| `MCP_GATEWAY_SIGNING_KEY` | yes | Ed25519 private key PEM for delegated assertions |
+| `OMT_GATEWAY_DB_URL` | yes* | PostgreSQL DSN for the OAuth store, without a password (e.g. `postgresql://mcp_gateway@pg/dashboard`) |
+| `OMT_GOOGLE_CLIENT_ID` | yes* | Google OAuth 2.0 client ID |
+| `OMT_GOOGLE_CLIENT_SECRET` | yes* | Google OAuth 2.0 client secret |
+| `MCP_GATEWAY_DB_PASSWORD` | yes* | Password of the `mcp_gateway` role. Passed to the driver as a separate argument, never spliced into the DSN |
+| `OMT_GATEWAY_DISABLED` | no | `true`, `1` or `yes`: disabled mode (kill switch) — `/healthz` only, everything else 503 |
+| `OMT_TRUSTED_PROXY_CIDRS` | no | CIDRs whose `CF-Connecting-IP` header is trusted for per-IP rate limits. Default empty: the header is ignored and the socket peer is used |
+| `OMT_RATE_TOOLS_PER_MIN_SUBJECT` / `_CLIENT` | no | Tool-call limits per signed-in user / per client (default 60 / 300 per minute) |
+| `OMT_RATE_AUTH_PER_MIN_IP` | no | Per-IP limit on the OAuth endpoints (default 30 per minute) |
+| `OMT_ALLOWED_HOSTS` | no | Comma-separated host allow-list (defaults to host of `OMT_PUBLIC_URL`) |
+| `OMT_LISTEN` | no | `host:port` to bind (default `0.0.0.0:8000`) |
+
+\* Required unless `OMT_GATEWAY_DISABLED` is set. A missing or invalid value exits 2 with one line; so does an unreachable database.
+
+### Generating the signing key
+
+```bash
+openssl genpkey -algorithm ed25519 -out mcp-signing-key.pem
+# Store in k8s Secret; pass as MCP_GATEWAY_SIGNING_KEY (the PEM text)
+```
+
+### Local smoke test (disabled mode)
+
+```bash
+OMT_PUBLIC_URL=https://tradeagent-mcp.ridopark.com \
+OMT_BFF_URL=http://127.0.0.1:18080 \
+MCP_GATEWAY_SIGNING_KEY="$(openssl genpkey -algorithm ed25519 2>/dev/null)" \
+OMT_GATEWAY_DISABLED=1 \
+  uv run python -m ohmytradeagent_mcp.gateway
+```
+
+The server starts, serves `GET /healthz` → `{"status":"ok"}`, and
+rejects all `/mcp` requests with 503.
