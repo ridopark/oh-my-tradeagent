@@ -330,6 +330,58 @@ def _patch_register_route(sdk_app: Starlette, provider, options) -> None:
     )
 
 
+def _patch_revoke_route(sdk_app: Starlette, store) -> None:
+    """Replace the SDK's /revoke to revoke grants for expired/lapsed tokens.
+
+    RFC 7009 §2.2: the server SHOULD revoke the token even if it is expired.
+    The SDK's default handler calls load_access_token / load_refresh_token which
+    return None for expired tokens, making revocation a no-op for them.
+    This handler looks up the token in the store directly and revokes the grant.
+    """
+    from mcp.server.auth.routes import cors_middleware
+
+    routes = sdk_app.router.routes
+    existing_idx = None
+    for i, route in enumerate(routes):
+        if getattr(route, "path", None) == "/revoke":
+            existing_idx = i
+            break
+
+    if existing_idx is None:
+        return
+
+    async def patched_handler(request: Request) -> Response:
+        try:
+            form = await request.form()
+            token_value = form.get("token", "")
+        except Exception:
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+        if not token_value:
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+        # Try access token first
+        at_rec = await store.get_access_token(token_value)
+        if at_rec is not None:
+            await store.revoke_grant_by_id(at_rec.grant_id)
+            return JSONResponse({}, status_code=200)
+
+        # Try refresh token
+        rt_rec = await store.get_refresh_token(token_value)
+        if rt_rec is not None:
+            await store.revoke_grant_by_id(rt_rec.grant_id)
+            return JSONResponse({}, status_code=200)
+
+        # Unknown token — RFC 7009 §2.2: return 200
+        return JSONResponse({}, status_code=200)
+
+    routes[existing_idx] = Route(
+        "/revoke",
+        endpoint=cors_middleware(patched_handler, ["POST", "OPTIONS"]),
+        methods=["POST", "OPTIONS"],
+    )
+
+
 def _make_google_callback_handler(
     provider: OmtAuthorizationServerProvider,
     store,
@@ -428,7 +480,6 @@ def _make_google_callback_handler(
 
 
 def _make_consent_handler(
-    provider: OmtAuthorizationServerProvider,
     store,
     settings: GatewaySettings,
 ):
@@ -639,7 +690,7 @@ def build_gateway_app(
 
     @mcp_server.custom_route("/oauth/consent", methods=["POST"])
     async def consent_post(request: Request) -> Response:
-        return await _make_consent_handler(provider, store, settings)(request)
+        return await _make_consent_handler(store, settings)(request)
 
     # Allowed hosts: use settings as-is (defaults to public URL host when absent).
     # No loopback auto-append — the caller must explicitly include 127.0.0.1:* in
@@ -647,8 +698,6 @@ def build_gateway_app(
     # Host enforcement is done in _CompositeApp (covers ALL routes including custom
     # ones).  The SDK's TransportSecuritySettings is NOT used because it only covers
     # SDK-managed routes, not /healthz, /readyz, or /oauth/* custom routes.
-    allowed_hosts = list(settings.allowed_hosts)
-
     # Disable the SDK's built-in host check: pass an explicit no-op
     # TransportSecuritySettings so the SDK doesn't auto-create localhost-only
     # protection.  Host checking is done in _CompositeApp for ALL routes.
@@ -663,6 +712,8 @@ def build_gateway_app(
     _patch_as_metadata(sdk_app, issuer_url, auth_settings)
     # Patch /register to treat absent token_endpoint_auth_method as "none" (D5)
     _patch_register_route(sdk_app, provider, auth_settings.client_registration_options)
+    # Patch /revoke to handle expired and membership-lapsed tokens (Finding H)
+    _patch_revoke_route(sdk_app, store)
 
     lazy_sdk_app = _LazyLifespanApp(sdk_app)
 
@@ -698,7 +749,7 @@ def build_gateway_app(
     ]
     extra_starlette = Starlette(routes=extra_routes)
 
-    _allowed_hosts_snapshot = list(allowed_hosts)
+    _allowed_hosts_snapshot = list(settings.allowed_hosts)
 
     _HANDLED = frozenset([
         "/healthz",

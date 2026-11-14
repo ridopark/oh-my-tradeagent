@@ -42,7 +42,6 @@ from ohmytradeagent_mcp.gateway.store import RefreshTokenRecord
 
 _ACCESS_TOKEN_LIFETIME = 3600       # 1 hour (seconds)
 _REFRESH_TOKEN_LIFETIME = 30 * 86400  # 30 days (seconds)
-_CLIENT_LIFETIME = 30 * 86400       # 30 days (seconds)
 
 
 class _LoopbackAwareClientInfo(OAuthClientInformationFull):
