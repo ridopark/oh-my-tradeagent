@@ -44,8 +44,10 @@ answers 503 on everything except `/healthz` until Step 4.
 
 ## Step 1 — Keys and secrets
 
-Generate the Ed25519 key pair and the DB password on the workstation, then add them to
-`dashboard-secrets` **from files** (a multi-line PEM cannot be pasted into a JSON patch):
+Run this whole block **on the homelab** (`ssh ridopark@192.168.10.123`): it needs `kubectl`,
+`openssl` and `jq`, which are all there (the workstation has no `kubectl`). It generates the
+Ed25519 key pair and the DB password and adds them to `dashboard-secrets` **from files** (a
+multi-line PEM cannot be pasted into a JSON patch):
 
 ```bash
 umask 077; mkdir -p ~/omt-mcp-gateway-keys && cd ~/omt-mcp-gateway-keys
@@ -101,12 +103,15 @@ Both manifests are `RESTART_ONLY` in `deploy.yml` (CI never applies them), so th
 
 ```bash
 # BFF: accept the gateway's signed assertions and read dashboard memberships.
-# All three in ONE call (one restart). The public key comes from the secret, not a literal.
+# All three in ONE command, so the BFF restarts once. The public key is referenced from the
+# secret (secretKeyRef), not copied in as a literal.
 kubectl -n copytrade set env deployment/tenant-dashboard-bff \
-  --from=secret/dashboard-secrets --keys=BFF_MCP_DELEGATED_PUBLIC_KEY
-kubectl -n copytrade set env deployment/tenant-dashboard-bff \
+  --from=secret/dashboard-secrets --keys=BFF_MCP_DELEGATED_PUBLIC_KEY \
   BFF_MCP_DELEGATED_ENABLED=true \
   DASHBOARD_READONLY_URL=jdbc:postgresql://postgres:5432/dashboard
+# Check the key really landed (--keys silently adds nothing if the secret lacks the key):
+kubectl -n copytrade get deployment tenant-dashboard-bff -o json \
+  | jq -r '.spec.template.spec.containers[0].env[].name' | grep BFF_MCP_DELEGATED
 kubectl -n copytrade rollout status deployment/tenant-dashboard-bff --timeout=180s
 kubectl -n copytrade exec deployment/tenant-dashboard-bff -c tenant-dashboard-bff -- \
   curl -sf http://localhost:8083/actuator/health | grep -o '"status":"UP"'
@@ -115,7 +120,7 @@ kubectl -n copytrade exec deployment/tenant-dashboard-bff -c tenant-dashboard-bf
 `DASHBOARD_READONLY_URL` is **required**: without it the membership check connects to
 `localhost`, fails closed, and every MCP tool call is refused with 403 as if the user were not a
 member. `DASHBOARD_READONLY_PASSWORD` and `DASHBOARD_WRITER_ENABLED=true` are already on the
-live BFF (the grant list/revoke routes need the writer flag).
+live BFF (the grant revoke route needs the writer flag).
 
 ```bash
 # Dashboard: show the "Connected AI apps" page and Nav link.
@@ -208,6 +213,22 @@ All Cloudflare steps are out-of-band via the Cloudflare API or dashboard.
 The homelab-dashboard tunnel already exists (`60-cloudflared.yaml`). Do NOT add the MCP gateway
 to the dashboard's Cloudflare Access application — it manages its own OAuth.
 
+### WAF and rate-limit rules
+
+Add the rate-limit rules FIRST, before the DNS record and ingress rule below, so the hostname is
+never public without them (Cloudflare dashboard → Security → WAF). Available periods and block durations
+depend on the Cloudflare plan; use the closest your plan allows:
+
+**Rate-limit rule — OAuth endpoints** (complement the per-IP gateway limit of 30 req/min):
+- Expression: `(http.host eq "tradeagent-mcp.ridopark.com") and (http.request.uri.path in {"/authorize" "/token" "/register" "/revoke" "/oauth/google/callback"})`
+- Action: Rate limit — 120 requests per minute per IP, block for 60 seconds.
+
+**Rate-limit rule — /mcp** (complement the per-subject/per-client gateway limits):
+- Expression: `(http.host eq "tradeagent-mcp.ridopark.com") and (http.request.uri.path eq "/mcp")`
+- Action: Rate limit — 600 requests per minute per IP, block for 10 seconds.
+
+No IP allowlist — AI cloud providers use dynamic egress IPs.
+
 ### DNS
 
 Create a proxied CNAME under the same apex as the dashboard. Universal SSL covers one additional
@@ -255,22 +276,6 @@ Configure → Public Hostname → Add a public hostname:
 
 **Rollback:** remove the ingress rule. Existing active connections drop; new connections return a
 CF error page (not a 503 from the gateway).
-
-### WAF and rate-limit rules
-
-Add the rate-limit rules BEFORE the DNS record and ingress rule, so the hostname is never public
-without them (Cloudflare dashboard → Security → WAF). Available periods and block durations
-depend on the Cloudflare plan; use the closest your plan allows:
-
-**Rate-limit rule — OAuth endpoints** (complement the per-IP gateway limit of 30 req/min):
-- Expression: `(http.host eq "tradeagent-mcp.ridopark.com") and (http.request.uri.path in {"/authorize" "/token" "/register" "/revoke" "/oauth/google/callback"})`
-- Action: Rate limit — 120 requests per minute per IP, block for 60 seconds.
-
-**Rate-limit rule — /mcp** (complement the per-subject/per-client gateway limits):
-- Expression: `(http.host eq "tradeagent-mcp.ridopark.com") and (http.request.uri.path eq "/mcp")`
-- Action: Rate limit — 600 requests per minute per IP, block for 10 seconds.
-
-No IP allowlist — AI cloud providers use dynamic egress IPs.
 
 ---
 
@@ -325,6 +330,8 @@ To fully roll back after enablement:
    kubectl -n copytrade rollout status deployment/tenant-dashboard-bff --timeout=120s
    ```
    (Outside RTH — brief removal of `/live` operator buttons.)
+   Also hide the dashboard page, which would otherwise show errors:
+   `kubectl -n copytrade set env deployment/dashboard MCP_CONNECTED_APPS_ENABLED=false`.
 3. **Remove Cloudflare ingress rule** (§Kill switch level 2).
 4. **Revoke existing grants** (optional, if re-enabling is not planned):
    Existing `mcp_oauth_grant` rows with `revoked_at IS NULL` remain in the DB. They cannot be

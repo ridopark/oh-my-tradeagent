@@ -27,17 +27,16 @@
 #   - Proxied DNS CNAME: tradeagent-mcp.ridopark.com → the homelab-dashboard tunnel
 #   - Tunnel ingress rule: tradeagent-mcp.ridopark.com → http://mcp-server.copytrade.svc.cluster.local:8000
 #   - NOT added to the dashboard's Cloudflare Access application
-#   See docs/ops/mcp-remote-gateway-runbook.md §Cloudflare.
+#   See docs/ops/mcp-remote-gateway-runbook.md, Step 7.
 #
 # KILL SWITCH (fastest — takes effect within one pod restart):
 #   kubectl -n copytrade set env deploy/mcp-server OMT_GATEWAY_DISABLED=true
 #   kubectl -n copytrade rollout status deploy/mcp-server
 #   NOTE: also edit this manifest and commit so a later CI roll does not re-enable (darkpool precedent).
 #
-# DB ROLE. mcp_gateway is created NOLOGIN in V18; enablement step is:
-#   kubectl -n copytrade exec -it statefulset/postgres -- \
-#     psql -U "$POSTGRES_USER" -d dashboard -c "ALTER ROLE mcp_gateway LOGIN PASSWORD '<secret>';"
-# See runbook §Enable gateway.
+# DB ROLE. mcp_gateway is created NOLOGIN in V18. At enablement the operator sets its password
+# with psql's \password (never as a literal in a SQL statement or a shell command) and then
+# ALTER ROLE mcp_gateway LOGIN. See the runbook, Step 4.
 apiVersion: v1
 kind: Service
 metadata:
@@ -122,10 +121,9 @@ spec:
               value: "10.42.0.0/16"
 
             # Ed25519 private key PEM. Required even in disabled mode (validated at startup).
-            # Provision in dashboard-secrets before applying this manifest; the pod will be in
-            # CrashLoopBackOff until this key exists in the secret.
-            # Required even in disabled mode, so NOT optional: a missing key shows as
-            # CreateContainerConfigError naming the key, rather than a crash loop.
+            # Provision it in dashboard-secrets before applying this manifest (runbook Step 1).
+            # Deliberately NOT optional: a missing key shows as CreateContainerConfigError naming
+            # the key, rather than a crash loop.
             - name: MCP_GATEWAY_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
@@ -143,7 +141,7 @@ spec:
 
             # Reuses the dashboard's Google OAuth client. Add the gateway's callback
             # (https://tradeagent-mcp.ridopark.com/oauth/google/callback) as an authorised
-            # redirect URI in the Google console before enabling. See runbook §Google.
+            # redirect URI in the Google console before enabling. See the runbook, Step 6.
             - name: OMT_GOOGLE_CLIENT_ID
               valueFrom:
                 secretKeyRef:
