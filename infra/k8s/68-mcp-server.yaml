@@ -11,15 +11,15 @@
 # gateway self-heals a transient connection.
 #
 # SIGNING KEY REQUIRED IN DISABLED MODE. The gateway validates MCP_GATEWAY_SIGNING_KEY PEM at
-# startup before checking OMT_GATEWAY_DISABLED, so the pod will be in CrashLoopBackOff until this
-# key is provisioned in dashboard-secrets. Provision it before applying this manifest (runbook §Keys).
+# startup before checking OMT_GATEWAY_DISABLED, so the pod cannot start (CreateContainerConfigError)
+# until this key is in dashboard-secrets. Provision it before applying this manifest (runbook Step 1).
 # MCP_GATEWAY_DB_PASSWORD and Google credentials have optional: true because they are not needed in
 # disabled mode — the pod boots dark without them and exits 2 only when both disabled is false and
 # a production var is absent.
 #
-# FIRST-TIME CREATE IS MANUAL. deploy.yml's bootstrap guard checks for the Deployment before
-# applying — a Deployment that does not exist yet skips (notice, not failure) until the operator
-# applies this file once:
+# FIRST-TIME CREATE IS MANUAL. Once the workflow PR adds mcp-server to deploy.yml (matrix +
+# bootstrap guard), a Deployment that does not exist yet is skipped (notice, not failure) until
+# the operator applies this file once:
 #   kubectl -n copytrade apply -f infra/k8s/68-mcp-server.yaml
 # Every later change then rolls through deploy.yml normally.
 #
@@ -124,12 +124,13 @@ spec:
             # Ed25519 private key PEM. Required even in disabled mode (validated at startup).
             # Provision in dashboard-secrets before applying this manifest; the pod will be in
             # CrashLoopBackOff until this key exists in the secret.
+            # Required even in disabled mode, so NOT optional: a missing key shows as
+            # CreateContainerConfigError naming the key, rather than a crash loop.
             - name: MCP_GATEWAY_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
                   name: dashboard-secrets
                   key: MCP_GATEWAY_SIGNING_KEY
-                  optional: true
 
             # Production vars — optional: true so the pod boots in disabled mode without them.
             # They are required (exit 2) when OMT_GATEWAY_DISABLED is not "true".
