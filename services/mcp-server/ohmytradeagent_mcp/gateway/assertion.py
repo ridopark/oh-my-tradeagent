@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 _HEADER = {"alg": "EdDSA", "typ": "JWT"}
@@ -49,6 +50,12 @@ class Signer:
             )
         except Exception as exc:
             raise ValueError(f"Cannot load Ed25519 private key from PEM: {exc}") from exc
+        if not isinstance(self._key, Ed25519PrivateKey):
+            raise TypeError(
+                f"Key must be Ed25519, not {type(self._key).__name__}. "
+                "Generate an Ed25519 key with: "
+                "openssl genpkey -algorithm ed25519 -out key.pem"
+            )
 
     def assertion(self, sub: str, tenant: str, client_id: str) -> str:
         """Return a compact JWS assertion for one BFF request.

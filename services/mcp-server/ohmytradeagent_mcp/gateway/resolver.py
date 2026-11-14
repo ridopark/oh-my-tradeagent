@@ -55,7 +55,6 @@ class OAuthIdentityResolver:
             self._tool_rate_limiter.check(sub, client_id)
         claims = access_token.claims or {}
         grant_tenants: list[str] = claims.get("tenants", [])
-        grant_id: str = claims.get("grant_id", "")
 
         if not grant_tenants:
             raise ToolError("not authorised: token has no tenant access")
@@ -83,7 +82,7 @@ class OAuthIdentityResolver:
         def _make_assertion() -> str:
             return self._signer.assertion(_sub, _resolved, _client_id)
 
-        token_id = "dlg-" + hashlib.sha256(grant_id.encode()).hexdigest()[:12]
+        token_id = "dlg-" + hashlib.sha256(f"google:{sub}".encode()).hexdigest()[:12]
 
         binding = TenantBinding(
             tenant_id=resolved,

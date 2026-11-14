@@ -321,3 +321,110 @@ async def test_productionWiring_toolRateLimiter_wiredIntoResolver():
             await resolver("acme")
     finally:
         auth_context_var.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# Item 11: Non-Ed25519 signing key → exit 2
+# ---------------------------------------------------------------------------
+# A real 2048-bit RSA PKCS8 PEM that loads successfully in cryptography
+# but is NOT Ed25519.  This key is test-only: used to verify that startup
+# rejects non-Ed25519 keys before the server starts accepting requests.
+_RSA_KEY_PEM = """\
+-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCiEImiXat5Fqth
+zFgCjYCEytP7OokWqPIKVT5JSPn/NkwQY0+1c3N1ATMura1f3Ggr43patCWHknqA
+5HjoXqrsIXG/QBCkY42njzWDxZXei3rmvtXivenme9grBcx5m9XpGPbK/Vt63cAk
+3DW+FGqES0gG/kkS6OPy3O05YLNkWf2aqdBaqaNca3l3986A1HvIFAkz/OKGd4Ex
+kez//pnfHbh2hG4pq2ptwRpHD+ixXgim24nkpfwHonxlsG9MJNFllu16UDIl5912
+DG9hOCX0WPEK/bRbVT5WzY0MqiIUjxUwwNxcEQDCeza+otDKo8ejyEO+AF7ZADkf
+7hjuvixbAgMBAAECggEAEit6fYq08+GCcMzhPSqyMwaD17yLVtAK5Z+trmJmgkzg
+daHnc4zbGqN6Ioye+Iq/NH8k3lB+OKydMXWWx1lTHnWYHtIcS4yh0BxylTCCNK48
+puwpvL8qyd2EBzwiMwGGwm3lwC0W+Y0tGAoxuFA/qk9qZuZRjl4wAwWZTyqJUlca
+zdG71H3qGDipLiZrvYGLMJwfbi5d+UTqjlL3Lcc8M0jh/C7VxMpBDNQNyA9VRVwt
+E7gjLRn+oKYhVRxInl6BXKuFBCqOgg2Bidu4PWB1CS0HuA60qSfyEq9tBex0vjPi
+jq2ne3WIitdG631wnPhTEFbRH1L2BbDw5HNGSxnnCQKBgQDX7WWTj9GkyY5YgaV4
+hvWW708Ie1sczgMrMNFb+XfxW03H8QS6I/DPJ5oULQzh7GUtZl6E+tu8I4Gj8YA/
+SgomDdfRSh1iC/cdSQFXj27eyY/jH0l0p5rwWtV872dFulti1LIQhbiuIijuEN7V
+kaZ3ZqMFf/bTQUzT2kKnHViPRwKBgQDAJCYE8i0u9o1pAiKPoPs96w/RD0zWEtjw
+iZ/SWYOykNn80WxzDpbgehu8weIi+mQX6emiQioAhxx9tTn8vvkOnzKqVr9cd1BV
+cf8L16llTkZA2u5H0C7uw9uMyVL7A0B09jXQA6Y9IMBpuk6w/EOKQsVJXQIN1Cay
+7kJrZ95MTQKBgDmEKed5ir1bVwhqWFpXkLmIu0OmICn3Ek8B7PKT7Aglav2UTM8M
+XcvAX8F6EpFnd7f1Kb5AWCGwT4sM/D1fin6Cd3dvR45jY4qwdKQPN9guVp6IKffh
+4Vqex3lFB/xB3K/huiC+jegMf1ySr9ixuGbbtxby9BtnrIBOBi0fmwRnAoGADY//
+pwW5LsF0hd8CtYS1d09qVGVyFQJLkd8FCwIKi8YxvOjDcPOsrrev0YkV/0YRXqbC
+ORPWhycCWdU6/J42UlPmbaOl6k75uq5LRHi6mk4GI3nQq/0D8xKcIrnrQ5CdMiRW
+9BHt4A65xjzCZTfJRK8l4eHQzU0WVjb/NTmltVkCgYB01syupZqsBkAj6+X7qtwP
+S7I6yBQSLerZwLxG8CbQfC3XrEJueRPQiKuwnfGSYQgbSjqbLOnw9njs/1MoYJX9
+0EqpqDfdvjK6oH5PBoDTjVOnKGDSY8RmZtlpRjRNlJLfX2kThwpVlmj+/aa9NQvy
+QKnfudguD3aQJMlFk3PCRQ==
+-----END PRIVATE KEY-----
+"""
+
+
+def test_signingKey_rsaPem_exits2_oneLine():
+    """RSA PEM as signing key must exit 2 (only Ed25519 is accepted).
+
+    RED: assertion.py's Signer loads any PEM key without type check.
+    GREEN: Signer validates the key is Ed25519; run_gateway exits 2.
+    """
+    env = {
+        **_base_env(),
+        "MCP_GATEWAY_SIGNING_KEY": _RSA_KEY_PEM,
+    }
+    code, err = _run(env)
+    assert code == 2, f"expected 2 for RSA key, got {code}; err: {err!r}"
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected one error line, got: {err!r}"
+    assert "ed25519" in err.lower() or "invalid" in err.lower() or "error" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Item 12: token_id formula must use BFF's sha256("google:" + sub)[:12]
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolver_tokenId_usesBffFormula():
+    """token_id must be 'dlg-' + sha256('google:' + sub)[:12], matching the BFF.
+
+    RED: resolver uses sha256(grant_id) which does not match the BFF formula.
+    GREEN: resolver uses sha256('google:' + sub)[:12].
+    """
+    import hashlib
+
+    from mcp.server.auth.middleware.auth_context import (
+        AccessToken,
+        AuthenticatedUser,
+        auth_context_var,
+    )
+
+    from ohmytradeagent_mcp.gateway.assertion import Signer
+    from ohmytradeagent_mcp.gateway.resolver import OAuthIdentityResolver
+    from ohmytradeagent_mcp.gateway.store import InMemoryStore
+
+    sub = "sub-tokenid-test"
+    grant_id = "grant-xyz"
+    expected_token_id = "dlg-" + hashlib.sha256(f"google:{sub}".encode()).hexdigest()[:12]
+
+    store = InMemoryStore()
+    signer = Signer(TEST_SIGNING_KEY_PEM)
+    resolver = OAuthIdentityResolver(store=store, signer=signer, bff_url="http://bff.test")
+
+    sdk_at = AccessToken(
+        token="tok-formula",
+        client_id="cli-1",
+        scopes=["read"],
+        expires_at=9999999999,
+        subject=sub,
+        claims={"tenants": ["acme"], "grant_id": grant_id},
+    )
+    token = auth_context_var.set(AuthenticatedUser(sdk_at))
+    try:
+        binding, _bff = await resolver("acme")
+    finally:
+        auth_context_var.reset(token)
+
+    assert binding.token_id == expected_token_id, (
+        f"token_id must be dlg-sha256('google:{sub}')[:12]; "
+        f"expected {expected_token_id!r}, got {binding.token_id!r}"
+    )

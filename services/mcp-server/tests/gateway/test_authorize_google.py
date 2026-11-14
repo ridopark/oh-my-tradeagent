@@ -385,3 +385,112 @@ async def test_callback_wrongNonce_is400():
         )
 
     assert cb_resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Item 10: callback error handling — Google ?error= and no exception leaks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_callback_googleErrorParam_redirectsToClient_withAccessDenied():
+    """When Google redirects to our callback with ?error=access_denied,
+    we must redirect the client's browser back to their redirect_uri with
+    error=access_denied (not return a 400 or 500).
+
+    RED: callback does not check request.query_params.get('error') →
+         falls through, tries to exchange missing code, returns 400.
+    GREEN: callback detects ?error=... and constructs a redirect_uri error.
+    """
+    app = make_app()
+    _verifier, challenge = await pkce_pair()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        reg = await register_client(client)
+        auth_resp = await client.get(
+            "/authorize",
+            params={
+                "client_id": reg["client_id"],
+                "redirect_uri": "https://example.com/callback",
+                "response_type": "code",
+                "scope": "read",
+                "state": "client-state",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302, auth_resp.text
+        our_state = parse_qs(urlparse(auth_resp.headers["location"]).query)["state"][0]
+
+        # Simulate Google sending back an error (user denied consent on Google)
+        cb_resp = await client.get(
+            "/oauth/google/callback",
+            params={"error": "access_denied", "state": our_state},
+            follow_redirects=False,
+        )
+
+    # Must redirect to the client's redirect_uri with error=access_denied
+    assert cb_resp.status_code == 302, (
+        f"expected 302 redirect to client, got {cb_resp.status_code}; "
+        f"body: {cb_resp.text[:200]}"
+    )
+    location = cb_resp.headers.get("location", "")
+    assert "error=access_denied" in location, (
+        f"redirect must include error=access_denied; got location: {location!r}"
+    )
+    assert "example.com" in location, (
+        f"must redirect to client's redirect_uri; got: {location!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_callback_idpError_doesNotLeakExceptionDetail():
+    """When IdP exchange fails, the error response must NOT include str(exc).
+
+    RED: callback returns {'error': 'idp_error', 'detail': str(exc)} →
+         exception details leak to the browser.
+    GREEN: detail field is absent or is a generic string, never str(exc).
+    """
+    from tests.gateway.fake_idp import FakeIdP
+
+    class _FailIdP(FakeIdP):
+        async def exchange(self, code, callback_url):
+            raise RuntimeError("internal_secret_dsn_password=abc123")
+
+    app = make_app(idp=_FailIdP("irrelevant-sub"))
+    _verifier, challenge = await pkce_pair()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        reg = await register_client(client)
+        auth_resp = await client.get(
+            "/authorize",
+            params={
+                "client_id": reg["client_id"],
+                "redirect_uri": "https://example.com/callback",
+                "response_type": "code",
+                "scope": "read",
+                "state": "s",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+        our_state = parse_qs(urlparse(auth_resp.headers["location"]).query)["state"][0]
+        cb_resp = await client.get(
+            "/oauth/google/callback",
+            params={"code": "code", "state": our_state},
+        )
+
+    # Must be an error response, but must NOT contain the exception detail
+    assert cb_resp.status_code in (400, 502), (
+        f"expected error status, got {cb_resp.status_code}"
+    )
+    body = cb_resp.text
+    assert "internal_secret_dsn_password" not in body, (
+        f"exception detail leaked in response: {body[:200]}"
+    )

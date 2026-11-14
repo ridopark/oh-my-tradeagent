@@ -101,7 +101,13 @@ class OmtAuthorizationServerProvider:
         clients).  Confidential clients that request any other method are
         rejected with ``invalid_client_metadata``.
         """
-        for uri in client_info.redirect_uris:
+        redirect_uris = client_info.redirect_uris or []
+        if not redirect_uris:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="redirect_uris is required and must not be empty",
+            )
+        for uri in redirect_uris:
             validate_redirect_uri(str(uri))
 
         auth_method = client_info.token_endpoint_auth_method or "none"

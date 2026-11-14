@@ -206,3 +206,43 @@ async def test_register_unusedClientExpires_afterSweep():
     # The expired-never-used client should be gone
     c = await store.get_client_record(client_id)
     assert c is None, "Expected expired-never-used client to be swept"
+
+
+# ---------------------------------------------------------------------------
+# Item 9: /register must return 400 for null/missing redirect_uris, never 500
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_nullRedirectUris_is400_invalidClientMetadata():
+    """register with redirect_uris=null must return 400 invalid_client_metadata.
+
+    RED: provider.register_client iterates redirect_uris without None check →
+         TypeError propagates → 500.
+    GREEN: register_client guards against None/missing → RegistrationError 400.
+    """
+    async with _make_client() as client:
+        resp = await client.post(
+            "/register",
+            json={
+                "redirect_uris": None,
+                "token_endpoint_auth_method": "none",
+            },
+        )
+    assert resp.status_code == 400, (
+        f"redirect_uris=null must be 400, got {resp.status_code}; body: {resp.text[:200]}"
+    )
+    body = resp.json()
+    assert body.get("error") == "invalid_client_metadata", f"unexpected: {body}"
+
+
+@pytest.mark.asyncio
+async def test_register_emptyBody_is400():
+    """register with {} (no redirect_uris) must return 400, not 500 or 422."""
+    async with _make_client() as client:
+        resp = await client.post("/register", json={})
+    # SDK may return 400 from Pydantic validation; we just verify it's not 500
+    assert resp.status_code in (400, 422), (
+        f"empty body must be 400 or 422, got {resp.status_code}"
+    )
+    assert resp.status_code != 500

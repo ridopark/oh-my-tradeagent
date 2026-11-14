@@ -267,6 +267,7 @@ def _make_google_callback_handler(
     async def google_callback(request: Request) -> Response:
         code = request.query_params.get("code", "")
         state = request.query_params.get("state", "")
+        google_error = request.query_params.get("error", "")
 
         if not state:
             return JSONResponse({"error": "missing_state"}, status_code=400)
@@ -275,6 +276,17 @@ def _make_google_callback_handler(
         if pending is None:
             return JSONResponse({"error": "unknown_state"}, status_code=400)
 
+        # Google sent an error (e.g. user denied consent on the Google sign-in page)
+        if google_error:
+            from mcp.server.auth.provider import construct_redirect_uri
+            await store.consume_pending_auth(state)
+            redirect_url = construct_redirect_uri(
+                pending.redirect_uri,
+                error="access_denied",
+                state=pending.client_state,
+            )
+            return RedirectResponse(redirect_url, status_code=302)
+
         if pending.expires_at < time.time():
             await store.consume_pending_auth(state)
             return JSONResponse({"error": "expired_pending"}, status_code=400)
@@ -282,11 +294,8 @@ def _make_google_callback_handler(
         # Exchange code with IdP
         try:
             identity = await provider._idp.exchange(code, settings.google_callback_url)
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse(
-                {"error": "idp_error", "detail": str(exc)},
-                status_code=502,
-            )
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "idp_error"}, status_code=502)
 
         # Verify nonce
         if identity.nonce != pending.nonce:
