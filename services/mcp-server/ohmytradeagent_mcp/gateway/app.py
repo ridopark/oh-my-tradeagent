@@ -403,13 +403,15 @@ def _make_google_callback_handler(
         csrf_hash = hashlib.sha256(csrf_token.encode()).hexdigest()
 
         # Update pending auth with identity and CSRF
-        await store.update_pending_after_callback(
+        updated = await store.update_pending_after_callback(
             state,
             csrf_hash=csrf_hash,
             provider="google",
             subject=identity.sub,
             tenants=tenants,
         )
+        if not updated:
+            return JSONResponse({"error": "race_on_state"}, status_code=400)
 
         # Render consent page
         client_name = pending.client_name
@@ -470,6 +472,9 @@ def _make_consent_handler(
         pending = await store.get_pending_auth(state)
         if pending is None:
             return JSONResponse({"error": "unknown_state"}, status_code=400)
+
+        if pending.expires_at < time.time():
+            return JSONResponse({"error": "expired_pending"}, status_code=400)
 
         if pending.csrf_hash is None:
             return JSONResponse({"error": "csrf_not_set"}, status_code=400)

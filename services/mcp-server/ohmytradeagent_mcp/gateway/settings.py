@@ -73,10 +73,11 @@ class GatewaySettings:
 
         # Rate limit defaults (override with env vars)
         def _int(key: str, default: int) -> int:
+            val = env.get(key, str(default))
             try:
-                return int(env.get(key, str(default)))
+                return int(val)
             except ValueError:
-                return default
+                raise ConfigError(f"Invalid integer for {key}: {val!r}") from None
 
         self.rate_tools_per_min_subject: int = _int("OMT_RATE_TOOLS_PER_MIN_SUBJECT", 60)
         self.rate_tools_per_min_client: int = _int("OMT_RATE_TOOLS_PER_MIN_CLIENT", 300)

@@ -552,3 +552,24 @@ async def test_buildAppFromSettings_toolRateLimiter_wired():
     app = _build_app_from_settings(settings, store)
     # Smoke-check: the factory returns a callable ASGI app
     assert callable(app), f"Expected callable ASGI app from factory; got {type(app)}"
+
+
+# ---------------------------------------------------------------------------
+# Finding L — _int() must raise ConfigError on invalid integer env var
+# ---------------------------------------------------------------------------
+
+
+def test_settings_invalidRateLimit_raisesConfigError():
+    """An non-integer OMT_RATE_* env var must raise ConfigError.
+
+    RED: _int() silently returns the default on ValueError.
+    GREEN: _int() raises ConfigError with the offending key name.
+    """
+    from ohmytradeagent_mcp.gateway.settings import ConfigError, GatewaySettings
+
+    with pytest.raises(ConfigError, match="OMT_RATE_TOOLS_PER_MIN_SUBJECT"):
+        GatewaySettings({
+            **_base_env(),
+            "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
+            "OMT_RATE_TOOLS_PER_MIN_SUBJECT": "not_a_number",
+        })

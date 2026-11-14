@@ -8,6 +8,7 @@ Covers:
 - Approve with no tenant selected → 400
 - Approve with tenant not in pending set → 400
 - Double consent (second POST with same state) → 400 (single-use CSRF)
+- Expired pending auth at consent POST → 400 expired_pending (Finding G)
 """
 from __future__ import annotations
 
@@ -264,3 +265,34 @@ async def test_consent_neitherHeader_is403():
         f"expected 403 when both headers absent, got {resp.status_code}; "
         f"body: {resp.text[:200]}"
     )
+
+# ---------------------------------------------------------------------------
+# Finding G: consent_post must reject expired pending auths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_consent_expiredPending_is400():
+    """Submitting consent after the pending auth expires must return 400 expired_pending.
+
+    RED: consent_post has no expiry check — the form is processed even when
+         the pending auth's expires_at has passed.
+    GREEN: consent_post checks pending.expires_at < time.time() → 400.
+    """
+    import time
+
+    app, store = make_app(return_store=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        our_state, csrf = await _get_consent_page(client)
+
+        # Expire the pending auth
+        store._pending_auths[our_state].expires_at = time.time() - 1
+
+        resp = await _post_consent(client, state=our_state, csrf=csrf, tenants=["acme"])
+
+    assert resp.status_code == 400, (
+        f"expected 400 for expired pending, got {resp.status_code}; body: {resp.text[:200]}"
+    )
+    assert resp.json().get("error") == "expired_pending", resp.json()
