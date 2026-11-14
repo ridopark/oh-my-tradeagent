@@ -48,9 +48,10 @@ public class DelegatedAssertionAuthenticator {
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final String TENANT_PATTERN = "[A-Za-z0-9_-]+";
-  // Safe charset for client_id: covers DCR uuid4 values and CIMD https:// URLs.
-  // Excludes newlines and other control characters that could be injected into log lines.
-  private static final String CLIENT_ID_PATTERN = "[A-Za-z0-9_.:/@-]{1,512}";
+  // client_id is logged, so reject whitespace and control characters (log-line injection) but
+  // accept every other printable ASCII character: DCR ids and CIMD https URLs (which may carry a
+  // query, '~', '+' or percent-encoding) must all pass.
+  private static final String CLIENT_ID_PATTERN = "[\\x21-\\x7E]{1,512}";
 
   private final PublicKey publicKey;
   private final DashboardMembershipReader membershipReader;
@@ -192,8 +193,10 @@ public class DelegatedAssertionAuthenticator {
 
   private static long requireLong(Map<String, Object> map, String key) {
     Object v = map.get(key);
-    if (v instanceof Number n) return n.longValue();
-    throw new IllegalArgumentException("missing or non-numeric claim: " + key);
+    // Integers only (Jackson yields Integer or Long for in-range JSON integers); a fractional or
+    // out-of-range number is rejected rather than truncated by longValue().
+    if (v instanceof Integer || v instanceof Long) return ((Number) v).longValue();
+    throw new IllegalArgumentException("missing or non-integer claim: " + key);
   }
 
   private static String addPadding(String b64url) {

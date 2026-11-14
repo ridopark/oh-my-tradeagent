@@ -1529,6 +1529,49 @@ class ServiceTokenFilterTest {
     assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
   }
 
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(
+      strings = {
+        "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "https://claude.ai/.well-known/oauth-client-metadata.json",
+        "https://example.com/oauth/client?v=2",
+        "https://example.com/~bob/client.json",
+        "https://example.com/client%20metadata.json",
+        "https://example.com/clients/app+beta.json"
+      })
+  void delegated_legitimateDcrAndCimdClientIds_areAccepted(String clientId) throws Exception {
+    // CIMD client ids are https URLs and may carry a query, '~', '+' or percent-encoding; the
+    // log-injection guard must only reject whitespace/control characters, not real client ids.
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("client_id", clientId);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(200);
+  }
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"has space", "tab\there", "del\u007f"})
+  void delegated_whitespaceOrControlInClientId_is401(String clientId) throws Exception {
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("client_id", clientId);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_nonIntegerExp_is401() throws Exception {
+    // "integers" per the plan: a fractional exp must be rejected, not truncated by longValue().
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("exp", ((Number) claims.get("exp")).longValue() + 0.5);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
   @Test
   void wellFormedMcpTokenMap_withTrailingCommaAndSpaces_boots() {
     assertThatCode(
