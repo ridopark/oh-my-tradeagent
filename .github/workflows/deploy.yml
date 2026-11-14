@@ -114,6 +114,7 @@ on:
           - tenant-dashboard-bff
           - dashboard
           - stc-intent-service
+          - mcp-server
 
 permissions:
   contents: read
@@ -141,7 +142,7 @@ env:
   # `oh-my-tradeagent-exec` image which the `exec-alpaca-paper` Deployment
   # pulls. Build-name ≠ Deployment-name is intentional — see
   # `infra/k8s/52-exec-alpaca-paper.yaml`.
-  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector flow-collector tenant-dashboard-bff dashboard stc-intent-service"
+  SERVICES: "orchestrator exec-alpaca-paper market-data api-gateway signal-source-discord discord-chat-mirror discord-signals-mirror discord-lotto-mirror lotto-signal darkpool-collector flow-collector tenant-dashboard-bff dashboard stc-intent-service mcp-server"
 
 jobs:
   preflight:
@@ -302,6 +303,7 @@ jobs:
                                                         want[darkpool-collector]=1
                                                         want[flow-collector]=1 ;;
               services/stc-intent-service/*)            want[stc-intent-service]=1 ;;
+              services/mcp-server/*)                    want[mcp-server]=1 ;;
               services/tenant-dashboard-bff/*)          want[tenant-dashboard-bff]=1 ;;
               services/audit/*)                         : ;;   # no rolled Deployment
               dashboard/*)                              want[dashboard]=1 ;;
@@ -346,6 +348,7 @@ jobs:
               infra/k8s/66-darkpool-collector.yaml)     want[darkpool-collector]=1 ;;
               infra/k8s/67-flow-collector.yaml)         want[flow-collector]=1 ;;
               infra/k8s/60-stc-intent-service.yaml)     want[stc-intent-service]=1 ;;
+              infra/k8s/68-mcp-server.yaml)             want[mcp-server]=1 ;;
               infra/k8s/58-tenant-dashboard-bff.yaml)   want[tenant-dashboard-bff]=1 ;;
               infra/k8s/59-dashboard.yaml)              want[dashboard]=1 ;;
               *) : ;;   # docs, .github, tenants/, other infra/k8s -> no rollout
@@ -429,10 +432,11 @@ jobs:
 
       - name: Bootstrap guard for ${{ matrix.service }}
         id: bootstrap
-        # darkpool-collector (66) and flow-collector (67): both must be hand-applied once before
-        # this workflow can roll them. Until then, every sidecar merge would turn the matrix job
-        # RED for those services. Skip (notice, exit 0) instead of failing, for those two services
-        # and no other: for every other service a missing Deployment is still the error it always was.
+        # darkpool-collector (66), flow-collector (67) and mcp-server (68): each must be
+        # hand-applied once before this workflow can roll it. Until then, every merge touching it
+        # would turn the matrix job RED for that service. Skip (notice, exit 0) instead of failing,
+        # for those three services and no other: for every other service a missing Deployment is
+        # still the error it always was.
         # Skip ONLY on NotFound — any other kubectl failure (expired kubeconfig, API timeout, RBAC)
         # is a real deploy failure and must stay red.
         run: |
@@ -443,6 +447,8 @@ jobs:
               manifest="infra/k8s/66-darkpool-collector.yaml" ;;
             flow-collector)
               manifest="infra/k8s/67-flow-collector.yaml" ;;
+            mcp-server)
+              manifest="infra/k8s/68-mcp-server.yaml" ;;
             *)
               manifest="" ;;
           esac
