@@ -354,7 +354,7 @@ def _patch_revoke_route(sdk_app: Starlette, store) -> None:
         try:
             form = await request.form()
             token_value = form.get("token", "")
-        except Exception:
+        except Exception:  # noqa: BLE001
             return JSONResponse({"error": "invalid_request"}, status_code=400)
 
         if not token_value:

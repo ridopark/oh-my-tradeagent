@@ -14,9 +14,9 @@ from ohmytradeagent_mcp.gateway.settings import GatewaySettings
 from ohmytradeagent_mcp.gateway.store import InMemoryStore
 from tests.gateway.fake_idp import FakeIdP
 from tests.gateway.fixtures import (
+    _DEFAULT_MEMBERSHIP,
     PUBLIC_URL,
     TEST_SIGNING_KEY_PEM,
-    _DEFAULT_MEMBERSHIP,
 )
 from tests.gateway.oauth_helpers import (
     extract_state_from_location,
