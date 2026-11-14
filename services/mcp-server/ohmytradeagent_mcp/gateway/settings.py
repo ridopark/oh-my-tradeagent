@@ -8,9 +8,14 @@ Required:
 Optional:
   OMT_GATEWAY_DISABLED    — set to "true" to return 503 for all /mcp requests
   OMT_ALLOWED_HOSTS       — comma-separated list of allowed Host header values
-  OMT_LISTEN              — listen address in host:port form (default "0.0.0.0:8080")
+  OMT_LISTEN              — listen address in host:port form (default "0.0.0.0:8000")
   OMT_GOOGLE_CLIENT_ID    — Google OAuth 2.0 client id (required for production AS)
   OMT_GOOGLE_CLIENT_SECRET — Google OAuth 2.0 client secret (required for production AS)
+  OMT_GATEWAY_DB_URL      — asyncpg DSN for PostgresStore; uses InMemoryStore when absent
+  MCP_GATEWAY_DB_PASSWORD — optional password override for the mcp_gateway DB role
+  OMT_RATE_TOOLS_PER_MIN_SUBJECT — per-subject tool call RPM (default 60)
+  OMT_RATE_TOOLS_PER_MIN_CLIENT  — per-client tool call RPM (default 300)
+  OMT_RATE_AUTH_PER_MIN_IP       — per-IP auth endpoint RPM (default 30)
 """
 from __future__ import annotations
 
@@ -43,11 +48,25 @@ class GatewaySettings:
         else:
             self.allowed_hosts = []
 
-        self.listen: str = env.get("OMT_LISTEN", "0.0.0.0:8080").strip()
+        self.listen: str = env.get("OMT_LISTEN", "0.0.0.0:8000").strip()
 
         # Google OAuth — optional (tests inject a FakeIdP instead)
         self.google_client_id: str | None = env.get("OMT_GOOGLE_CLIENT_ID") or None
         self.google_client_secret: str | None = env.get("OMT_GOOGLE_CLIENT_SECRET") or None
+
+        # PostgresStore DSN — absent → InMemoryStore (default for local dev + tests)
+        self.db_url: str | None = env.get("OMT_GATEWAY_DB_URL", "").strip() or None
+
+        # Rate limit defaults (override with env vars)
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(env.get(key, str(default)))
+            except ValueError:
+                return default
+
+        self.rate_tools_per_min_subject: int = _int("OMT_RATE_TOOLS_PER_MIN_SUBJECT", 60)
+        self.rate_tools_per_min_client: int = _int("OMT_RATE_TOOLS_PER_MIN_CLIENT", 300)
+        self.rate_auth_per_min_ip: int = _int("OMT_RATE_AUTH_PER_MIN_IP", 30)
 
     @property
     def mcp_resource_url(self) -> str:

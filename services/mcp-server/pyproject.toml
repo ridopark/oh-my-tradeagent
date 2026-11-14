@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.27",
     "uvicorn>=0.27",
     "pyjwt[crypto]>=2.8",
+    "asyncpg>=0.29",
 ]
 
 [project.scripts]

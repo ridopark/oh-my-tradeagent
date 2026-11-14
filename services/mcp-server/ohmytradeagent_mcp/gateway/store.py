@@ -113,7 +113,7 @@ class AccessTokenRecord:
 
 @runtime_checkable
 class OAuthStore(Protocol):
-    """Store interface for the MCP gateway (Steps 3a + 3b)."""
+    """Store interface for the MCP gateway (Steps 3a + 3b + 3c)."""
 
     async def get_access_token(self, token: str) -> AccessTokenRecord | None:
         """Return the token record if found, or None."""
@@ -129,6 +129,40 @@ class OAuthStore(Protocol):
 
     def get_membership_sync(self, subject: str) -> list[str]:
         """Return current tenant list for the given Google subject (synchronous, for re-checks)."""
+        ...
+
+    async def get_membership(self, subject: str) -> list[str]:
+        """Return current tenant list for subject (async; use this in app + provider)."""
+        ...
+
+    async def store_access_token(
+        self,
+        *,
+        token: str,
+        sub: str,
+        tenants: list[str],
+        client_id: str,
+        expires_at: int,
+        resource: str | None,
+        grant_id: str | None = None,
+    ) -> None:
+        """Persist an access token (async protocol-level write)."""
+        ...
+
+    async def rotate_refresh_token(self, old_token: str, new_token: str) -> bool:
+        """Mark old_token rotated; return True on success, False if already rotated."""
+        ...
+
+    async def revoke_grant_by_id(self, grant_id: str) -> None:
+        """Revoke a grant by its id."""
+        ...
+
+    async def sweep_expired_clients(self) -> None:
+        """Remove expired-and-never-used DCR clients."""
+        ...
+
+    async def is_healthy(self) -> bool:
+        """Return True when the store can serve requests (e.g. DB reachable)."""
         ...
 
 
@@ -193,6 +227,36 @@ class InMemoryStore:
 
     def get_membership_sync(self, subject: str) -> list[str]:
         return list(self._membership.get(subject, []))
+
+    async def get_membership(self, subject: str) -> list[str]:
+        """Async membership lookup (wraps get_membership_sync)."""
+        return self.get_membership_sync(subject)
+
+    async def store_access_token(
+        self,
+        *,
+        token: str,
+        sub: str,
+        tenants: list[str],
+        client_id: str,
+        expires_at: int,
+        resource: str | None,
+        grant_id: str | None = None,
+    ) -> None:
+        """Async protocol method; delegates to put_access_token."""
+        self.put_access_token(
+            token=token,
+            sub=sub,
+            tenants=tenants,
+            client_id=client_id,
+            expires_at=expires_at,
+            resource=resource,
+            grant_id=grant_id,
+        )
+
+    async def is_healthy(self) -> bool:
+        """In-memory store is always healthy."""
+        return True
 
     # ------------------------------------------------------------------
     # Test helpers (not part of the Protocol)
@@ -332,11 +396,16 @@ class InMemoryStore:
         """Return the refresh token record, or None."""
         return self._refresh_tokens.get(token)
 
-    async def rotate_refresh_token(self, old_token: str, new_token: str) -> None:
-        """Mark *old_token* as rotated (reuse-detection sentinal)."""
+    async def rotate_refresh_token(self, old_token: str, new_token: str) -> bool:
+        """Mark *old_token* as rotated; return True on success, False if already rotated."""
         rec = self._refresh_tokens.get(old_token)
-        if rec is not None:
-            rec.rotated_at = time.time()
+        if rec is None:
+            return False
+        if rec.rotated_at is not None:
+            # Already rotated — concurrent double-refresh attempt
+            return False
+        rec.rotated_at = time.time()
+        return True
 
     async def put_client(self, client) -> None:  # client: OAuthClientInformationFull
         """Store a registered DCR client."""

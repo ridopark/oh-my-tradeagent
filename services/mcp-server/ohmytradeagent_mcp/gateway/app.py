@@ -45,7 +45,6 @@ from ohmytradeagent_mcp.gateway.consent import render_consent
 from ohmytradeagent_mcp.gateway.provider import OmtAuthorizationServerProvider
 from ohmytradeagent_mcp.gateway.resolver import OAuthIdentityResolver
 from ohmytradeagent_mcp.gateway.settings import GatewaySettings
-from ohmytradeagent_mcp.gateway.store import InMemoryStore
 from ohmytradeagent_mcp.tools import build_server
 
 
@@ -146,6 +145,57 @@ class _KillSwitchMiddleware:
         await self._app(scope, receive, send)
 
 
+_AUTH_RATE_PATHS = frozenset(["/authorize", "/token", "/register", "/revoke"])
+
+
+def _is_auth_rate_path(path: str) -> bool:
+    """Return True for endpoints that require per-IP rate limiting."""
+    return path in _AUTH_RATE_PATHS or path.startswith("/oauth/")
+
+
+class _AuthRateLimitMiddleware:
+    """ASGI middleware that enforces per-IP rate limits on OAuth auth endpoints.
+
+    Checks ``CF-Connecting-IP`` first (Cloudflare trusted header), then falls
+    back to the socket peer address.  Returns HTTP 429 + ``Retry-After`` when
+    the per-IP bucket is exhausted.
+    """
+
+    def __init__(self, app: ASGIApp, limiter) -> None:
+        self._app = app
+        self._limiter = limiter
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+        if not _is_auth_rate_path(path):
+            await self._app(scope, receive, send)
+            return
+
+        # Extract client IP: CF-Connecting-IP > socket peer > fallback
+        cf_ip = _Headers(scope=scope).get("cf-connecting-ip")
+        if cf_ip:
+            ip = cf_ip.strip()
+        else:
+            client = scope.get("client")
+            ip = client[0] if client else "127.0.0.1"
+
+        allowed, retry_after = self._limiter.check(ip)
+        if not allowed:
+            resp = Response(
+                content=b"",
+                status_code=429,
+                headers={"Retry-After": str(int(retry_after))},
+            )
+            await resp(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
+
+
 def _patch_as_metadata(sdk_app: Starlette, issuer_url, auth_settings) -> None:
     """Replace the SDK's AS metadata route to add ``client_id_metadata_document_supported``."""
     from mcp.server.auth.handlers.metadata import MetadataHandler
@@ -176,7 +226,7 @@ def _patch_as_metadata(sdk_app: Starlette, issuer_url, auth_settings) -> None:
 
 def _make_google_callback_handler(
     provider: OmtAuthorizationServerProvider,
-    store: InMemoryStore,
+    store,
     settings: GatewaySettings,
 ):
     """Return the ASGI handler for GET /oauth/google/callback."""
@@ -221,7 +271,7 @@ def _make_google_callback_handler(
             return RedirectResponse(redirect_url, status_code=302)
 
         # Look up tenant membership
-        tenants = store.get_membership_sync(identity.sub)
+        tenants = await store.get_membership(identity.sub)
         if not tenants:
             from mcp.server.auth.provider import construct_redirect_uri
             await store.consume_pending_auth(state)
@@ -262,7 +312,7 @@ def _make_google_callback_handler(
 
 def _make_consent_handler(
     provider: OmtAuthorizationServerProvider,
-    store: InMemoryStore,
+    store,
     settings: GatewaySettings,
 ):
     """Return the ASGI handler for POST /oauth/consent."""
@@ -375,11 +425,12 @@ def _make_consent_handler(
 
 def build_gateway_app(
     settings: GatewaySettings,
-    store: InMemoryStore,
+    store,
     *,
     bff_transport=None,
     idp=None,
     fetch_cimd=None,
+    auth_rate_limiter=None,
 ):
     """Build and return the gateway ASGI app.
 
@@ -389,6 +440,7 @@ def build_gateway_app(
         bff_transport: Optional httpx transport override for BFF calls (testing).
         idp: Identity provider (GoogleIdP or FakeIdP; None → build GoogleIdP).
         fetch_cimd: Optional injectable CIMD fetcher (None → real cached fetcher).
+        auth_rate_limiter: Optional AuthRateLimiter for OAuth endpoints (None = no limit).
 
     Returns:
         A callable ASGI app ready to serve.
@@ -496,6 +548,8 @@ def build_gateway_app(
     async def _readyz(request: Request) -> Response:
         if settings.disabled:
             return JSONResponse({"error": "disabled"}, status_code=503)
+        if not await store.is_healthy():
+            return JSONResponse({"error": "store_unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
     extra_routes = [
@@ -534,11 +588,30 @@ def build_gateway_app(
             else:
                 await lazy_sdk_app(scope, receive, send)
 
-    composite = _CompositeApp()
+    _inner = _CompositeApp()
+    if auth_rate_limiter is not None:
+        _inner = _AuthRateLimitMiddleware(_inner, auth_rate_limiter)  # type: ignore[assignment]
+    composite = _inner
     wrapped = _KillSwitchMiddleware(composite, disabled=settings.disabled)
 
     class _GatewayApp:
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "lifespan":
+                # Connect/close store around the ASGI lifespan event
+                async def _store_aware_receive() -> dict:
+                    msg = await receive()
+                    if msg.get("type") == "lifespan.startup":
+                        _connect = getattr(store, "connect", None)
+                        if _connect is not None:
+                            await _connect()
+                    elif msg.get("type") == "lifespan.shutdown":
+                        _close = getattr(store, "close", None)
+                        if _close is not None:
+                            await _close()
+                    return msg
+
+                await wrapped(scope, _store_aware_receive, send)
+                return
             await wrapped(scope, receive, send)
 
     return _GatewayApp()  # type: ignore[return-value]

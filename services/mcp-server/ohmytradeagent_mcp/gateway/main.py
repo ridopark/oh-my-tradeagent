@@ -22,7 +22,7 @@ def run_gateway(
 
     Returns:
         0 on success (or when _test_mode is True and config is valid).
-        2 on configuration errors (missing required env vars).
+        2 on configuration errors (missing required env vars or invalid key).
     """
     from ohmytradeagent_mcp.gateway.settings import ConfigError, GatewaySettings
 
@@ -32,15 +32,29 @@ def run_gateway(
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # Validate signing key early — bad PEM should fail before starting the server
+    try:
+        from ohmytradeagent_mcp.gateway.assertion import Signer
+        Signer(settings.signing_key_pem)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: invalid signing key: {exc}", file=sys.stderr)
+        return 2
+
     if _test_mode:
         return 0
 
+    # Build the OAuth store: PostgresStore when DB URL set, else InMemoryStore
+    if settings.db_url:
+        from ohmytradeagent_mcp.gateway.store_postgres import PostgresStore
+        store = PostgresStore(settings.db_url)
+        # connect() is called by build_gateway_app via the ASGI lifespan event
+    else:
+        from ohmytradeagent_mcp.gateway.store import InMemoryStore
+        store = InMemoryStore()
+
     # Build the app and start uvicorn
     from ohmytradeagent_mcp.gateway.app import build_gateway_app
-    from ohmytradeagent_mcp.gateway.store import InMemoryStore
 
-    # In production, PostgresStore replaces InMemoryStore (Step 3c).
-    store = InMemoryStore()
     app = build_gateway_app(settings, store)
 
     import uvicorn
@@ -52,7 +66,7 @@ def run_gateway(
         port = int(port_str)
     else:
         host = listen
-        port = 8080
+        port = 8000
 
     uvicorn.run(app, host=host, port=port)
     return 0

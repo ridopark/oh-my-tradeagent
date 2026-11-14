@@ -37,7 +37,7 @@ from pydantic import AnyUrl
 
 from ohmytradeagent_mcp.gateway.cimd import is_cimd_url
 from ohmytradeagent_mcp.gateway.redirects import validate_redirect_uri
-from ohmytradeagent_mcp.gateway.store import InMemoryStore, RefreshTokenRecord
+from ohmytradeagent_mcp.gateway.store import RefreshTokenRecord
 
 _ACCESS_TOKEN_LIFETIME = 3600       # 1 hour (seconds)
 _REFRESH_TOKEN_LIFETIME = 30 * 86400  # 30 days (seconds)
@@ -58,7 +58,7 @@ class OmtAuthorizationServerProvider:
 
     def __init__(
         self,
-        store: InMemoryStore,
+        store: Any,
         idp: Any,
         *,
         resource: str,
@@ -98,7 +98,7 @@ class OmtAuthorizationServerProvider:
         for uri in client_info.redirect_uris:
             validate_redirect_uri(str(uri))
         # Sweep expired-never-used clients before inserting
-        await _sweep_expired_clients(self._store)
+        await self._store.sweep_expired_clients()
         await self._store.put_client(client_info)
 
     # ------------------------------------------------------------------
@@ -184,7 +184,7 @@ class OmtAuthorizationServerProvider:
         now = int(time.time())
 
         # Store access token
-        self._store.put_access_token(
+        await self._store.store_access_token(
             token=access_token,
             sub=authorization_code.subject or "",
             tenants=tenants,
@@ -263,15 +263,21 @@ class OmtAuthorizationServerProvider:
         grant = await self._store.get_grant(grant_id)
         tenants = grant.tenants if grant else []
 
-        # Mark old refresh token as rotated
-        await self._store.rotate_refresh_token(refresh_token.token, "")
+        # Atomic rotation: returns False on concurrent double-refresh reuse
+        rotated = await self._store.rotate_refresh_token(refresh_token.token, "")
+        if not rotated:
+            await self._store.revoke_grant_by_id(old_record.grant_id)
+            raise TokenError(
+                error="invalid_grant",
+                error_description="refresh token reuse detected",
+            )
 
         # Mint new pair
         new_access = secrets.token_hex(32)
         new_refresh = secrets.token_hex(32)
         now = int(time.time())
 
-        self._store.put_access_token(
+        await self._store.store_access_token(
             token=new_access,
             sub=old_record.subject,
             tenants=tenants,
@@ -320,7 +326,7 @@ class OmtAuthorizationServerProvider:
             return None
 
         # Membership re-check on every request
-        current = set(self._store.get_membership_sync(rec.subject))
+        current = set(await self._store.get_membership(rec.subject))
         valid_tenants = [t for t in rec.tenants if t in current]
         if not valid_tenants:
             return None
@@ -379,14 +385,3 @@ def _make_client_from_cimd_doc(doc: dict) -> OAuthClientInformationFull:
     )
 
 
-async def _sweep_expired_clients(store: InMemoryStore) -> None:
-    """Remove DCR clients that have expired and were never used."""
-    now = time.time()
-    to_delete = []
-    for cid, client in list(store._clients.items()):
-        expires_at = getattr(client, "_expires_at", None)
-        last_used = getattr(client, "_last_used_at", None)
-        if expires_at is not None and expires_at < now and last_used is None:
-            to_delete.append(cid)
-    for cid in to_delete:
-        del store._clients[cid]

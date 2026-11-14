@@ -125,6 +125,7 @@ def make_app(
     wrong_nonce: bool = False,
     email_verified: bool = True,
     idp=None,
+    auth_rate_limiter=None,
 ) -> Any:
     """Create a gateway Starlette app for testing.
 
@@ -156,7 +157,10 @@ def make_app(
     if idp is None:
         idp = FakeIdP(sub=sub, wrong_nonce=wrong_nonce, email_verified=email_verified)
 
-    app = build_gateway_app(settings, store, bff_transport=bff_transport, idp=idp)
+    app = build_gateway_app(
+        settings, store, bff_transport=bff_transport, idp=idp,
+        auth_rate_limiter=auth_rate_limiter,
+    )
 
     if capture_bff:
         return app, store, bff_calls

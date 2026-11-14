@@ -57,3 +57,17 @@ def test_gateway_allPresent_returnsZero():
     """With all required vars present, run_gateway in test mode returns 0."""
     code, _err = _run(_base_env())
     assert code == 0
+
+
+def test_entrypoint_badSigningKey_exits2_oneLine():
+    """run_gateway exits 2 and prints a one-line error when the signing key is not valid PEM."""
+    env = {
+        **_base_env(),
+        "MCP_GATEWAY_SIGNING_KEY": "not-a-valid-pem-at-all",
+    }
+    code, err = _run(env)
+    assert code == 2, f"expected 2, got {code}"
+    # Must be a single non-empty line
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected one error line, got: {err!r}"
+    assert "error" in err.lower() or "invalid" in err.lower() or "key" in err.lower()
