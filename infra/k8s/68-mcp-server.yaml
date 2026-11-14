@@ -1,0 +1,235 @@
+# Remote MCP gateway — Streamable HTTP + OAuth AS (PLAN-2026-11-13-mcp-remote-oauth.md, PR 5).
+#
+# SHIPS DARK. OMT_GATEWAY_DISABLED=true is set below so all /mcp and OAuth routes return 503
+# immediately. No DB connection is attempted, no BFF delegated-assertion flag is live.
+#
+# READINESS PROBE DECISION. /readyz returns 503 when the gateway is disabled (the store is not
+# connected). Using /healthz for BOTH probes so the pod becomes Ready as soon as the process is
+# running. Without this the pod would stay NotReady forever in disabled mode (503 on /readyz).
+# After full enablement the operator may change the readiness probe to /readyz if on-call alerting
+# should fire when the DB is unreachable; leave it on /healthz to keep the pod Ready while the
+# gateway self-heals a transient connection.
+#
+# SIGNING KEY REQUIRED IN DISABLED MODE. The gateway validates MCP_GATEWAY_SIGNING_KEY PEM at
+# startup before checking OMT_GATEWAY_DISABLED, so the pod cannot start (CreateContainerConfigError)
+# until this key is in dashboard-secrets. Provision it before applying this manifest (runbook Step 1).
+# MCP_GATEWAY_DB_PASSWORD and Google credentials have optional: true because they are not needed in
+# disabled mode — the pod boots dark without them and exits 2 only when both disabled is false and
+# a production var is absent.
+#
+# FIRST-TIME CREATE IS MANUAL. Once the workflow PR adds mcp-server to deploy.yml (matrix +
+# bootstrap guard), a Deployment that does not exist yet is skipped (notice, not failure) until
+# the operator applies this file once:
+#   kubectl -n copytrade apply -f infra/k8s/68-mcp-server.yaml
+# Every later change then rolls through deploy.yml normally.
+#
+# CLOUDFLARE OBJECTS (out-of-band via CF API — NOT applied by deploy.yml):
+#   - Proxied DNS CNAME: tradeagent-mcp.ridopark.com → the homelab-dashboard tunnel
+#   - Tunnel ingress rule: tradeagent-mcp.ridopark.com → http://mcp-server.copytrade.svc.cluster.local:8000
+#   - NOT added to the dashboard's Cloudflare Access application
+#   See docs/ops/mcp-remote-gateway-runbook.md, Step 7.
+#
+# KILL SWITCH (fastest — takes effect within one pod restart):
+#   kubectl -n copytrade set env deploy/mcp-server OMT_GATEWAY_DISABLED=true
+#   kubectl -n copytrade rollout status deploy/mcp-server
+#   NOTE: also edit this manifest and commit so a later CI roll does not re-enable (darkpool precedent).
+#
+# DB ROLE. mcp_gateway is created NOLOGIN in V18. At enablement the operator sets its password
+# with psql's \password (never as a literal in a SQL statement or a shell command) and then
+# ALTER ROLE mcp_gateway LOGIN. See the runbook, Step 4.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: copytrade
+  labels:
+    app: mcp-server
+spec:
+  selector:
+    app: mcp-server
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: copytrade
+  labels:
+    app: mcp-server
+spec:
+  replicas: 1
+  # Recreate: stateless_http=True means no session affinity needed, but a brief offline window
+  # during a roll is preferable to two pods trying to serve the same PKCE flows concurrently
+  # (rate-limit buckets and CIMD cache are in-process).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-server
+          image: ghcr.io/ridopark/oh-my-tradeagent-mcp-server:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # KILL SWITCH — set to "true" to 503 all /mcp and OAuth routes without a code change.
+            # To enable: kubectl set env deploy/mcp-server OMT_GATEWAY_DISABLED=false
+            # AND edit this manifest so a later CI roll does not re-darken (darkpool-collector precedent).
+            - name: OMT_GATEWAY_DISABLED
+              value: "true"
+
+            # Public base URL (D2). Used as the OAuth issuer, resource indicator, and consent
+            # callback prefix. Changing this after clients have registered requires re-consent.
+            - name: OMT_PUBLIC_URL
+              value: "https://tradeagent-mcp.ridopark.com"
+
+            # In-cluster BFF for read-only tool calls via delegated assertions.
+            - name: OMT_BFF_URL
+              value: "http://tenant-dashboard-bff:8083"
+
+            # asyncpg DSN — no password in the URL; password is passed as a kwarg from
+            # MCP_GATEWAY_DB_PASSWORD. mcp_gateway is created NOLOGIN in V18; set a password
+            # at enablement (see §DB role in the header comment).
+            - name: OMT_GATEWAY_DB_URL
+              value: "postgresql://mcp_gateway@postgres:5432/dashboard"
+
+            # Trusted reverse-proxy CIDRs. When a request's socket peer is inside this range,
+            # CF-Connecting-IP is trusted for rate-limit keying. Set to the k3s pod CIDR because
+            # the NetworkPolicy below restricts ingress to cloudflared pods only.
+            - name: OMT_TRUSTED_PROXY_CIDRS
+              value: "10.42.0.0/16"
+
+            # Ed25519 private key PEM. Required even in disabled mode (validated at startup).
+            # Provision it in dashboard-secrets before applying this manifest (runbook Step 1).
+            # Deliberately NOT optional: a missing key shows as CreateContainerConfigError naming
+            # the key, rather than a crash loop.
+            - name: MCP_GATEWAY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: MCP_GATEWAY_SIGNING_KEY
+
+            # Production vars — optional: true so the pod boots in disabled mode without them.
+            # They are required (exit 2) when OMT_GATEWAY_DISABLED is not "true".
+            - name: MCP_GATEWAY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: MCP_GATEWAY_DB_PASSWORD
+                  optional: true
+
+            # Reuses the dashboard's Google OAuth client. Add the gateway's callback
+            # (https://tradeagent-mcp.ridopark.com/oauth/google/callback) as an authorised
+            # redirect URI in the Google console before enabling. See the runbook, Step 6.
+            - name: OMT_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_GOOGLE_ID
+                  optional: true
+            - name: OMT_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: AUTH_GOOGLE_SECRET
+                  optional: true
+
+          # /healthz is always 200 when the process is up. /readyz returns 503 when disabled
+          # or when the DB store is unreachable. Using /healthz for readiness so the pod
+          # becomes Ready in disabled mode (see the READINESS PROBE DECISION comment at the top).
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # The runtime stage uses readOnlyRootFilesystem: true, so a writable /tmp is not needed.
+          # uvicorn writes no files; asyncpg writes no files. No volume mounts required.
+---
+# Restrict ingress to the gateway to cloudflared pods only. The CloudFlare tunnel connector
+# (60-cloudflared.yaml) is the sole public entry point; no other pod in the namespace should
+# be able to call /mcp or the OAuth endpoints directly.
+#
+# Note: k3s's NetworkPolicy controller (kube-router) permits health-probe traffic from the
+# hosting node, so the kubelet readiness/liveness probes on 8000 work without an explicit rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-server-allow-cloudflared
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# ADDITIVE ingress rule for the BFF — a sibling of the darkpool-collector grant (66) and the
+# flow-collector grant (67). Kept as its OWN object so deleting the mcp-server deployment
+# also deletes exactly this policy. NetworkPolicies selecting the same pod are UNIONed, not
+# overridden, so this grants mcp-server -> BFF:8083 WITHOUT touching
+# `tenant-dashboard-bff-allow-dashboard-only` in 58-tenant-dashboard-bff.yaml.
+#
+# The mcp-server calls the BFF to serve tool requests (delegated assertions via
+# DelegatedAssertionAuthenticator, PR 1). No other path from the gateway reaches the BFF.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-mcp-server
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-server
+      ports:
+        - protocol: TCP
+          port: 8083
