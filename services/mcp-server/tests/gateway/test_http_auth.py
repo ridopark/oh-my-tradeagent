@@ -110,24 +110,9 @@ async def test_mcp_revokedGrant_is401():
 
 # ---------------------------------------------------------------------------
 # Test 3: resource indicator
+# (RFC 8707 resource-column check removed: V17 mcp_oauth_access_token has no
+#  resource column, so the check never fires in production — item 8 fix)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_mcp_wrongResourceIndicator_is401():
-    """A token whose resource field points to a different resource is rejected."""
-    app, store = make_app(return_store=True)
-    seed_token(store, "res-tok", resource="https://other-server.example.com/mcp")
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="https://tradeagent-mcp.ridopark.com",
-    ) as client:
-        resp = await client.post(
-            "/mcp",
-            json={},
-            headers={"Authorization": "Bearer res-tok"},
-        )
-    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

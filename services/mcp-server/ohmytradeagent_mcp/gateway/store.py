@@ -153,6 +153,15 @@ class OAuthStore(Protocol):
         """Revoke a grant by its id."""
         ...
 
+    async def consume_code(self, code: str) -> bool:
+        """Atomically mark *code* as consumed.
+
+        Returns True when this call performed the marking (first use).
+        Returns False when already consumed — concurrent double-use detected.
+        The caller must revoke the grant when this returns False.
+        """
+        ...
+
     async def sweep_expired_clients(self) -> None:
         """Remove expired-and-never-used DCR clients."""
         ...
@@ -375,11 +384,15 @@ class InMemoryStore:
         """Return the code record, or None."""
         return self._codes.get(code)
 
-    async def consume_code(self, code: str) -> None:
-        """Mark a code as consumed (single-use enforcement)."""
+    async def consume_code(self, code: str) -> bool:
+        """Atomically mark *code* as consumed; returns True on first consume, False if already consumed."""
         rec = self._codes.get(code)
-        if rec is not None:
-            rec.consumed_at = time.time()
+        if rec is None:
+            return False
+        if rec.consumed_at is not None:
+            return False
+        rec.consumed_at = time.time()
+        return True
 
     async def put_refresh_token(self, rt: RefreshTokenRecord) -> None:
         """Store a refresh token."""

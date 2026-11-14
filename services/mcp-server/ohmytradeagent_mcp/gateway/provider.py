@@ -30,6 +30,7 @@ from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
     RefreshToken,
+    RegistrationError,
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -94,9 +95,26 @@ class OmtAuthorizationServerProvider:
         return await self._store.get_client_record(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        """Validate redirect URIs then save the client."""
+        """Validate redirect URIs and auth method, then save the client.
+
+        Only ``token_endpoint_auth_method: none`` is accepted (public PKCE
+        clients).  Confidential clients that request any other method are
+        rejected with ``invalid_client_metadata``.
+        """
         for uri in client_info.redirect_uris:
             validate_redirect_uri(str(uri))
+
+        auth_method = client_info.token_endpoint_auth_method or "none"
+        if auth_method != "none":
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description=(
+                    f"token_endpoint_auth_method must be 'none'; "
+                    f"got {auth_method!r}.  This gateway only supports "
+                    f"public PKCE clients."
+                ),
+            )
+
         # Sweep expired-never-used clients before inserting
         await self._store.sweep_expired_clients()
         await self._store.put_client(client_info)
@@ -171,11 +189,25 @@ class OmtAuthorizationServerProvider:
         authorization_code: AuthorizationCode,
     ) -> OAuthToken:
         """Mark code consumed, mint access + refresh tokens, return OAuthToken."""
-        await self._store.consume_code(authorization_code.code)
+        consumed = await self._store.consume_code(authorization_code.code)
+        if not consumed:
+            # Concurrent double-use — revoke the grant
+            code_rec = await self._store.get_code(authorization_code.code)
+            if code_rec:
+                await self._store.revoke_grant_by_id(code_rec.grant_id)
+            raise TokenError(
+                error="invalid_grant",
+                error_description="authorization code already consumed",
+            )
 
         # Retrieve grant to get the tenant list
         code_rec = await self._store.get_code(authorization_code.code)
-        grant_id = code_rec.grant_id if code_rec else ""
+        if code_rec is None:
+            raise TokenError(
+                error="invalid_grant",
+                error_description="authorization code not found",
+            )
+        grant_id = code_rec.grant_id
         grant = await self._store.get_grant(grant_id)
         tenants = grant.tenants if grant else []
 
@@ -263,19 +295,21 @@ class OmtAuthorizationServerProvider:
         grant = await self._store.get_grant(grant_id)
         tenants = grant.tenants if grant else []
 
-        # Atomic rotation: returns False on concurrent double-refresh reuse
-        rotated = await self._store.rotate_refresh_token(refresh_token.token, "")
+        # Generate the new refresh token FIRST so its hash can be stored in
+        # replaced_by_hash by the atomic rotation (audit correlation).
+        new_access = secrets.token_hex(32)
+        new_refresh = secrets.token_hex(32)
+        now = int(time.time())
+
+        # Atomic rotation: returns False on concurrent double-refresh reuse.
+        # Pass new_refresh so replaced_by_hash stores the successor's hash.
+        rotated = await self._store.rotate_refresh_token(refresh_token.token, new_refresh)
         if not rotated:
             await self._store.revoke_grant_by_id(old_record.grant_id)
             raise TokenError(
                 error="invalid_grant",
                 error_description="refresh token reuse detected",
             )
-
-        # Mint new pair
-        new_access = secrets.token_hex(32)
-        new_refresh = secrets.token_hex(32)
-        now = int(time.time())
 
         await self._store.store_access_token(
             token=new_access,
@@ -320,9 +354,6 @@ class OmtAuthorizationServerProvider:
             return None
 
         if rec.revoked_at is not None:
-            return None
-
-        if rec.resource is not None and rec.resource != self._resource:
             return None
 
         # Membership re-check on every request

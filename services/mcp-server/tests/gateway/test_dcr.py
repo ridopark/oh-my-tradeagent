@@ -21,7 +21,10 @@ def _make_client():
 
 @pytest.mark.asyncio
 async def test_register_httpsRedirect_ok_jsonBody():
-    """HTTPS redirect URI is accepted; JSON body is required (not form-encoded)."""
+    """HTTPS redirect URI is accepted; JSON body is required (not form-encoded).
+
+    Public clients (token_endpoint_auth_method=none) have no client_secret.
+    """
     async with _make_client() as client:
         resp = await client.post(
             "/register",
@@ -30,12 +33,37 @@ async def test_register_httpsRedirect_ok_jsonBody():
                 "redirect_uris": ["https://example.com/callback"],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
             },
         )
     assert resp.status_code == 201, resp.text
     data = resp.json()
     assert "client_id" in data
-    assert "client_secret" in data
+    # Public clients (none auth method) carry no server-issued secret.
+    assert not data.get("client_secret"), "none-auth client must not receive a secret"
+
+
+@pytest.mark.asyncio
+async def test_register_nonNoneAuthMethod_is400_invalidClientMetadata():
+    """token_endpoint_auth_method other than 'none' must be rejected.
+
+    RED: currently returns 201 (the check is not in place yet).
+    GREEN: provider.register_client raises RegistrationError for non-none methods.
+    """
+    async with _make_client() as client:
+        resp = await client.post(
+            "/register",
+            json={
+                "client_name": "Confidential App",
+                "redirect_uris": ["https://example.com/callback"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "client_secret_post",
+            },
+        )
+    assert resp.status_code == 400, f"Expected 400 for non-none auth method, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    assert data.get("error") == "invalid_client_metadata", data
 
 
 @pytest.mark.asyncio
@@ -55,6 +83,7 @@ async def test_register_loopbackRedirects_ok():
                     "redirect_uris": [uri],
                     "grant_types": ["authorization_code"],
                     "response_types": ["code"],
+                    "token_endpoint_auth_method": "none",
                 },
             )
         assert resp.status_code == 201, f"Expected 201 for {uri!r}: {resp.text}"
@@ -140,7 +169,7 @@ async def test_register_unusedClientExpires_afterSweep():
         transport=httpx.ASGITransport(app=app),
         base_url=PUBLIC_URL,
     ) as client:
-        # Register a client
+        # Register a client (public PKCE client, none auth method)
         resp = await client.post(
             "/register",
             json={
@@ -148,6 +177,7 @@ async def test_register_unusedClientExpires_afterSweep():
                 "redirect_uris": ["https://example.com/cb"],
                 "grant_types": ["authorization_code"],
                 "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
             },
         )
         assert resp.status_code == 201
@@ -169,6 +199,7 @@ async def test_register_unusedClientExpires_afterSweep():
                 "redirect_uris": ["https://example.com/cb2"],
                 "grant_types": ["authorization_code"],
                 "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
             },
         )
 

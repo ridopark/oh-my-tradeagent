@@ -40,7 +40,11 @@ async def register_client(
     redirect_uris: list[str] | None = None,
     client_name: str = "Test Client",
 ) -> dict:
-    """Register a DCR client and return the full response JSON."""
+    """Register a public (PKCE) DCR client and return the full response JSON.
+
+    Only token_endpoint_auth_method=none is accepted by this gateway; public
+    clients have no server-issued client_secret.
+    """
     if redirect_uris is None:
         redirect_uris = ["https://example.com/callback"]
     resp = await client.post(
@@ -51,7 +55,7 @@ async def register_client(
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "scope": "read",
-            "token_endpoint_auth_method": "client_secret_post",
+            "token_endpoint_auth_method": "none",
         },
     )
     assert resp.status_code == 201, f"DCR failed: {resp.status_code} {resp.text}"
@@ -170,7 +174,7 @@ async def do_oauth_flow(
         )
         code = extract_code_from_location(consent_resp.headers["location"])
 
-        # 6. Exchange code for tokens
+        # 6. Exchange code for tokens (none auth method: client_id only, no secret)
         token_resp = await client.post(
             "/token",
             data={
@@ -178,7 +182,6 @@ async def do_oauth_flow(
                 "code": code,
                 "redirect_uri": redirect_uri,
                 "client_id": client_id,
-                "client_secret": client_secret,
                 "code_verifier": code_verifier,
             },
             headers={"Host": "tradeagent-mcp.ridopark.com"},
