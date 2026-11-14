@@ -22,6 +22,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -107,12 +108,17 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   private final String optionsChatIngestToken;
   // sha256-lowercase-hex -> tenant_id. Empty means no MCP tokens are configured (fail-closed).
   private final Map<String, String> mcpTokenMap;
+  // null when bff.mcp-delegated.enabled=false (the default). Non-null only when the bean is
+  // constructed — the @ConditionalOnProperty on DelegatedAssertionAuthenticator guarantees the key
+  // is valid and the reader is wired before this filter sees it.
+  @Nullable private final DelegatedAssertionAuthenticator delegated;
 
   public ServiceTokenFilter(
       @Value("${bff.service-token}") String sharedToken,
       @Value("${options-chat.ingest-token:}") String optionsChatIngestToken,
       @Value("${bff.mcp-read-tokens:}") String mcpReadTokens,
-      Environment environment) {
+      Environment environment,
+      @Nullable DelegatedAssertionAuthenticator delegated) {
     if (INSECURE_DEFAULT_TOKEN.equals(sharedToken)
         && environment.acceptsProfiles(Profiles.of("prod"))) {
       // Fail fast at boot rather than run with a well-known token (the k8s Deployment sets the
@@ -124,6 +130,7 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     this.sharedToken = sharedToken;
     this.optionsChatIngestToken = optionsChatIngestToken;
     this.mcpTokenMap = parseMcpReadTokens(mcpReadTokens);
+    this.delegated = delegated;
   }
 
   /**
@@ -233,38 +240,86 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
         }
       }
       if (boundTenant != null) {
-        String method = request.getMethod();
-        if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
-          forbidden(response);
-          return;
-        }
-        if (!MCP_ALLOWLIST.contains(request.getRequestURI())) {
-          forbidden(response);
-          return;
-        }
-        // X-Tenant-Id: if present and non-blank, it must match the bound tenant.
-        // Absent or blank → the wrapper will inject it; forged → 403.
-        String callerTenant = request.getHeader("X-Tenant-Id");
-        if (callerTenant != null && !callerTenant.isBlank() && !callerTenant.equals(boundTenant)) {
-          forbidden(response);
-          return;
-        }
-        String tokenId = presentedHash.substring(0, 12);
-        log.info(
-            "mcp read tenant={} token_id={} method={} path={}",
-            boundTenant,
-            tokenId,
-            method,
-            request.getRequestURI());
-        HttpServletRequest wrapped = new McpRequestWrapper(request, boundTenant);
-        wrapped.setAttribute(MCP_TOKEN_ID_ATTRIBUTE, tokenId);
-        chain.doFilter(wrapped, response);
+        applyMcpReadRules(
+            request, response, chain, boundTenant, presentedHash.substring(0, 12), null);
         return;
+      }
+    }
+
+    // Rule 5b: delegated assertion credential class. Only consulted when the authenticator bean is
+    // present (bff.mcp-delegated.enabled=true). NOT_AN_ASSERTION means the bearer did not look like
+    // an assertion at all — fall through to rule 6 so the error body is 401 / "unauthorized"
+    // exactly as before.
+    if (delegated != null) {
+      DelegatedAssertionAuthenticator.Result r = delegated.authenticate(presented);
+      switch (r.status()) {
+        case NOT_AN_ASSERTION:
+          break; // fall through to rule 6
+        case INVALID:
+          reject(response);
+          return;
+        case NOT_MEMBER:
+          forbidden(response);
+          return;
+        case OK:
+          applyMcpReadRules(request, response, chain, r.tenant(), r.credentialId(), r.clientId());
+          return;
       }
     }
 
     // Rule 6: unknown or unrecognised token → 401.
     reject(response);
+  }
+
+  /**
+   * Shared enforcement path for rule 5 (static MCP token) and rule 5b (delegated assertion): method
+   * gate, allowlist, forged-tenant check, log, wrapper, attribute, {@code chain.doFilter}. The
+   * observable behaviour for rule 5 ({@code clientId == null}) is byte-for-byte identical to before
+   * the extraction — the 70 pre-existing tests pin it.
+   */
+  private void applyMcpReadRules(
+      HttpServletRequest request,
+      HttpServletResponse response,
+      FilterChain chain,
+      String boundTenant,
+      String credentialId,
+      @Nullable String clientId)
+      throws ServletException, IOException {
+    String method = request.getMethod();
+    if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
+      forbidden(response);
+      return;
+    }
+    if (!MCP_ALLOWLIST.contains(request.getRequestURI())) {
+      forbidden(response);
+      return;
+    }
+    // X-Tenant-Id: if present and non-blank, it must match the bound tenant.
+    // Absent or blank → the wrapper will inject it; forged → 403.
+    String callerTenant = request.getHeader("X-Tenant-Id");
+    if (callerTenant != null && !callerTenant.isBlank() && !callerTenant.equals(boundTenant)) {
+      forbidden(response);
+      return;
+    }
+    if (clientId != null) {
+      log.info(
+          "mcp read tenant={} token_id={} client_id={} method={} path={}",
+          boundTenant,
+          credentialId,
+          clientId,
+          method,
+          request.getRequestURI());
+    } else {
+      log.info(
+          "mcp read tenant={} token_id={} method={} path={}",
+          boundTenant,
+          credentialId,
+          method,
+          request.getRequestURI());
+    }
+    HttpServletRequest wrapped = new McpRequestWrapper(request, boundTenant);
+    wrapped.setAttribute(MCP_TOKEN_ID_ATTRIBUTE, credentialId);
+    chain.doFilter(wrapped, response);
   }
 
   private static boolean isIngestPath(String path) {

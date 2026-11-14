@@ -7,8 +7,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.sql.SQLException;
+import java.time.Instant;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
+import org.jooq.DSLContext;
+import org.jooq.Record;
+import org.jooq.Result;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.tools.jdbc.MockConnection;
+import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.mock.web.MockFilterChain;
@@ -20,7 +31,7 @@ class ServiceTokenFilterTest {
   private static final String TOKEN = "s3cr3t-shared-token";
   private static final String INGEST_TOKEN = "s3cr3t-options-chat-ingest";
   private final ServiceTokenFilter filter =
-      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment());
+      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
 
   @Test
   void missingAuthorizationHeader_is401_andDoesNotInvokeChain() throws Exception {
@@ -70,7 +81,8 @@ class ServiceTokenFilterTest {
   void wellKnownDefaultToken_underProdProfile_failsBoot() {
     MockEnvironment prod = new MockEnvironment();
     prod.setActiveProfiles("prod");
-    assertThatThrownBy(() -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, "", prod))
+    assertThatThrownBy(
+            () -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, "", prod, null))
         .isInstanceOf(IllegalStateException.class);
   }
 
@@ -78,7 +90,8 @@ class ServiceTokenFilterTest {
   void wellKnownDefaultToken_withoutProdProfile_isAllowedForLocalDev() {
     assertThatCode(
             () ->
-                new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, "", new MockEnvironment()))
+                new ServiceTokenFilter(
+                    "dev-shared-token", INGEST_TOKEN, "", new MockEnvironment(), null))
         .doesNotThrowAnyException();
   }
 
@@ -222,7 +235,8 @@ class ServiceTokenFilterTest {
 
   @Test
   void darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
-    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment());
+    ServiceTokenFilter unprovisioned =
+        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/darkpool/ingest");
     req.addHeader("Authorization", "Bearer ");
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -309,7 +323,8 @@ class ServiceTokenFilterTest {
   @Test
   void flowIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
     // Mirrors darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401.
-    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment());
+    ServiceTokenFilter unprovisioned =
+        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/flow/ingest");
     req.addHeader("Authorization", "Bearer ");
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -430,7 +445,8 @@ class ServiceTokenFilterTest {
   @Test
   void ingestRoute_whenIngestTokenIsUnprovisioned_is401_evenWithAnEmptyBearer() throws Exception {
     // Fail-closed: a blank configured token must match NOTHING, not "any empty bearer".
-    ServiceTokenFilter unprovisioned = new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment());
+    ServiceTokenFilter unprovisioned =
+        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
     MockHttpServletRequest req =
         new MockHttpServletRequest("POST", "/internal/options-chat/ingest");
     req.addHeader("Authorization", "Bearer ");
@@ -512,7 +528,8 @@ class ServiceTokenFilterTest {
       "bb705d371dc75cfce9616f51628261d27dd939fa509f59988902d3f591112556";
 
   private final ServiceTokenFilter mcpFilter =
-      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, MCP_ACME_HASH + ":acme", new MockEnvironment());
+      new ServiceTokenFilter(
+          TOKEN, INGEST_TOKEN, MCP_ACME_HASH + ":acme", new MockEnvironment(), null);
 
   @Test
   void mcpToken_allowlistedGet_passesThrough_withBoundTenantInjected() throws Exception {
@@ -770,7 +787,7 @@ class ServiceTokenFilterTest {
   void mcpTokens_emptyMap_is401ForAnMcpLookingToken() throws Exception {
     // Filter constructed with no MCP tokens — the acme token is unknown.
     ServiceTokenFilter emptyMcp =
-        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment());
+        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -858,7 +875,8 @@ class ServiceTokenFilterTest {
             TOKEN,
             INGEST_TOKEN,
             MCP_ACME_HASH + ":acme," + MCP_BETA_HASH + ":beta",
-            new MockEnvironment());
+            new MockEnvironment(),
+            null);
 
     // Beta token reaches the chain as "beta".
     MockHttpServletRequest betaReq = new MockHttpServletRequest("GET", "/api/positions");
@@ -894,7 +912,7 @@ class ServiceTokenFilterTest {
     };
     for (String bad : malformed) {
       assertThatThrownBy(
-              () -> new ServiceTokenFilter(TOKEN, INGEST_TOKEN, bad, prod),
+              () -> new ServiceTokenFilter(TOKEN, INGEST_TOKEN, bad, prod, null),
               "expected IllegalStateException for entry: " + bad)
           .isInstanceOf(IllegalStateException.class);
     }
@@ -904,8 +922,490 @@ class ServiceTokenFilterTest {
   void malformedMcpTokenEntry_failsBoot_withoutProdProfileToo() {
     // Records that the boot check is unconditional (not prod-only).
     assertThatThrownBy(
-            () -> new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "nothex:acme", new MockEnvironment()))
+            () ->
+                new ServiceTokenFilter(
+                    TOKEN, INGEST_TOKEN, "nothex:acme", new MockEnvironment(), null))
         .isInstanceOf(IllegalStateException.class);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Delegated assertion credential class (Step 1, Seam A).
+  // The jOOQ MockDataProvider-backed DashboardMembershipReader returns one row (member), zero rows
+  // (not member), or throws — without touching a real database. The DelegatedAssertionAuthenticator
+  // is constructed directly (not via Spring) using
+  // DelegatedAssertionTestKeys.PRIMARY_PUBLIC_KEY_B64.
+  // ---------------------------------------------------------------------------------------------
+
+  // sha256("google:sub-1") first 12 hex — computed independently with sha256sum.
+  private static final String DLG_CREDENTIAL_ID = "dlg-daf0e67a0269";
+  private static final String DLG_SUB = "sub-1";
+  private static final String DLG_TENANT = "acme";
+
+  private static DashboardMembershipReader memberReader() {
+    return new DashboardMembershipReader(mockDslReturning(1));
+  }
+
+  private static DashboardMembershipReader nonMemberReader() {
+    return new DashboardMembershipReader(mockDslReturning(0));
+  }
+
+  private static DashboardMembershipReader throwingReader() {
+    return new DashboardMembershipReader(
+        DSL.using(
+            new MockConnection(
+                ctx -> {
+                  throw new SQLException("simulated DB failure");
+                }),
+            SQLDialect.POSTGRES));
+  }
+
+  private static DSLContext mockDslReturning(int rows) {
+    return DSL.using(
+        new MockConnection(
+            ctx -> {
+              DSLContext helper = DSL.using(SQLDialect.POSTGRES);
+              Result<Record> result = helper.newResult();
+              for (int i = 0; i < rows; i++) {
+                result.add(helper.newRecord());
+              }
+              return new MockResult[] {new MockResult(rows, result)};
+            }),
+        SQLDialect.POSTGRES);
+  }
+
+  private static DelegatedAssertionAuthenticator authenticator(DashboardMembershipReader reader) {
+    return new DelegatedAssertionAuthenticator(
+        DelegatedAssertionTestKeys.PRIMARY_PUBLIC_KEY_B64, reader);
+  }
+
+  private static ServiceTokenFilter filterWithDelegated(DashboardMembershipReader reader) {
+    return new ServiceTokenFilter(
+        TOKEN, INGEST_TOKEN, "", new MockEnvironment(), authenticator(reader));
+  }
+
+  @Test
+  void delegated_valid_allowlistedGet_passesAsBoundTenant() throws Exception {
+    // Reader → member. Valid assertion for (google, sub-1, acme) on an allowlisted GET.
+    // Downstream sees X-Tenant-Id=acme, no X-Operator-Id, attribute = dlg-<12hex of sha256>.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + assertion);
+    req.addHeader("X-Operator-Id", "op@example.com");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filterWithDelegated(memberReader()).doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isNotNull();
+    HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+    assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo(DLG_TENANT);
+    assertThat(downstream.getHeader("X-Operator-Id")).isNull();
+    assertThat(downstream.getAttribute(ServiceTokenFilter.MCP_TOKEN_ID_ATTRIBUTE))
+        .isEqualTo(DLG_CREDENTIAL_ID);
+  }
+
+  @Test
+  void delegated_membershipAbsent_is403() throws Exception {
+    // Reader → not member. Chain not invoked.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filterWithDelegated(nonMemberReader())
+        .doFilter(
+            new MockHttpServletRequest("GET", "/api/positions") {
+              {
+                addHeader("Authorization", "Bearer " + assertion);
+              }
+            },
+            res,
+            chain);
+
+    assertThat(res.getStatus()).isEqualTo(403);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void delegated_readerThrows_is403() throws Exception {
+    // Reader throws (DB error) → fail-closed → NOT_MEMBER → 403.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filterWithDelegated(throwingReader())
+        .doFilter(
+            new MockHttpServletRequest("GET", "/api/positions") {
+              {
+                addHeader("Authorization", "Bearer " + assertion);
+              }
+            },
+            res,
+            chain);
+
+    assertThat(res.getStatus()).isEqualTo(403);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void delegated_expired_is401() throws Exception {
+    // exp <= now → INVALID → 401.
+    long now = Instant.now().getEpochSecond();
+    Map<String, Object> expiredClaims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    expiredClaims.put("exp", now - 1);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), expiredClaims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_iatInFuture_is401() throws Exception {
+    // iat > now + 30 → INVALID → 401.
+    long now = Instant.now().getEpochSecond();
+    Map<String, Object> futureClaims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    futureClaims.put("iat", now + 60);
+    futureClaims.put("exp", now + 120);
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), futureClaims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_lifetimeOver300s_is401() throws Exception {
+    // exp - iat > 300 → INVALID → 401.
+    long now = Instant.now().getEpochSecond();
+    Map<String, Object> longLifetimeClaims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    longLifetimeClaims.put("iat", now - 10);
+    longLifetimeClaims.put("exp", now + 295); // 305s lifetime
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(), longLifetimeClaims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_wrongAudience_is401() throws Exception {
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("aud", "other-service");
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_wrongIssuer_is401() throws Exception {
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("iss", "malicious-gateway");
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_wrongProvider_is401() throws Exception {
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("provider", "github");
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_badTenantCharset_is401() throws Exception {
+    Map<String, Object> claims =
+        new HashMap<>(DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    claims.put("tenant", "tenant with spaces!");
+    String assertion =
+        DelegatedAssertionTestKeys.build(DelegatedAssertionTestKeys.validHeader(), claims);
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_wrongKey_is401() throws Exception {
+    // Signed with the secondary private key; the authenticator has the primary public key.
+    String assertion =
+        DelegatedAssertionTestKeys.buildWithSecondaryKey(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_tamperedPayload_is401() throws Exception {
+    // Signature is valid over the original payload; we replace it with a different tenant.
+    Map<String, Object> legitimate = DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT);
+    Map<String, Object> replacement = new HashMap<>(legitimate);
+    replacement.put("tenant", "beta");
+    String tampered =
+        DelegatedAssertionTestKeys.buildTamperedPayload(
+            DelegatedAssertionTestKeys.validHeader(), legitimate, replacement);
+
+    assertThat(runWithDelegated(tampered, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_algNone_is401() throws Exception {
+    // alg: "none" → INVALID (alg pin guard).
+    Map<String, Object> header = new HashMap<>(DelegatedAssertionTestKeys.validHeader());
+    header.put("alg", "none");
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            header, DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_algHS256_is401() throws Exception {
+    // alg: "HS256" (classic confusion attack header) → INVALID.
+    Map<String, Object> header = new HashMap<>(DelegatedAssertionTestKeys.validHeader());
+    header.put("alg", "HS256");
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            header, DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_algRS256Header_is401() throws Exception {
+    // alg: "RS256" → INVALID.
+    Map<String, Object> header = new HashMap<>(DelegatedAssertionTestKeys.validHeader());
+    header.put("alg", "RS256");
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            header, DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+
+    assertThat(runWithDelegated(assertion, "/api/positions", "GET").getStatus()).isEqualTo(401);
+  }
+
+  @Test
+  void delegated_writeMethods_are403() throws Exception {
+    // Non-GET/HEAD methods → 403 (method gate in applyMcpReadRules).
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    ServiceTokenFilter f = filterWithDelegated(memberReader());
+
+    for (String method : new String[] {"POST", "PUT", "DELETE", "PATCH"}) {
+      MockHttpServletRequest req = new MockHttpServletRequest(method, "/api/positions");
+      req.addHeader("Authorization", "Bearer " + assertion);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = new MockFilterChain();
+
+      f.doFilter(req, res, chain);
+
+      assertThat(res.getStatus()).as(method).isEqualTo(403);
+      assertThat(chain.getRequest()).as(method + " chain not invoked").isNull();
+    }
+  }
+
+  @Test
+  void delegated_nonAllowlistedGet_is403() throws Exception {
+    // Allowlisted by shared token but NOT in MCP_ALLOWLIST → 403.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+
+    assertThat(runWithDelegated(assertion, "/api/admin/tenants", "GET").getStatus()).isEqualTo(403);
+  }
+
+  @Test
+  void delegated_forgedOtherTenantHeader_is403() throws Exception {
+    // Assertion says tenant=acme; request carries X-Tenant-Id: beta → 403.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + assertion);
+    req.addHeader("X-Tenant-Id", "beta");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+
+    filterWithDelegated(memberReader()).doFilter(req, res, new MockFilterChain());
+
+    assertThat(res.getStatus()).isEqualTo(403);
+  }
+
+  @Test
+  void delegated_sameTenantHeader_isAllowed() throws Exception {
+    // Assertion says tenant=acme; request carries X-Tenant-Id: acme → allowed.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + assertion);
+    req.addHeader("X-Tenant-Id", DLG_TENANT);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    filterWithDelegated(memberReader()).doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isNotNull();
+  }
+
+  @Test
+  void delegated_onIngestRoutes_is401() throws Exception {
+    // Rule 3 (ingest prefix) runs before rule 5b: a delegated assertion on an ingest path → 401.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    ServiceTokenFilter f = filterWithDelegated(memberReader());
+
+    for (String[] c :
+        new String[][] {
+          {"POST", "/internal/options-chat/ingest"},
+          {"GET", "/internal/options-chat/messages"},
+          {"POST", "/internal/darkpool/ingest"},
+          {"POST", "/internal/flow/ingest"},
+          {"GET", "/internal/flow/watchlist"}
+        }) {
+      MockHttpServletRequest req = new MockHttpServletRequest(c[0], c[1]);
+      req.addHeader("Authorization", "Bearer " + assertion);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = new MockFilterChain();
+
+      f.doFilter(req, res, chain);
+
+      assertThat(res.getStatus()).as(c[0] + " " + c[1]).isEqualTo(401);
+      assertThat(chain.getRequest()).as(c[0] + " " + c[1] + " chain not invoked").isNull();
+    }
+  }
+
+  @Test
+  void delegated_encodedPaths_are401() throws Exception {
+    // Rule 1 (suspicious path) runs before rule 5b.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    ServiceTokenFilter f = filterWithDelegated(memberReader());
+
+    for (String path :
+        new String[] {"/api/%2e%2e/api/positions", "/api/positions/..;a", "/api//positions"}) {
+      MockHttpServletRequest req = new MockHttpServletRequest("GET", path);
+      req.addHeader("Authorization", "Bearer " + assertion);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+
+      f.doFilter(req, res, new MockFilterChain());
+
+      assertThat(res.getStatus()).as(path).isEqualTo(401);
+    }
+  }
+
+  @Test
+  void delegated_disabled_is401() throws Exception {
+    // null authenticator → rule 5b skipped; a valid assertion is an unknown token → 401.
+    String assertion =
+        DelegatedAssertionTestKeys.build(
+            DelegatedAssertionTestKeys.validHeader(),
+            DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
+    // Filter built with null authenticator (the default; bff.mcp-delegated.enabled=false).
+    ServiceTokenFilter disabledFilter =
+        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + assertion);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+
+    disabledFilter.doFilter(req, res, new MockFilterChain());
+
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(res.getContentAsString()).isEqualTo("{\"error\":\"unauthorized\"}");
+  }
+
+  @Test
+  void staticMcpToken_stillWorks_whenDelegatedEnabled() throws Exception {
+    // Static MCP token is unaffected by the delegated authenticator.
+    ServiceTokenFilter f =
+        new ServiceTokenFilter(
+            TOKEN,
+            INGEST_TOKEN,
+            MCP_ACME_HASH + ":acme",
+            new MockEnvironment(),
+            authenticator(memberReader()));
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    f.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(((HttpServletRequest) chain.getRequest()).getHeader("X-Tenant-Id"))
+        .isEqualTo("acme");
+    assertThat(chain.getRequest().getAttribute(ServiceTokenFilter.MCP_TOKEN_ID_ATTRIBUTE))
+        .isEqualTo(MCP_ACME_TOKEN_ID);
+  }
+
+  @Test
+  void sharedToken_unchanged_whenDelegatedEnabled() throws Exception {
+    // Shared token is unaffected by the delegated authenticator.
+    ServiceTokenFilter f =
+        new ServiceTokenFilter(
+            TOKEN, INGEST_TOKEN, "", new MockEnvironment(), authenticator(memberReader()));
+    MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
+    req.addHeader("Authorization", "Bearer " + TOKEN);
+    req.addHeader("X-Tenant-Id", "acme");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+
+    f.doFilter(req, res, chain);
+
+    assertThat(res.getStatus()).isEqualTo(200);
+    assertThat(chain.getRequest()).isSameAs(req); // shared token passes original request unchanged
+  }
+
+  @Test
+  void authenticator_enabledWithEmptyKey_failsBoot() {
+    assertThatThrownBy(() -> new DelegatedAssertionAuthenticator("", memberReader()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("empty");
+  }
+
+  @Test
+  void authenticator_malformedKey_failsBoot() {
+    // "YWJj" decodes to "abc" — valid base64 but not a valid Ed25519 SPKI DER.
+    assertThatThrownBy(() -> new DelegatedAssertionAuthenticator("YWJj", memberReader()))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  // Run helper for delegated tests: builds a filter with a member reader, runs a request.
+  private MockHttpServletResponse runWithDelegated(String assertion, String path, String method)
+      throws ServletException, IOException {
+    ServiceTokenFilter f = filterWithDelegated(memberReader());
+    MockHttpServletRequest req = new MockHttpServletRequest(method, path);
+    req.addHeader("Authorization", "Bearer " + assertion);
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    f.doFilter(req, res, new MockFilterChain());
+    return res;
   }
 
   @Test
@@ -915,7 +1415,7 @@ class ServiceTokenFilterTest {
     assertThatThrownBy(
             () ->
                 new ServiceTokenFilter(
-                    TOKEN, INGEST_TOKEN, "rawsecrettoken123:acme", new MockEnvironment()))
+                    TOKEN, INGEST_TOKEN, "rawsecrettoken123:acme", new MockEnvironment(), null))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("position")
         .hasMessageNotContaining("rawsecrettoken123");
@@ -926,7 +1426,11 @@ class ServiceTokenFilterTest {
     assertThatCode(
             () ->
                 new ServiceTokenFilter(
-                    TOKEN, INGEST_TOKEN, " " + MCP_ACME_HASH + ":acme , ", new MockEnvironment()))
+                    TOKEN,
+                    INGEST_TOKEN,
+                    " " + MCP_ACME_HASH + ":acme , ",
+                    new MockEnvironment(),
+                    null))
         .doesNotThrowAnyException();
   }
 
@@ -937,7 +1441,8 @@ class ServiceTokenFilterTest {
             TOKEN,
             INGEST_TOKEN,
             MCP_ACME_HASH.toUpperCase(Locale.ROOT) + ":acme",
-            new MockEnvironment());
+            new MockEnvironment(),
+            null);
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
     MockHttpServletResponse res = new MockHttpServletResponse();

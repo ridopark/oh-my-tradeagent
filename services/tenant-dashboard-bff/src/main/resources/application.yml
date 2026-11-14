@@ -156,6 +156,21 @@ bff:
   #   echo "BFF_MCP_READ_TOKENS=${hash}:<tenant_id>"
   # Store the token (not the hash) in the client config; store the hash in dashboard-secrets.
   mcp-read-tokens: ${BFF_MCP_READ_TOKENS:}
+  # Dark gate for the MCP delegated-assertion credential class (PLAN-2026-11-13-mcp-remote-oauth.md,
+  # PR 1). Default OFF: both the DelegatedAssertionAuthenticator and the dashboardReadonlyDataSource
+  # beans are absent when enabled=false, so a cluster without the MCP gateway never parses an Ed25519
+  # key and never opens a pool to the dashboard DB via this path. Enabling alone does nothing live:
+  # the BFF_MCP_DELEGATED_ENABLED env var is intentionally NOT set in 58-tenant-dashboard-bff.yaml
+  # (the manifest is RESTART_ONLY); enabling is `kubectl set env ... BFF_MCP_DELEGATED_ENABLED=true`
+  # by the operator after adding the key.
+  mcp-delegated:
+    enabled: ${BFF_MCP_DELEGATED_ENABLED:false}
+    # Ed25519 SPKI DER of the gateway's signing key, base64. Required when enabled=true (empty →
+    # IllegalStateException at boot). Never set a default here — a leaked or mis-pasted key would
+    # silently accept assertions from any holder.
+    # Derive from the gateway's private key PEM:
+    #   openssl pkey -in gateway.pem -pubout -outform DER | base64 -w0
+    public-key: ${BFF_MCP_DELEGATED_PUBLIC_KEY:}
   portfolio:
     # Per-section budget for the concurrent portfolio sub-reads (position-state queries + account
     # snapshots). Part of an ordering invariant that MUST hold or /status 500s instead of degrading:
@@ -203,6 +218,24 @@ bff:
       password: ${DASHBOARD_WRITER_PASSWORD:}
       maximum-pool-size: 2
       minimum-idle: 0
+    # READ-ONLY datasource for the MCP delegated-assertion membership check (connects as the existing
+    # dashboard_readonly role, which V2 already grants SELECT ON dashboard_user). DARK by default:
+    # the beans only exist when bff.mcp-delegated.enabled=true (see DataSourceConfig), so an unset
+    # DASHBOARD_READONLY_PASSWORD in the repo default profile never crashes boot and never opens a
+    # pool via this path.
+    # Env namespace: DASHBOARD_READONLY_* — the same namespace already used by the Flyway placeholder
+    # and the Next.js web app, so the operator does not provision a new password; the SAME
+    # DASHBOARD_READONLY_PASSWORD that the V2 migration's ${dashboard_readonly_password} placeholder
+    # binds is what this pool connects with.
+    # DASHBOARD_READONLY_URL is intentionally separate from the Flyway DASHBOARD_DB_URL so the two
+    # can point at different hosts (e.g. a read replica) without changing the migration target.
+    dashboard-readonly:
+      jdbc-url: ${DASHBOARD_READONLY_URL:jdbc:postgresql://localhost:5432/dashboard}
+      username: ${DASHBOARD_READONLY_USER:dashboard_readonly}
+      password: ${DASHBOARD_READONLY_PASSWORD:}
+      maximum-pool-size: 2
+      minimum-idle: 0
+      read-only: true
 
 server:
   port: ${TENANT_DASHBOARD_BFF_PORT:8083}
