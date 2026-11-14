@@ -325,10 +325,28 @@ jobs:
         run: uv run pytest -q
 
   mcp-server:
-    # Read-only MCP server for external-AI position analysis (#1053). Runs against stub BFFs
-    # only (MockTransport + a local http.server) — no network to the homelab.
+    # Read-only MCP server for external-AI position analysis (#1053/#1060). Runs against stub BFFs
+    # (MockTransport + a local http.server) and a CI-local Postgres — no network to the homelab.
     name: Python mcp-server
     runs-on: ubuntu-latest
+    # Real Postgres for the gateway's PostgresStore contract tests (#1060). The tests create their
+    # own database, apply the BFF's dashboard migrations V1..V18, enable the NOLOGIN mcp_gateway
+    # role with a test password and connect AS that role, so the live column grants are exercised.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OMT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     defaults:
       run:
         working-directory: services/mcp-server
