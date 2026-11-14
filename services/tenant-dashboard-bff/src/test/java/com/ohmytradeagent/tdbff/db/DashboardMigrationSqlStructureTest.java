@@ -566,13 +566,37 @@ class DashboardMigrationSqlStructureTest {
       assertThat(sql).as("V17 creates table %s", t).contains("CREATE TABLE " + t);
     }
 
-    // The grant row that the Connected-AI-apps listing reads (PR 4). Two tables, SELECT only.
+    // Finding 5: client_name column captured at consent time (nullable, stored in the grant row).
+    assertThat(sql).as("V17 mcp_oauth_grant has client_name column").contains("client_name");
+
+    // dashboard_readonly gets COLUMN-LEVEL (not table-level) SELECT on mcp_oauth_grant so the
+    // Next.js pool cannot accidentally read hash/secret columns via SELECT *.
     assertThat(sql)
-        .as("V17 grants SELECT on the two listing tables to dashboard_readonly")
+        .as("V17 grants column-level SELECT on mcp_oauth_grant to dashboard_readonly")
         .containsPattern(
             Pattern.compile(
-                "GRANT\\s+SELECT\\s+ON\\s+mcp_oauth_grant\\s*,\\s*mcp_oauth_client"
+                "GRANT\\s+SELECT\\s*\\([^)]+\\)\\s+ON\\s+mcp_oauth_grant\\s+TO\\s+dashboard_readonly"));
+    // client_name must be in the readonly grant so the listing page can show it.
+    assertThat(sql)
+        .as("V17 includes client_name in the readonly column grant on mcp_oauth_grant")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\([^)]*client_name[^)]*\\)\\s+ON\\s+mcp_oauth_grant"
                     + "\\s+TO\\s+dashboard_readonly"));
+
+    // dashboard_readonly gets COLUMN-LEVEL SELECT on mcp_oauth_client (excludes
+    // client_secret_hash).
+    assertThat(sql)
+        .as("V17 grants column-level SELECT on mcp_oauth_client to dashboard_readonly")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\([^)]+\\)\\s+ON\\s+mcp_oauth_client\\s+TO\\s+dashboard_readonly"));
+
+    // No *_hash column may appear in any GRANT statement targeting dashboard_readonly.
+    assertThat(sql)
+        .as("V17 must not expose any *_hash column to dashboard_readonly")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT[^;]*_hash[^;]*dashboard_readonly", Pattern.CASE_INSENSITIVE));
 
     // No write privilege to dashboard_readonly on any mcp_oauth_* table.
     assertThat(sql)
@@ -582,8 +606,26 @@ class DashboardMigrationSqlStructureTest {
                 "GRANT\\s+[A-Z, ]*(INSERT|UPDATE|DELETE|ALL)[^;]*dashboard_readonly",
                 Pattern.CASE_INSENSITIVE));
 
-    // The revoke path for PR 4: SELECT (WHERE needs it) + UPDATE (the actual write).
-    assertThat(privilegesGrantedOn(sql, "mcp_oauth_grant")).isEqualTo("SELECT, UPDATE");
+    // The revoke path: column-level SELECT on the WHERE columns + column-level UPDATE(revoked_at).
+    assertThat(sql)
+        .as(
+            "V17 grants column-level SELECT on the WHERE columns of mcp_oauth_grant to dashboard_writer")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\([^)]+\\)\\s+ON\\s+mcp_oauth_grant\\s+TO\\s+dashboard_writer"));
+    assertThat(sql)
+        .as("V17 grants column-level UPDATE(revoked_at) on mcp_oauth_grant to dashboard_writer")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+UPDATE\\s*\\(\\s*revoked_at\\s*\\)\\s+ON\\s+mcp_oauth_grant"
+                    + "\\s+TO\\s+dashboard_writer"));
+
+    // No table-level SELECT on mcp_oauth_grant to dashboard_writer (would expose hash columns).
+    assertThat(sql)
+        .as("V17 must not grant table-level SELECT on mcp_oauth_grant to dashboard_writer")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT\\s+[A-Z, ]*SELECT\\s+ON\\s+mcp_oauth_grant\\s+TO\\s+dashboard_writer"));
 
     // No INSERT/DELETE granted to dashboard_writer on mcp_oauth_grant — the gateway owns writes.
     assertThat(sql)
@@ -619,6 +661,11 @@ class DashboardMigrationSqlStructureTest {
     assertThat(sql)
         .as("V18 must not embed a LOGIN ... PASSWORD literal (D1)")
         .doesNotContainPattern(Pattern.compile("LOGIN\\s+INHERIT\\s+PASSWORD"));
+    // Static guard: reject ANY literal password string in this migration (catches the
+    // `NOLOGIN PASSWORD 'x'` form that the previous two checks would miss).
+    assertThat(sql)
+        .as("V18 must not embed any literal PASSWORD '...' (D1: NOLOGIN, no password stored)")
+        .doesNotContainPattern(Pattern.compile("PASSWORD\\s+'"));
 
     // Column-level SELECT on dashboard_user: exactly (provider, subject, tenant_id).
     // This is the guard against the mutation "GRANT SELECT ON dashboard_user TO mcp_gateway"
@@ -658,5 +705,79 @@ class DashboardMigrationSqlStructureTest {
           .containsPattern(
               Pattern.compile("GRANT[^;]+" + t + "[^;]*TO\\s+mcp_gateway", Pattern.DOTALL));
     }
+  }
+
+  /**
+   * Structural mirror of {@link #v5GrantsAreExactlyLeastPrivilege}: every grant V18 applies to
+   * {@code mcp_gateway} is exactly as narrow as the gateway needs and no wider.
+   *
+   * <p>Guards tested:
+   *
+   * <ul>
+   *   <li>No literal password in any form ({@code PASSWORD '...'}).
+   *   <li>CONNECT on the database, USAGE on the schema.
+   *   <li>Column-level SELECT (provider, subject, tenant_id) on dashboard_user — not table-level.
+   *   <li>Exactly SELECT / INSERT / UPDATE / DELETE on each of the six OAuth tables — no
+   *       table-level SELECT-only widening and no missing privilege.
+   * </ul>
+   */
+  @Test
+  void v18GrantsAreExactlyLeastPrivilege() throws IOException {
+    String sql = executableSql("/db/dashboard/V18__mcp_gateway_role.sql");
+
+    // No literal password (D1 guard: must catch NOLOGIN PASSWORD 'x' or any variant).
+    assertThat(sql)
+        .as("V18 must not embed any literal PASSWORD '...' in any form")
+        .doesNotContainPattern(Pattern.compile("PASSWORD\\s+'"));
+
+    // Connect + schema usage (required for the role to reach any table at all).
+    assertThat(sql)
+        .as("V18 grants CONNECT on the database to mcp_gateway")
+        .containsPattern(Pattern.compile("GRANT CONNECT ON DATABASE.*mcp_gateway", Pattern.DOTALL));
+    assertThat(sql)
+        .as("V18 grants USAGE on the schema to mcp_gateway")
+        .contains("GRANT USAGE ON SCHEMA public TO mcp_gateway");
+
+    // Column-level SELECT on dashboard_user: exactly (provider, subject, tenant_id).
+    assertThat(sql)
+        .as("V18 grants column-level SELECT (provider, subject, tenant_id) on dashboard_user")
+        .containsPattern(
+            Pattern.compile(
+                "GRANT\\s+SELECT\\s*\\(\\s*provider\\s*,\\s*subject\\s*,\\s*tenant_id\\s*\\)"
+                    + "\\s+ON\\s+dashboard_user\\s+TO\\s+mcp_gateway"));
+
+    // No table-wide SELECT on dashboard_user (would expose email to the gateway).
+    assertThat(sql)
+        .as("V18 must not grant table-wide SELECT ON dashboard_user TO mcp_gateway")
+        .doesNotContainPattern(
+            Pattern.compile("GRANT\\s+SELECT\\s+ON\\s+dashboard_user\\s+TO\\s+mcp_gateway"));
+
+    // Exactly SELECT / INSERT / UPDATE / DELETE on each OAuth table in the multi-table GRANT.
+    for (String t :
+        new String[] {
+          "mcp_oauth_client",
+          "mcp_oauth_pending_auth",
+          "mcp_oauth_grant",
+          "mcp_oauth_code",
+          "mcp_oauth_refresh_token",
+          "mcp_oauth_access_token"
+        }) {
+      assertThat(sql)
+          .as("V18 grants exactly SELECT/INSERT/UPDATE/DELETE to mcp_gateway on %s", t)
+          .containsPattern(
+              Pattern.compile(
+                  "GRANT\\s+SELECT\\s*,\\s*INSERT\\s*,\\s*UPDATE\\s*,\\s*DELETE\\s+ON"
+                      + "[^;]*"
+                      + Pattern.quote(t)
+                      + "[^;]*TO\\s+mcp_gateway",
+                  Pattern.DOTALL));
+    }
+
+    // No access to dashboard_user_invite.
+    assertThat(sql)
+        .as("V18 must not grant anything on dashboard_user_invite to mcp_gateway")
+        .doesNotContainPattern(
+            Pattern.compile(
+                "GRANT[^;]*dashboard_user_invite[^;]*mcp_gateway", Pattern.CASE_INSENSITIVE));
   }
 }

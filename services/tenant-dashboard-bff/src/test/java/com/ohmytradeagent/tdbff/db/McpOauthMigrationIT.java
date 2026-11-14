@@ -24,13 +24,18 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * shared across all tests.
  *
  * <p>D1 (orchestrator, 2026-11-13): {@code mcp_gateway} is created NOLOGIN in V18 — no password, no
- * Flyway placeholder. The {@code @BeforeAll} asserts the role is NOLOGIN immediately after
- * migration, then does {@code ALTER ROLE mcp_gateway LOGIN PASSWORD} so the privilege tests below
- * can connect. This mirrors the operator enablement step documented in the PR 5 runbook.
+ * Flyway placeholder. The {@code @BeforeAll} records the NOLOGIN state before altering the role to
+ * LOGIN (so privilege tests can connect), and {@link #gatewayRole_isNologinUntilOperatorEnablesIt}
+ * asserts that recorded state. This mirrors the operator enablement step in the PR 5 runbook.
  *
  * <p>PG16: {@code WHERE} / {@code ON CONFLICT} columns need {@code SELECT} on the executing role.
  * Tests exercise the gateway's real query shapes so a missing grant fails here — not on the
  * cluster.
+ *
+ * <p>Column-level grants (Finding 1/2): V17 uses column-level SELECT/UPDATE on {@code
+ * mcp_oauth_grant} and {@code mcp_oauth_client} so that {@code client_secret_hash} and other hash
+ * columns are never accessible to the browser-facing or BFF roles. Tests assert the exact column
+ * sets and that hash columns return 42501.
  *
  * <p>Gated on {@code RUN_DB_ITS=true}; runs under {@code mvn verify} (failsafe). Docker is NOT
  * available on the development workstation, so these tests first run in CI.
@@ -55,13 +60,21 @@ class McpOauthMigrationIT {
   private static String writerGrantId;
 
   /**
+   * Whether {@code mcp_gateway} was NOLOGIN immediately after V18, before the {@code @BeforeAll}
+   * runs {@code ALTER ROLE mcp_gateway LOGIN}. Asserted in {@link
+   * #gatewayRole_isNologinUntilOperatorEnablesIt()} so it appears as a named, reportable test.
+   */
+  private static boolean gatewayWasNologin;
+
+  /**
    * Single {@code @BeforeAll}: V1–V18 migration, then:
    *
    * <ol>
-   *   <li>Assert {@code mcp_gateway} is NOLOGIN immediately after V18 (D1).
+   *   <li>Record NOLOGIN state for the named D1 assertion test.
    *   <li>Alter the role to LOGIN so privilege tests below can connect (operator enablement
    *       mirror).
-   *   <li>Seed test data as superuser (dashboard_user, two grants, refresh+access tokens).
+   *   <li>Seed test data as superuser (dashboard_user rows — the only rows mcp_gateway cannot
+   *       create itself; OAuth table rows are created by test 3 as mcp_gateway where possible).
    * </ol>
    */
   @BeforeAll
@@ -81,14 +94,13 @@ class McpOauthMigrationIT {
     try (Connection c = asSuperuser();
         var st = c.createStatement()) {
 
-      // D1 assertion: role exists and is NOLOGIN immediately after V18. Any migration that creates
-      // the role with LOGIN (contradicting D1) fails here before any privilege test runs.
+      // Record the NOLOGIN state immediately after V18.  The assertion lives in the named test
+      // below (Finding 6: move NOLOGIN check into a named test, keep ALTER here so other tests
+      // can connect).
       try (var rs =
           st.executeQuery("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'mcp_gateway'")) {
         assertThat(rs.next()).as("mcp_gateway role exists after V18").isTrue();
-        assertThat(rs.getBoolean("rolcanlogin"))
-            .as("mcp_gateway is NOLOGIN until the operator sets a password (D1)")
-            .isFalse();
+        gatewayWasNologin = !rs.getBoolean("rolcanlogin");
       }
 
       // ALTER to LOGIN so the privilege tests below can connect.
@@ -96,6 +108,7 @@ class McpOauthMigrationIT {
       st.executeUpdate("ALTER ROLE mcp_gateway LOGIN PASSWORD '" + GATEWAY_PW + "'");
 
       // Seed a dashboard_user row for the membership read test.
+      // Must be seeded as superuser: mcp_gateway has no INSERT on dashboard_user.
       st.executeUpdate(
           "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
               + "VALUES ('google', 'sub-gw-1', 'gw@test.com', 'acme')");
@@ -105,7 +118,7 @@ class McpOauthMigrationIT {
           "INSERT INTO mcp_oauth_client (client_id, metadata, expires_at) "
               + "VALUES ('test-client-1', '{}'::jsonb, now() + interval '30 days')");
 
-      // Seed grant for test 3 (gateway CRUD), capture the generated id.
+      // Seed grant for test 3 (gateway rotation/revoke assertions), capture the generated id.
       try (var rs =
           st.executeQuery(
               "INSERT INTO mcp_oauth_grant (client_id, provider, subject, tenants) "
@@ -137,6 +150,22 @@ class McpOauthMigrationIT {
         writerGrantId = rs.getString(1);
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // D1 guard: mcp_gateway is NOLOGIN straight out of V18
+  // ---------------------------------------------------------------------------
+
+  /**
+   * D1: V18 creates {@code mcp_gateway} as NOLOGIN. The {@code @BeforeAll} recorded the state
+   * before its own {@code ALTER ROLE}; this named test asserts that state so it shows up in the
+   * test report and so a mutation of V18 that adds {@code LOGIN} is immediately visible here.
+   */
+  @Test
+  void gatewayRole_isNologinUntilOperatorEnablesIt() {
+    assertThat(gatewayWasNologin)
+        .as("mcp_gateway is NOLOGIN in V18 until the operator sets a password (D1)")
+        .isTrue();
   }
 
   // ---------------------------------------------------------------------------
@@ -204,33 +233,34 @@ class McpOauthMigrationIT {
         }
       }
 
-      var st = gw.createStatement();
+      try (var st = gw.createStatement()) {
+        // email is NOT in the column grant — must be denied.
+        assertDenied(() -> st.executeQuery("SELECT email FROM dashboard_user"));
 
-      // email is NOT in the column grant — must be denied.
-      assertDenied(() -> st.executeQuery("SELECT email FROM dashboard_user"));
+        // Table-wide SELECT (* or any unlisted column) is not granted — column-level grant only.
+        assertDenied(() -> st.executeQuery("SELECT * FROM dashboard_user"));
 
-      // Table-wide SELECT (* or any unlisted column) is not granted — column-level grant only.
-      assertDenied(() -> st.executeQuery("SELECT * FROM dashboard_user"));
+        // No access to dashboard_user_invite at all.
+        assertDenied(() -> st.executeQuery("SELECT 1 FROM dashboard_user_invite"));
 
-      // No access to dashboard_user_invite at all.
-      assertDenied(() -> st.executeQuery("SELECT 1 FROM dashboard_user_invite"));
-
-      // No write to dashboard_user (the gateway only reads memberships, never modifies them).
-      assertDenied(
-          () ->
-              st.executeUpdate(
-                  "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
-                      + "VALUES ('google', 'sub-gw-new', 'new@test.com', 'acme')"));
-      assertDenied(
-          () ->
-              st.executeUpdate(
-                  "UPDATE dashboard_user SET email = 'x@y.com' WHERE provider = 'google'"));
-      assertDenied(() -> st.executeUpdate("DELETE FROM dashboard_user WHERE provider = 'google'"));
+        // No write to dashboard_user (the gateway only reads memberships, never modifies them).
+        assertDenied(
+            () ->
+                st.executeUpdate(
+                    "INSERT INTO dashboard_user (provider, subject, email, tenant_id) "
+                        + "VALUES ('google', 'sub-gw-new', 'new@test.com', 'acme')"));
+        assertDenied(
+            () ->
+                st.executeUpdate(
+                    "UPDATE dashboard_user SET email = 'x@y.com' WHERE provider = 'google'"));
+        assertDenied(
+            () -> st.executeUpdate("DELETE FROM dashboard_user WHERE provider = 'google'"));
+      }
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Test 3: mcp_gateway — CRUD on the six OAuth tables
+  // Test 3: mcp_gateway — CRUD on the six OAuth tables (real gateway write shapes)
   // ---------------------------------------------------------------------------
 
   @Test
@@ -249,7 +279,80 @@ class McpOauthMigrationIT {
         ps.executeUpdate(); // must not throw
       }
 
-      // UPDATE mcp_oauth_refresh_token WHERE token_hash = ? AND rotated_at IS NULL.
+      // INSERT INTO mcp_oauth_grant RETURNING id (the gateway creates the grant at consent).
+      // client_name is captured at consent time and stored here (Finding 5: CIMD clients are not
+      // stored in mcp_oauth_client, so the name must be persisted in the grant row).
+      String gwGrantId;
+      try (var ps =
+          gw.prepareStatement(
+              "INSERT INTO mcp_oauth_grant (client_id, client_name, provider, subject, tenants) "
+                  + "VALUES (?, ?, ?, ?, ARRAY['acme']) RETURNING id")) {
+        ps.setString(1, "test-client-1");
+        ps.setString(2, "Test App");
+        ps.setString(3, "google");
+        ps.setString(4, "sub-gw-1");
+        try (var rs = ps.executeQuery()) {
+          rs.next();
+          gwGrantId = rs.getString(1);
+        }
+      }
+
+      // INSERT INTO mcp_oauth_pending_auth (one /authorize in flight, 10-min window).
+      try (var ps =
+          gw.prepareStatement(
+              "INSERT INTO mcp_oauth_pending_auth (state_hash, client_id, params, expires_at) "
+                  + "VALUES (?, ?, ?::jsonb, now() + interval '10 minutes')")) {
+        ps.setString(1, "state-hash-test");
+        ps.setString(2, "test-client-1");
+        ps.setString(3, "{}");
+        ps.executeUpdate(); // must not throw
+      }
+
+      // INSERT INTO mcp_oauth_code (the consent POST mints a 5-min single-use code).
+      try (var ps =
+          gw.prepareStatement(
+              "INSERT INTO mcp_oauth_code (code_hash, grant_id, client_id, code_challenge, "
+                  + "redirect_uri, redirect_uri_provided_explicitly, expires_at) "
+                  + "VALUES (?, ?::uuid, ?, ?, ?, ?, now() + interval '5 minutes')")) {
+        ps.setString(1, "code-hash-test");
+        ps.setString(2, gwGrantId);
+        ps.setString(3, "test-client-1");
+        ps.setString(4, "challenge-abc");
+        ps.setString(5, "https://example.com/callback");
+        ps.setBoolean(6, true);
+        ps.executeUpdate(); // must not throw
+      }
+
+      // UPDATE mcp_oauth_code SET consumed_at (code is single-use: mark consumed at /token).
+      try (var ps =
+          gw.prepareStatement(
+              "UPDATE mcp_oauth_code SET consumed_at = now() WHERE code_hash = ?")) {
+        ps.setString(1, "code-hash-test");
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+
+      // INSERT INTO mcp_oauth_refresh_token (minted at /token exchange, 30-day TTL).
+      try (var ps =
+          gw.prepareStatement(
+              "INSERT INTO mcp_oauth_refresh_token (token_hash, grant_id, expires_at) "
+                  + "VALUES (?, ?::uuid, now() + interval '30 days')")) {
+        ps.setString(1, "rt-hash-gw");
+        ps.setString(2, gwGrantId);
+        ps.executeUpdate(); // must not throw
+      }
+
+      // INSERT INTO mcp_oauth_access_token (minted at /token exchange, 1-hour TTL).
+      try (var ps =
+          gw.prepareStatement(
+              "INSERT INTO mcp_oauth_access_token (token_hash, grant_id, expires_at) "
+                  + "VALUES (?, ?::uuid, now() + interval '1 hour')")) {
+        ps.setString(1, "at-hash-gw");
+        ps.setString(2, gwGrantId);
+        ps.executeUpdate(); // must not throw
+      }
+
+      // UPDATE mcp_oauth_refresh_token WHERE token_hash = ? AND rotated_at IS NULL
+      // (the rotation path: requires PG16 column SELECT on the WHERE predicate columns).
       try (var ps =
           gw.prepareStatement(
               "UPDATE mcp_oauth_refresh_token SET rotated_at = now(), replaced_by_hash = ? "
@@ -259,7 +362,7 @@ class McpOauthMigrationIT {
         assertThat(ps.executeUpdate()).isEqualTo(1);
       }
 
-      // UPDATE mcp_oauth_grant SET revoked_at (the grant_revocation path).
+      // UPDATE mcp_oauth_grant SET revoked_at (grant revocation path).
       try (var ps =
           gw.prepareStatement("UPDATE mcp_oauth_grant SET revoked_at = now() WHERE id = ?::uuid")) {
         ps.setString(1, seededGrantId);
@@ -284,6 +387,21 @@ class McpOauthMigrationIT {
         assertThat(ps.executeUpdate()).isGreaterThanOrEqualTo(1);
       }
 
+      // DELETE expired pending-auth rows (sweep after the 10-min window).
+      try (var ps =
+          gw.prepareStatement("DELETE FROM mcp_oauth_pending_auth WHERE expires_at < now()")) {
+        ps.executeUpdate(); // 0 rows is fine; no 42501 is the assertion
+      }
+
+      // DELETE consumed / expired codes (sweep after the 5-min window).
+      try (var ps =
+          gw.prepareStatement(
+              "DELETE FROM mcp_oauth_code WHERE expires_at < now() OR consumed_at IS NOT NULL")) {
+        assertThat(ps.executeUpdate())
+            .as("consumed code-hash-test row is deleted by the sweep")
+            .isGreaterThanOrEqualTo(1);
+      }
+
       // SELECT with JOIN: access token + grant (the token-verification query).
       // The grant was just revoked so the WHERE filters it out — the test proves the query runs
       // without a privilege error (42501) even when the result set is empty.
@@ -299,7 +417,7 @@ class McpOauthMigrationIT {
   }
 
   // ---------------------------------------------------------------------------
-  // Test 4: dashboard_readonly — SELECT on grant + client, nothing else
+  // Test 4: dashboard_readonly — column-level SELECT on grant + client, nothing else
   // ---------------------------------------------------------------------------
 
   @Test
@@ -307,9 +425,23 @@ class McpOauthMigrationIT {
     try (Connection r = asRole("dashboard_readonly", READONLY_PW);
         var st = r.createStatement()) {
 
-      // V17 grants SELECT on mcp_oauth_grant and mcp_oauth_client to dashboard_readonly.
-      st.executeQuery("SELECT count(*) FROM mcp_oauth_grant").close();
-      st.executeQuery("SELECT count(*) FROM mcp_oauth_client").close();
+      // V17 grants column-level SELECT on mcp_oauth_grant to dashboard_readonly.
+      // List the exact columns from the grant — SELECT * is denied (column-level, not table-level).
+      // client_name is in the grant (Finding 5: captured at consent so the listing page has it).
+      st.executeQuery(
+              "SELECT id, client_id, client_name, provider, subject, tenants,"
+                  + " created_at, last_used_at, revoked_at FROM mcp_oauth_grant")
+          .close();
+
+      // V17 grants column-level SELECT on mcp_oauth_client (excludes client_secret_hash).
+      st.executeQuery("SELECT client_id, metadata, created_at, last_used_at FROM mcp_oauth_client")
+          .close();
+
+      // client_secret_hash is NOT in the readonly grant — must return 42501 (Finding 1).
+      assertDenied(() -> st.executeQuery("SELECT client_secret_hash FROM mcp_oauth_client"));
+
+      // SELECT * on mcp_oauth_client is denied: would implicitly access client_secret_hash.
+      assertDenied(() -> st.executeQuery("SELECT * FROM mcp_oauth_client"));
 
       // No write on mcp_oauth_grant.
       assertDenied(
@@ -323,7 +455,7 @@ class McpOauthMigrationIT {
   }
 
   // ---------------------------------------------------------------------------
-  // Test 5: dashboard_writer — revoke grant, cannot insert or touch token tables
+  // Test 5: dashboard_writer — revoke grant, cannot insert or touch token tables / hash columns
   // ---------------------------------------------------------------------------
 
   @Test
@@ -332,8 +464,8 @@ class McpOauthMigrationIT {
 
       // PR 4 revoke path: UPDATE WHERE id = ? AND provider = ? AND subject = ? AND revoked_at IS
       // NULL.
-      // dashboard_writer has table-level SELECT on mcp_oauth_grant (covers all WHERE columns per
-      // PG16).
+      // dashboard_writer has column-level SELECT (id, provider, subject, revoked_at) on
+      // mcp_oauth_grant — covers all WHERE predicate columns per PG16. UPDATE (revoked_at) only.
       try (var ps =
           w.prepareStatement(
               "UPDATE mcp_oauth_grant SET revoked_at = now() "
@@ -346,17 +478,25 @@ class McpOauthMigrationIT {
             .isEqualTo(1);
       }
 
-      var st = w.createStatement();
+      try (var st = w.createStatement()) {
+        // Cannot INSERT into mcp_oauth_grant — writer creates nothing, only revokes.
+        assertDenied(
+            () ->
+                st.executeUpdate(
+                    "INSERT INTO mcp_oauth_grant (client_id, provider, subject, tenants) "
+                        + "VALUES ('test-client-1', 'google', 'sub-gw-1', ARRAY['acme'])"));
 
-      // Cannot INSERT into mcp_oauth_grant — writer creates nothing, only revokes.
-      assertDenied(
-          () ->
-              st.executeUpdate(
-                  "INSERT INTO mcp_oauth_grant (client_id, provider, subject, tenants) "
-                      + "VALUES ('test-client-1', 'google', 'sub-gw-1', ARRAY['acme'])"));
+        // Cannot SELECT mcp_oauth_access_token — the writer never touches token tables.
+        assertDenied(() -> st.executeQuery("SELECT count(*) FROM mcp_oauth_access_token"));
 
-      // Cannot SELECT mcp_oauth_access_token — the writer never touches token tables.
-      assertDenied(() -> st.executeQuery("SELECT count(*) FROM mcp_oauth_access_token"));
+        // Cannot SELECT client_secret_hash — no grant on mcp_oauth_client for dashboard_writer
+        // at all (Finding 2: hash columns must be 42501).
+        assertDenied(() -> st.executeQuery("SELECT client_secret_hash FROM mcp_oauth_client"));
+
+        // Cannot SELECT columns outside the writer's column grant on mcp_oauth_grant.
+        // client_id is NOT in (id, provider, subject, revoked_at) — must be denied (Finding 2).
+        assertDenied(() -> st.executeQuery("SELECT client_id FROM mcp_oauth_grant"));
+      }
     }
   }
 

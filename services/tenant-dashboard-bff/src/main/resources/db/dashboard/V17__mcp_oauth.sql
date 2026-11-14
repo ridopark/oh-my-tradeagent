@@ -28,10 +28,14 @@ CREATE TABLE mcp_oauth_pending_auth (
 );
 
 -- One row per connected-app grant: a (client, identity, tenant-set) binding that all tokens trace to.
+-- client_name is captured at consent time from the DCR metadata or CIMD document; nullable because
+-- CIMD clients are not stored in mcp_oauth_client, so the name must be persisted here at grant
+-- creation to be available in the Connected-AI-apps listing (PR 4) without a network round-trip.
 -- Revoked_at is set by the member (PR 4 dashboard revoke) or by refresh-token reuse detection.
 CREATE TABLE mcp_oauth_grant (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id   TEXT        NOT NULL,
+  client_name TEXT,                              -- captured at consent from DCR/CIMD; nullable
   provider    TEXT        NOT NULL,
   subject     TEXT        NOT NULL,
   tenants     TEXT[]      NOT NULL,
@@ -76,15 +80,26 @@ CREATE TABLE mcp_oauth_access_token (
 
 -- GRANTS.
 --
--- dashboard_readonly (the Next.js pg pool): read-only access to grants and clients for the
--- "Connected AI apps" listing page (PR 4). Never a write. No access to the token tables.
-GRANT SELECT ON mcp_oauth_grant, mcp_oauth_client TO dashboard_readonly;
+-- dashboard_readonly (the Next.js pg pool): column-level SELECT on the two listing tables for the
+-- "Connected AI apps" page (PR 4). Column-level grants exclude every *_hash / secret column so a
+-- Next.js query compromise cannot read client_secret_hash. No access to token tables. Never a write.
+--
+-- mcp_oauth_grant: all non-secret columns the listing page projects or filters on (including
+-- client_name captured at consent time, and provider/subject for the per-identity WHERE).
+GRANT SELECT (id, client_id, client_name, provider, subject, tenants, created_at, last_used_at, revoked_at)
+  ON mcp_oauth_grant
+  TO dashboard_readonly;
+
+-- mcp_oauth_client: metadata for extended client info; excludes client_secret_hash and expires_at.
+GRANT SELECT (client_id, metadata, created_at, last_used_at)
+  ON mcp_oauth_client
+  TO dashboard_readonly;
 
 -- dashboard_writer (the BFF's write DSL): the PR 4 revoke path runs
 --   UPDATE mcp_oauth_grant SET revoked_at = now() WHERE id = ? AND provider = ? AND subject = ?
--- Table-level SELECT is needed here: the WHERE predicate reads provider and subject (PG16 rule),
--- and V17 grants table-level SELECT so a future widening that reads more columns stays in this
--- grant's scope without an additive migration. UPDATE is the only write operation the BFF performs
--- on this table (INSERT is the gateway's job, DELETE is never needed — the row is kept for the audit log).
--- No privileges on the token or code tables — the BFF never touches those directly.
-GRANT SELECT, UPDATE ON mcp_oauth_grant TO dashboard_writer;
+--     AND revoked_at IS NULL
+-- Column-level SELECT on the WHERE columns (PG16: each predicate column needs SELECT), and
+-- column-level UPDATE on revoked_at only. INSERT is the gateway's job; DELETE is never needed
+-- (the row is kept for the audit log). No privileges on the token or code tables.
+GRANT SELECT (id, provider, subject, revoked_at) ON mcp_oauth_grant TO dashboard_writer;
+GRANT UPDATE (revoked_at) ON mcp_oauth_grant TO dashboard_writer;
