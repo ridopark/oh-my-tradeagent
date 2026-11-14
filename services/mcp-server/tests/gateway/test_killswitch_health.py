@@ -110,7 +110,7 @@ async def test_readyz_503_whenStoreUnhealthy():
 
 @pytest.mark.asyncio
 async def test_hostNotAllowed_isRejected():
-    """Request with Host: evil.example → rejected."""
+    """Request with Host: evil.example → rejected by our _CompositeApp host check."""
     app = make_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -121,7 +121,7 @@ async def test_hostNotAllowed_isRejected():
             json={},
             headers={"Host": "evil.example"},
         )
-    # TransportSecuritySettings rejects the request
+    # Our _CompositeApp host check rejects the request with 421
     assert resp.status_code in (421, 400, 403)
 
 
@@ -140,3 +140,40 @@ async def test_hostAllowed_isServed():
         )
     # 401 (bearer missing) rather than a host-rejection status
     assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_allowedHosts_defaultsToPublicUrlHost_loopbackRejected():
+    """When OMT_ALLOWED_HOSTS is absent, defaults to the public URL's host.
+
+    Without explicit OMT_ALLOWED_HOSTS, loopback Host headers must be rejected
+    (no auto-append of 127.0.0.1:* any more).
+
+    RED: currently loopback is auto-appended → 401 (not rejected).
+    GREEN: settings.allowed_hosts defaults to public URL host only.
+    """
+    from ohmytradeagent_mcp.gateway.app import build_gateway_app
+    from ohmytradeagent_mcp.gateway.settings import GatewaySettings
+
+    # Build app WITHOUT OMT_ALLOWED_HOSTS — should default to public URL host
+    env = {
+        "OMT_PUBLIC_URL": PUBLIC_URL,
+        "OMT_BFF_URL": BFF_URL,
+        "MCP_GATEWAY_SIGNING_KEY": TEST_SIGNING_KEY_PEM,
+        # no OMT_ALLOWED_HOSTS
+    }
+    settings = GatewaySettings(env)
+    from ohmytradeagent_mcp.gateway.store import InMemoryStore
+    store = InMemoryStore()
+    app = build_gateway_app(settings, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8000",
+    ) as client:
+        resp = await client.post("/mcp", json={}, headers={"Host": "127.0.0.1:8000"})
+
+    # Must be 421 (not 401 — loopback is NOT in allowed_hosts by default)
+    assert resp.status_code == 421, (
+        f"Loopback should be rejected (421) when OMT_ALLOWED_HOSTS not set; got {resp.status_code}"
+    )

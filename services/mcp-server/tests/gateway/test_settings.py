@@ -1,8 +1,15 @@
 """Gateway settings and startup tests — Seam F style.
 
 Test 14: run_gateway(env) exits 2 when required env vars are missing.
+Test 15: Production mode (not disabled) requires OMT_GATEWAY_DB_URL,
+         OMT_GOOGLE_CLIENT_ID, OMT_GOOGLE_CLIENT_SECRET.
+Test 16: Production app wiring — ToolRateLimiter and AuthRateLimiter are
+         wired from settings and affect /register and tool calls.
 """
 from __future__ import annotations
+
+import httpx
+import pytest
 
 from tests.gateway.fixtures import BFF_URL, PUBLIC_URL, TEST_SIGNING_KEY_PEM
 

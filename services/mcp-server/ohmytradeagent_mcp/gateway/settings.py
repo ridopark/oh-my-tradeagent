@@ -7,12 +7,14 @@ Required:
 
 Optional:
   OMT_GATEWAY_DISABLED    — set to "true" to return 503 for all /mcp requests
-  OMT_ALLOWED_HOSTS       — comma-separated list of allowed Host header values
+  OMT_ALLOWED_HOSTS       — comma-separated list of allowed Host header values;
+                            defaults to the host of OMT_PUBLIC_URL when absent
   OMT_LISTEN              — listen address in host:port form (default "0.0.0.0:8000")
-  OMT_GOOGLE_CLIENT_ID    — Google OAuth 2.0 client id (required for production AS)
-  OMT_GOOGLE_CLIENT_SECRET — Google OAuth 2.0 client secret (required for production AS)
-  OMT_GATEWAY_DB_URL      — asyncpg DSN for PostgresStore; uses InMemoryStore when absent
-  MCP_GATEWAY_DB_PASSWORD — optional password override for the mcp_gateway DB role
+  OMT_GOOGLE_CLIENT_ID    — Google OAuth 2.0 client id (required in production)
+  OMT_GOOGLE_CLIENT_SECRET — Google OAuth 2.0 client secret (required in production)
+  OMT_GATEWAY_DB_URL      — asyncpg DSN for PostgresStore (required in production)
+  MCP_GATEWAY_DB_PASSWORD — password for the mcp_gateway DB role; appended to the
+                            DSN when present
   OMT_RATE_TOOLS_PER_MIN_SUBJECT — per-subject tool call RPM (default 60)
   OMT_RATE_TOOLS_PER_MIN_CLIENT  — per-client tool call RPM (default 300)
   OMT_RATE_AUTH_PER_MIN_IP       — per-IP auth endpoint RPM (default 30)
@@ -26,6 +28,7 @@ Optional:
 from __future__ import annotations
 
 import ipaddress
+from urllib.parse import urlparse
 
 
 class ConfigError(Exception):
@@ -54,7 +57,10 @@ class GatewaySettings:
         if allowed_raw:
             self.allowed_hosts: list[str] = [h.strip() for h in allowed_raw.split(",") if h.strip()]
         else:
-            self.allowed_hosts = []
+            # Default to the host of OMT_PUBLIC_URL so a misconfigured deploy
+            # never silently accepts arbitrary Host headers.
+            parsed = urlparse(self.public_url)
+            self.allowed_hosts = [parsed.hostname or ""] if parsed.hostname else []
 
         self.listen: str = env.get("OMT_LISTEN", "0.0.0.0:8000").strip()
 

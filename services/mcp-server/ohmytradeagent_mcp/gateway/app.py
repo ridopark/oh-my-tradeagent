@@ -537,26 +537,22 @@ def build_gateway_app(
     async def consent_post(request: Request) -> Response:
         return await _make_consent_handler(provider, store, settings)(request)
 
-    # Allowed hosts
+    # Allowed hosts: use settings as-is (defaults to public URL host when absent).
+    # No loopback auto-append — the caller must explicitly include 127.0.0.1:* in
+    # OMT_ALLOWED_HOSTS when running tests that connect via loopback.
+    # Host enforcement is done in _CompositeApp (covers ALL routes including custom
+    # ones).  The SDK's TransportSecuritySettings is NOT used because it only covers
+    # SDK-managed routes, not /healthz, /readyz, or /oauth/* custom routes.
     allowed_hosts = list(settings.allowed_hosts)
-    for _local in ("127.0.0.1:*", "localhost:*", "[::1]:*"):
-        if _local not in allowed_hosts:
-            allowed_hosts.append(_local)
 
-    transport_security: TransportSecuritySettings | None
-    if allowed_hosts:
-        transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=allowed_hosts,
-        )
-    else:
-        transport_security = None
-
+    # Disable the SDK's built-in host check: pass an explicit no-op
+    # TransportSecuritySettings so the SDK doesn't auto-create localhost-only
+    # protection.  Host checking is done in _CompositeApp for ALL routes.
     sdk_app = mcp_server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,
         stateless_http=True,
-        transport_security=transport_security,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     # Patch AS metadata to add client_id_metadata_document_supported: true

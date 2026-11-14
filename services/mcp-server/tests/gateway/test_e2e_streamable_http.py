@@ -39,8 +39,14 @@ def _start_uvicorn(app, host: str, port: int) -> threading.Thread:
 @pytest.mark.asyncio
 async def test_streamableHttp_realClient_listsSevenToolsAndOnePrompt_andCallsOne():
     """Seam I: uvicorn thread + mcp.Client + streamable_http_client."""
-    # Use a fresh InMemoryStore with an ephemeral port
-    app, store = make_app(return_store=True)
+    # Use a fresh InMemoryStore with an ephemeral port.
+    # Include 127.0.0.1:* in allowed_hosts since uvicorn binds to loopback and
+    # the client's Host header will be 127.0.0.1:{port} (no loopback auto-append
+    # any more — item 5 fix).
+    app, store = make_app(
+        return_store=True,
+        extra_env={"OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com,127.0.0.1:*"},
+    )
     token = seed_token(store, "tok-e2e", sub=ACME_SUB)
 
     import socket
