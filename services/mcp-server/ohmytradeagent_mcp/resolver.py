@@ -20,6 +20,7 @@ class TenantBinding:
 
     tenant_id: str
     token_id: str
+    client_id: str | None = None
 
 
 class TenantMismatch(Exception):

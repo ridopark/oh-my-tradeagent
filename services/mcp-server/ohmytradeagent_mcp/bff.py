@@ -7,6 +7,7 @@ time and used for every request.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -29,16 +30,19 @@ class BffClient:
     def __init__(
         self,
         base_url: str,
-        token: str,
+        token: str | Callable[[], str],
         tenant: str,
         transport: httpx.AsyncBaseTransport | httpx.MockTransport | None = None,
     ) -> None:
         self._base_url = base_url
-        self._headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Tenant-Id": tenant,
-        }
+        self._token = token
+        self._tenant = tenant
         self._transport = transport
+
+    def _auth_header(self) -> str:
+        """Return the Authorization header value, calling the token factory if needed."""
+        t = self._token() if callable(self._token) else self._token
+        return f"Bearer {t}"
 
     @property
     def base_url(self) -> str:
@@ -53,9 +57,13 @@ class BffClient:
             httpx.ConnectError / httpx.TimeoutException: on network errors
                 (callers map these to BffUnreachable).
         """
+        headers = {
+            "Authorization": self._auth_header(),
+            "X-Tenant-Id": self._tenant,
+        }
         async with httpx.AsyncClient(
             base_url=self._base_url,
-            headers=self._headers,
+            headers=headers,
             timeout=_TIMEOUT,
             transport=self._transport,  # type: ignore[arg-type]
         ) as client:
