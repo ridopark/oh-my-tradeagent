@@ -22,11 +22,21 @@ const LINKS = [
 // + OPERATOR_EMAILS). Non-operators never see it.
 const ADMIN_LINK = { href: "/admin/tenants", label: "Admin" };
 
+// Dark gate: only shown when MCP_CONNECTED_APPS_ENABLED=true. The page itself also gates on this
+// flag, so toggling it here and there stays in sync.
+const MCP_CONNECTED_APPS_LINK =
+  process.env.MCP_CONNECTED_APPS_ENABLED === "true"
+    ? { href: "/connected-apps", label: "AI apps" }
+    : null;
+
 export async function Nav({ tenantId }: { tenantId?: string }) {
   const session = await auth();
   const tenantIds = session?.tenantIds ?? [];
 
-  const links = session?.isOperator ? [...LINKS, ADMIN_LINK] : LINKS;
+  const mcpLink = MCP_CONNECTED_APPS_LINK ? [MCP_CONNECTED_APPS_LINK] : [];
+  const links = session?.isOperator
+    ? [...LINKS, ...mcpLink, ADMIN_LINK]
+    : [...LINKS, ...mcpLink];
   const primary = links.slice(0, 4);
   const more = links.slice(4);
 

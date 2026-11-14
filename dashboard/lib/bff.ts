@@ -1270,3 +1270,68 @@ async function darkpoolGet<T>(path: string, qs: string): Promise<DarkpoolRead<T>
 
 export const getDarkpoolPrints = (qs: string) => darkpoolGet<DarkpoolPrintsPage>("prints", qs);
 export const getDarkpoolSummary = (qs: string) => darkpoolGet<DarkpoolSummary>("summary", qs);
+
+// --- /api/mcp/grants — Connected AI apps (PLAN-2026-11-13-mcp-remote-oauth, PR 4) -----------
+//
+// Identity comes from the verified session, never from the browser. The dashboard server injects
+// X-Identity-Provider and X-Identity-Subject from session.identity, which is stamped in the jwt
+// callback at sign-in time. Dark by default: the BFF routes 404 until the flags are enabled.
+
+export interface McpGrant {
+  id: string;
+  client_name: string | null;
+  client_id: string;
+  tenants: string[];
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/**
+ * Lists the caller's own connected AI app grants from the BFF.
+ * Returns null when the BFF is disabled (404) or the session has no identity.
+ */
+export async function getConnectedApps(): Promise<McpGrant[] | null> {
+  const session = await auth();
+  const identity = session?.identity;
+  if (!identity) return null;
+  const { status, body } = await fetch(`${BFF_URL}/api/mcp/grants`, {
+    headers: {
+      Authorization: `Bearer ${BFF_TOKEN}`,
+      "X-Identity-Provider": identity.provider,
+      "X-Identity-Subject": identity.subject,
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+  if (status === 404) return null; // feature disabled
+  if (status < 200 || status >= 300) {
+    throw new Error(`BFF /api/mcp/grants -> ${status}`);
+  }
+  return (body as { grants: McpGrant[] }).grants;
+}
+
+/**
+ * Revokes a connected AI app grant by id.
+ * Returns "ok" on 204, "not_found" on 404, "disabled" on 404 from the feature flag.
+ */
+export async function revokeConnectedApp(
+  id: string,
+): Promise<"ok" | "not_found" | "disabled"> {
+  const session = await auth();
+  const identity = session?.identity;
+  if (!identity) return "not_found";
+  const res = await fetch(`${BFF_URL}/api/mcp/grants/${encodeURIComponent(id)}/revoke`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${BFF_TOKEN}`,
+      "X-Identity-Provider": identity.provider,
+      "X-Identity-Subject": identity.subject,
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(BFF_TIMEOUT_MS),
+  });
+  if (res.status === 204) return "ok";
+  if (res.status === 404) return "not_found";
+  throw new Error(`BFF /api/mcp/grants/${id}/revoke -> ${res.status}`);
+}
