@@ -75,9 +75,30 @@ class PostgresStore:
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
-        """Create the connection pool.  No-op if already connected."""
+        """Create the connection pool with JSON/JSONB codecs.  No-op if already connected.
+
+        asyncpg 0.32 returns JSONB columns as raw strings; the codecs below
+        decode them to Python dicts/lists so store methods can call .get() on the
+        result without an extra json.loads() call.
+        """
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._dsn)
+            async def _init_conn(conn: asyncpg.Connection) -> None:
+                await conn.set_type_codec(
+                    "jsonb",
+                    encoder=json.dumps,
+                    decoder=json.loads,
+                    schema="pg_catalog",
+                    format="text",
+                )
+                await conn.set_type_codec(
+                    "json",
+                    encoder=json.dumps,
+                    decoder=json.loads,
+                    schema="pg_catalog",
+                    format="text",
+                )
+
+            self._pool = await asyncpg.create_pool(self._dsn, init=_init_conn)
 
     async def close(self) -> None:
         """Drain and close the connection pool.  No-op if already closed."""
@@ -198,11 +219,15 @@ class PostgresStore:
     # ------------------------------------------------------------------
 
     async def rotate_refresh_token(self, old_token: str, new_token: str) -> bool:
-        """Atomically mark *old_token* as rotated.
+        """Atomically mark *old_token* as rotated, recording the new token's hash.
 
         Returns ``True`` when this call performed the rotation (UPDATE rowcount 1).
         Returns ``False`` when already rotated — concurrent double-refresh detected.
         The caller must revoke the grant when this returns ``False``.
+
+        ``new_token`` must be the raw value of the replacement token so that
+        ``replaced_by_hash`` stores the hash of the ACTUAL successor, enabling
+        audit correlation.  Pass a non-empty string; an empty string stores NULL.
         """
         async with self._pool.acquire() as conn:
             status = await conn.execute(
@@ -245,8 +270,9 @@ class PostgresStore:
 
     async def put_pending_auth(self, pending: PendingAuth) -> None:
         state_hash = _sha256(pending.state)
-        # Store mutable fields in JSONB; immutable fields in columns
-        params = json.dumps({
+        # Pass dict directly — the pool's init codec encodes it as JSONB.
+        # Never json.dumps() here: that would cause double-encoding (str→str).
+        params = {
             "client_state": pending.client_state,
             "redirect_uri": pending.redirect_uri,
             "redirect_uri_provided_explicitly": pending.redirect_uri_provided_explicitly,
@@ -255,14 +281,14 @@ class PostgresStore:
             "resource": pending.resource,
             "nonce": pending.nonce,
             "client_name": pending.client_name,
-        })
+        }
         expires_at = _to_ts(pending.expires_at)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO mcp_oauth_pending_auth
                   (state_hash, client_id, params, expires_at)
-                VALUES ($1, $2, $3::jsonb, $4)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (state_hash) DO NOTHING
                 """,
                 state_hash,
@@ -280,8 +306,7 @@ class PostgresStore:
             )
         if row is None:
             return None
-        # asyncpg decodes JSONB columns to Python dicts automatically
-        params: dict = row["params"]
+        params: dict = row["params"]  # decoded by the pool's init codec
         return PendingAuth(
             state=state,
             client_id=row["client_id"],
@@ -449,13 +474,21 @@ class PostgresStore:
             consumed_at=_from_ts(row["consumed_at"]),
         )
 
-    async def consume_code(self, code: str) -> None:
+    async def consume_code(self, code: str) -> bool:
+        """Atomically mark *code* as consumed.
+
+        Returns True when this call performed the marking (rowcount 1).
+        Returns False when already consumed — concurrent double-use detected.
+        The caller in provider.py revokes the grant when this returns False.
+        """
         code_hash = _sha256(code)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE mcp_oauth_code SET consumed_at = now() WHERE code_hash = $1",
+            status = await conn.execute(
+                "UPDATE mcp_oauth_code SET consumed_at = now()"
+                " WHERE code_hash = $1 AND consumed_at IS NULL",
                 code_hash,
             )
+        return status == "UPDATE 1"
 
     # ------------------------------------------------------------------
     # Step 3b: Refresh tokens
@@ -508,7 +541,8 @@ class PostgresStore:
 
     async def put_client(self, client) -> None:  # client: OAuthClientInformationFull
         """Upsert a DCR client.  On conflict (same client_id), update metadata."""
-        metadata = json.dumps({
+        # Pass dict directly — the pool's init codec encodes it as JSONB.
+        metadata = {
             "client_id": client.client_id,
             "client_name": client.client_name,
             "redirect_uris": [str(u) for u in client.redirect_uris],
@@ -516,13 +550,13 @@ class PostgresStore:
             "response_types": list(client.response_types or []),
             "scope": client.scope or "read",
             "token_endpoint_auth_method": client.token_endpoint_auth_method or "none",
-        })
+        }
         expires_at = datetime.now(tz=UTC) + timedelta(days=30)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO mcp_oauth_client (client_id, metadata, expires_at)
-                VALUES ($1, $2::jsonb, $3)
+                VALUES ($1, $2, $3)
                 ON CONFLICT (client_id) DO UPDATE
                   SET metadata     = EXCLUDED.metadata,
                       expires_at   = now() + interval '30 days',
@@ -546,7 +580,7 @@ class PostgresStore:
         from mcp.shared.auth import OAuthClientInformationFull
         from pydantic import AnyUrl
 
-        meta: dict = row["metadata"]  # asyncpg decodes JSONB to dict
+        meta: dict = row["metadata"]  # decoded by the pool's init codec
         return OAuthClientInformationFull(
             client_id=row["client_id"],
             redirect_uris=[AnyUrl(u) for u in meta.get("redirect_uris", [])],

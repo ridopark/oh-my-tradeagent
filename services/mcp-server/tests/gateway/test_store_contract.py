@@ -5,18 +5,20 @@ OMT_TEST_DATABASE_URL is not set).  Every test proves the same behaviour from
 both implementations so that InMemoryStore is a valid drop-in for tests and
 PostgresStore is correct against V17.
 
-The PostgresStore tests did NOT run locally (OMT_TEST_DATABASE_URL unset).
-They will run in CI when PR 5 adds the postgres:16 service to the mcp-server
-job.
+The PostgresStore fixture connects as ``mcp_gateway`` (never as superuser) so
+the column-level grants in V17/V18 are exercised on every Postgres test run.
+Per-test cleanup uses DELETE (not TRUNCATE — the mcp_gateway role does not hold
+that privilege).
+
+The session-scoped ``pg_dsns`` fixture in conftest.py creates the fresh DB and
+applies V1–V18 migrations.
 """
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from collections.abc import AsyncGenerator
 
-import asyncpg
 import pytest
 
 from ohmytradeagent_mcp.gateway.store import (
@@ -39,40 +41,36 @@ def memory_store() -> InMemoryStore:
 
 
 @pytest.fixture(params=["memory", "postgres"])
-async def store(request, memory_store) -> AsyncGenerator:
+async def store(request, memory_store, pg_dsns) -> AsyncGenerator:
     """Parametrized fixture over InMemoryStore and PostgresStore.
 
     The ``postgres`` variant skips when ``OMT_TEST_DATABASE_URL`` is not set;
     the ``memory`` variant always runs.
+
+    PostgresStore connects as ``mcp_gateway`` (not superuser) so the
+    column-level grants from V17/V18 are exercised in every Postgres test.
+    Per-test cleanup runs as mcp_gateway using DELETE (not TRUNCATE).
     """
     if request.param == "memory":
         yield memory_store
         return
 
     # postgres variant
-    url = os.environ.get("OMT_TEST_DATABASE_URL")
-    if not url:
+    _super_dsn, gw_dsn = pg_dsns
+    if gw_dsn is None:
         pytest.skip("OMT_TEST_DATABASE_URL not set; PostgresStore tests skipped (will run in CI)")
 
-    pg = PostgresStore(url)
+    pg = PostgresStore(gw_dsn)
     await pg.connect()
 
-    # Clean all OAuth tables before each test
+    # Clean all OAuth tables as mcp_gateway (DELETE in FK order: children first)
     async with pg._pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE mcp_oauth_access_token, mcp_oauth_refresh_token, "
-            "mcp_oauth_code, mcp_oauth_grant, mcp_oauth_pending_auth, "
-            "mcp_oauth_client RESTART IDENTITY CASCADE"
-        )
-        # Seed membership rows; skip if dashboard_user doesn't exist in this schema
-        try:
-            await conn.execute(
-                "INSERT INTO dashboard_user (provider, subject, tenant_id) "
-                "VALUES ('google', 'sub-1', 'acme'), ('google', 'sub-2', 'acme'), "
-                "('google', 'sub-2', 'beta') ON CONFLICT DO NOTHING"
-            )
-        except asyncpg.PostgresError:
-            pass  # dashboard_user may not exist in a pure-OAuth test schema
+        await conn.execute("DELETE FROM mcp_oauth_access_token")
+        await conn.execute("DELETE FROM mcp_oauth_refresh_token")
+        await conn.execute("DELETE FROM mcp_oauth_code")
+        await conn.execute("DELETE FROM mcp_oauth_grant")
+        await conn.execute("DELETE FROM mcp_oauth_pending_auth")
+        await conn.execute("DELETE FROM mcp_oauth_client")
 
     yield pg
     await pg.close()
