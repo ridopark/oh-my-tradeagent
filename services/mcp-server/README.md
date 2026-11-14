@@ -289,14 +289,42 @@ uv run pytest -q
 
 ## Remote (OAuth) mode
 
-The gateway exposes the same read-only MCP tools over Streamable HTTP so that
-hosted AI clients (Claude.ai, Gemini web app, ChatGPT) can connect without a
-local CLI.  Members sign in with Google; the gateway federates to Google OIDC
-and issues short-lived MCP access tokens that are scoped to the member's tenant
-set.
+> **Not yet live.** The endpoint is deployed dark (`OMT_GATEWAY_DISABLED=true`
+> in the k8s manifest). The operator follows `docs/ops/mcp-remote-gateway-runbook.md`
+> to enable it. Per-client setup and the compatibility test matrix are in
+> `docs/ops/mcp-client-compat.md`.
 
-> **Status:** Step 3c (implemented in PR 3).  Full setup docs, k8s manifests,
-> and a Cloudflare runbook are delivered in PR 5.
+The gateway exposes the same seven read-only tools and the `analyze_positions`
+prompt over Streamable HTTP so that hosted AI clients — Claude web, Claude Desktop,
+Claude mobile, Claude Code, Gemini CLI, Gemini app, ChatGPT — can connect
+without a local CLI or a port-forward. Members sign in with the Google account
+they already use for the dashboard; the gateway federates to Google OIDC and
+issues short-lived opaque access tokens scoped to the member's tenant set.
+Every tool call becomes a BFF read carried by a 60-second EdDSA assertion;
+the BFF re-checks `dashboard_user` membership on every request.
+
+**Cannot trade.** The same read-only constraint as stdio mode applies.
+
+---
+
+### How it works
+
+```
+AI client → https://tradeagent-mcp.ridopark.com/mcp
+              │  401 + WWW-Authenticate → AS discovery
+              │  DCR or CIMD registration
+              │  /authorize → Google sign-in → consent page
+              │  code → access token (1 h) + refresh token (30 d)
+              └─ /mcp tool call with bearer
+                   │  token lookup → grant still valid, membership re-checked
+                   │  60-s EdDSA assertion minted → BFF called
+                   └─ tool result returned
+```
+
+Sources: `gateway/app.py`, `gateway/provider.py`, `gateway/resolver.py`,
+`gateway/assertion.py` — all in `ohmytradeagent_mcp/gateway/`.
+
+---
 
 ### Environment variables
 
@@ -311,19 +339,62 @@ set.
 | `MCP_GATEWAY_DB_PASSWORD` | yes* | Password of the `mcp_gateway` role. Passed to the driver as a separate argument, never spliced into the DSN |
 | `OMT_GATEWAY_DISABLED` | no | `true`, `1` or `yes`: disabled mode (kill switch) — `/healthz` only, everything else 503 |
 | `OMT_TRUSTED_PROXY_CIDRS` | no | CIDRs whose `CF-Connecting-IP` header is trusted for per-IP rate limits. Default empty: the header is ignored and the socket peer is used |
-| `OMT_RATE_TOOLS_PER_MIN_SUBJECT` / `_CLIENT` | no | Tool-call limits per signed-in user / per client (default 60 / 300 per minute) |
+| `OMT_RATE_TOOLS_PER_MIN_SUBJECT` / `_CLIENT` | no | Tool-call limits per signed-in user / per client (default 60 / 300 per minute). Source: `gateway/settings.py` |
 | `OMT_RATE_AUTH_PER_MIN_IP` | no | Per-IP limit on the OAuth endpoints (default 30 per minute) |
 | `OMT_ALLOWED_HOSTS` | no | Comma-separated host allow-list (defaults to host of `OMT_PUBLIC_URL`) |
 | `OMT_LISTEN` | no | `host:port` to bind (default `0.0.0.0:8000`) |
 
-\* Required unless `OMT_GATEWAY_DISABLED` is set. A missing or invalid value exits 2 with one line; so does an unreachable database.
+\* Required unless `OMT_GATEWAY_DISABLED` is set. A missing or invalid value exits 2
+with one line to stderr; so does an unreachable database at startup.
+Source: `gateway/settings.py` `GatewaySettings.__init__`.
+
+---
+
+### OAuth 2.1 details
+
+**Registration:** both Dynamic Client Registration (DCR, `POST /register`) and
+Client ID Metadata Document (CIMD) are supported. The gateway advertises
+`client_id_metadata_document_supported: true` and
+`token_endpoint_auth_methods_supported: ["none"]` in its AS metadata, which
+causes CIMD-aware clients (Claude, ChatGPT) to prefer CIMD over DCR.
+**Public PKCE clients only** — no client secrets (plan D5). A registration body
+that includes any secret-based `token_endpoint_auth_method` returns
+`400 invalid_client_metadata`.
+
+**Redirect URIs:** `https://` with any non-IP hostname, or `http://` to
+`127.0.0.1`, `localhost`, or `[::1]` (port matched port-agnostically, RFC 8252
+§7.3). No fragments, no userinfo, no wildcards. Source: `gateway/redirects.py`.
+
+**Token lifetimes:** access 1 hour, refresh 30 days (rotating; a reused
+refresh token revokes the whole grant). Source: `gateway/provider.py`
+(`_ACCESS_TOKEN_LIFETIME`, `_REFRESH_TOKEN_LIFETIME`).
+
+**Tenant scope:** one tenant → implicit. Multiple tenants → every tool accepts
+an optional `tenant=<id>` argument; omitting it on a multi-tenant grant returns
+a `ToolError`. Source: `gateway/resolver.py`.
+
+**Rate limits:** 60 tool calls/min per user, 300/min per client (returns
+`ToolError`); 30 auth requests/min per IP (returns HTTP 429 + `Retry-After`).
+Source: `gateway/ratelimit.py`, `gateway/settings.py`.
+
+**Kill switch:** `OMT_GATEWAY_DISABLED=true` → 503 `{"error":"disabled"}` on
+all paths except `GET /healthz`. Source: `gateway/app.py` `_KillSwitchMiddleware`.
+
+**Redaction:** same fields as stdio mode — `account_number`, `broker_order_id`,
+`operator_id` removed before any payload leaves the gateway.
+
+---
 
 ### Generating the signing key
 
 ```bash
 openssl genpkey -algorithm ed25519 -out mcp-signing-key.pem
 # Store in k8s Secret; pass as MCP_GATEWAY_SIGNING_KEY (the PEM text)
+openssl pkey -in mcp-signing-key.pem -pubout -outform DER | base64 -w0
+# Store base64 of SPKI DER as BFF_MCP_DELEGATED_PUBLIC_KEY
 ```
+
+---
 
 ### Local smoke test (disabled mode)
 
@@ -336,4 +407,5 @@ OMT_GATEWAY_DISABLED=1 \
 ```
 
 The server starts, serves `GET /healthz` → `{"status":"ok"}`, and
-rejects all `/mcp` requests with 503.
+rejects all `/mcp` requests with 503. Database and Google credentials are not
+required in disabled mode.
