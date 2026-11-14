@@ -253,20 +253,20 @@ class PostgresStore:
         await self.revoke_grant(grant_id)
 
     async def bump_client_used(self, client_id: str) -> None:
-        """Set last_used_at on the client to prevent it being swept as abandoned."""
+        """Record a use: set last_used_at and push expires_at 30 days forward."""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE mcp_oauth_client SET last_used_at = now() WHERE client_id = $1",
+                "UPDATE mcp_oauth_client SET last_used_at = now(),"
+                " expires_at = now() + interval '30 days' WHERE client_id = $1",
                 client_id,
             )
 
     async def sweep_expired_clients(self) -> None:
-        """Delete DCR clients whose expires_at has passed and that were never used."""
+        """Delete DCR clients whose expires_at has passed and that hold no live grant."""
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "DELETE FROM mcp_oauth_client"
                 " WHERE expires_at < now()"
-                " AND last_used_at IS NULL"
                 " AND NOT EXISTS ("
                 "   SELECT 1 FROM mcp_oauth_grant"
                 "   WHERE client_id = mcp_oauth_client.client_id"

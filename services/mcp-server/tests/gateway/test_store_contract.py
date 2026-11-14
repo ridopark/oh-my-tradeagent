@@ -619,44 +619,46 @@ async def test_isHealthy(store):
 
 
 @pytest.mark.asyncio
-async def test_bump_client_used_setsLastUsed(store):
-    """bump_client_used exists and updates the client's last-used tracking.
+async def test_bumpClientUsed_pushesExpiryForward_thenAbandonedClientIsSwept(store):
+    """A use pushes expires_at 30 days forward; a used-then-abandoned client still expires.
 
-    RED: InMemoryStore and PostgresStore have no bump_client_used method.
-    GREEN: method is added; subsequent sweep respects last_used_at IS NOT NULL.
+    Plan: "expires_at = created_at + 30 d, pushed forward on every use".
     """
     from mcp.shared.auth import OAuthClientInformationFull
     from pydantic import AnyUrl
 
-    client = OAuthClientInformationFull(
-        client_id="test-bump-cli",
-        redirect_uris=[AnyUrl("https://example.com/cb")],
-        client_name="Bump Test",
-        grant_types=["authorization_code"],
-        response_types=["code"],
-        scope="read",
-        token_endpoint_auth_method="none",
+    async def age_out() -> None:
+        if isinstance(store, InMemoryStore):
+            store._client_expires_at["test-bump-cli"] = time.time() - 1
+        else:
+            async with store._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE mcp_oauth_client SET expires_at = now() - interval '1 day' "
+                    "WHERE client_id = 'test-bump-cli'"
+                )
+
+    await store.put_client(
+        OAuthClientInformationFull(
+            client_id="test-bump-cli",
+            redirect_uris=[AnyUrl("https://example.com/cb")],
+            client_name="Bump Test",
+            grant_types=["authorization_code"],
+            response_types=["code"],
+            scope="read",
+            token_endpoint_auth_method="none",
+        )
     )
-    await store.put_client(client)
 
-    # Must not raise; must update internal tracking
+    # Past expiry, then used: the use pushes expiry forward, so the sweep keeps it.
+    await age_out()
     await store.bump_client_used("test-bump-cli")
-
-    # After bump, an expired client should NOT be swept if last_used_at IS NOT NULL
-    if isinstance(store, InMemoryStore):
-        store._client_expires_at["test-bump-cli"] = time.time() - 1
-
-    elif isinstance(store, PostgresStore):
-        async with store._pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE mcp_oauth_client SET expires_at = now() - interval '1 day' "
-                "WHERE client_id = 'test-bump-cli'"
-            )
-
     await store.sweep_expired_clients()
-    # bump_client_used set last_used_at, so the client must survive the sweep
-    rec = await store.get_client_record("test-bump-cli")
-    assert rec is not None, "bumped client must not be swept even after expiry"
+    assert await store.get_client_record("test-bump-cli") is not None
+
+    # Used once, then abandoned past the new expiry with no live grant: swept.
+    await age_out()
+    await store.sweep_expired_clients()
+    assert await store.get_client_record("test-bump-cli") is None
 
 
 @pytest.mark.asyncio

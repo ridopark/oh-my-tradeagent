@@ -533,11 +533,10 @@ def test_production_unreachableDb_exits2_oneLine():
 
 
 @pytest.mark.asyncio
-async def test_buildAppFromSettings_toolRateLimiter_wired():
-    """_build_app_from_settings wires tool_rate_limiter so the 2nd /mcp call is limited.
+async def test_buildAppFromSettings_authLimiterActive_secondRegisterIs429():
+    """The app built by the PRODUCTION factory (the one run_gateway uses) rate-limits auth routes.
 
-    RED: _build_app_from_settings does not exist in main.py.
-    GREEN: factory is added; tool_rate_limiter is wired (resolver gets it).
+    Goes red if main.py stops passing auth_rate_limiter (e.g. passes None).
     """
     from ohmytradeagent_mcp.gateway.main import _build_app_from_settings
     from ohmytradeagent_mcp.gateway.settings import GatewaySettings
@@ -546,13 +545,48 @@ async def test_buildAppFromSettings_toolRateLimiter_wired():
     env = {
         **_base_env(),
         "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
-        "OMT_RATE_TOOLS_PER_MIN_SUBJECT": "1",
+        "OMT_RATE_AUTH_PER_MIN_IP": "1",
     }
-    settings = GatewaySettings(env)
-    store = InMemoryStore()
-    app = _build_app_from_settings(settings, store)
-    # Smoke-check: the factory returns a callable ASGI app
-    assert callable(app), f"Expected callable ASGI app from factory; got {type(app)}"
+    app = _build_app_from_settings(GatewaySettings(env), InMemoryStore())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://tradeagent-mcp.ridopark.com",
+    ) as client:
+        payload = {
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "none",
+        }
+        r1 = await client.post("/register", json=payload)
+        assert r1.status_code != 429, r1.status_code
+        r2 = await client.post("/register", json=payload)
+        assert r2.status_code == 429, r2.status_code
+        assert "Retry-After" in r2.headers
+
+
+def test_buildAppFromSettings_passesBothLimiters_builtFromSettings(monkeypatch):
+    """The production factory hands build_gateway_app BOTH limiters, sized from settings.
+
+    Goes red if either limiter is dropped or replaced by None in main.py.
+    """
+    import ohmytradeagent_mcp.gateway.app as app_module
+    from ohmytradeagent_mcp.gateway.main import _build_app_from_settings
+    from ohmytradeagent_mcp.gateway.ratelimit import AuthRateLimiter, ToolRateLimiter
+    from ohmytradeagent_mcp.gateway.settings import GatewaySettings
+    from ohmytradeagent_mcp.gateway.store import InMemoryStore
+
+    seen: dict = {}
+
+    def spy(settings, store, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(app_module, "build_gateway_app", spy)
+    env = {**_base_env(), "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com"}
+    _build_app_from_settings(GatewaySettings(env), InMemoryStore())
+
+    assert isinstance(seen.get("auth_rate_limiter"), AuthRateLimiter)
+    assert isinstance(seen.get("tool_rate_limiter"), ToolRateLimiter)
 
 
 # ---------------------------------------------------------------------------

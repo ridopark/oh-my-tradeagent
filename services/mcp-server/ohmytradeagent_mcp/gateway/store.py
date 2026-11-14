@@ -163,11 +163,11 @@ class OAuthStore(Protocol):
         ...
 
     async def bump_client_used(self, client_id: str) -> None:
-        """Mark a client as used (prevents sweep of still-active clients)."""
+        """Record a use: set last_used_at and push expires_at 30 days forward."""
         ...
 
     async def sweep_expired_clients(self) -> None:
-        """Remove expired-and-never-used DCR clients."""
+        """Remove DCR clients past expires_at that hold no live grant."""
         ...
 
     async def is_healthy(self) -> bool:
@@ -431,8 +431,11 @@ class InMemoryStore:
         return self._clients.get(client_id)
 
     async def bump_client_used(self, client_id: str) -> None:
-        """Mark a client as used (sets last_used_at so it is not swept as abandoned)."""
-        self._client_last_used[client_id] = time.time()
+        """Record a use: set last_used_at and push expires_at 30 days forward."""
+        now = time.time()
+        self._client_last_used[client_id] = now
+        if client_id in self._client_expires_at:
+            self._client_expires_at[client_id] = now + 30 * 24 * 3600
 
     async def sweep_expired_clients(self) -> None:
         """Remove clients whose ``expires_at`` has passed and have no active grants."""
@@ -448,7 +451,6 @@ class InMemoryStore:
             for cid, exp in self._client_expires_at.items()
             if exp < now
             and cid not in active_clients
-            and cid not in self._client_last_used
         ]
         for cid in to_delete:
             del self._clients[cid]
