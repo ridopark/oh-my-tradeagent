@@ -400,9 +400,32 @@ async def test_refreshToken_atomicRotate_secondReturnsFalse(store):
 
 @pytest.mark.asyncio
 async def test_refreshToken_isStoredHashed(store):
-    """PostgresStore-only: DB stores hash, not raw token."""
+    """PostgresStore: DB stores SHA-256 hash of the token, not the raw value.
+    InMemoryStore: keys by raw token (intentional) — asserted, not skipped.
+    """
     if isinstance(store, InMemoryStore):
-        pytest.skip("InMemoryStore intentionally stores raw tokens for test simplicity")
+        # Assert the skip is correct: memory store keys by raw token, never hashes.
+        # If someone accidentally introduces hashing here, this assertion catches it.
+        grant_id = await _make_grant(store)
+        now = int(time.time())
+        sentinel = "raw-rt-memory-hash-check"
+        rt = RefreshTokenRecord(
+            token=sentinel,
+            grant_id=grant_id,
+            client_id="cli-1",
+            scopes=["read"],
+            subject="sub-1",
+            resource=None,
+            expires_at=now + 86400 * 30,
+        )
+        await store.put_refresh_token(rt)
+        assert sentinel in store._refresh_tokens, (
+            "InMemoryStore must key refresh tokens by raw value"
+        )
+        assert _sha256(sentinel) not in store._refresh_tokens, (
+            "InMemoryStore must NOT hash refresh tokens"
+        )
+        return  # hash-in-DB check only applies to PostgresStore
 
     grant_id = await _make_grant(store)
     now = int(time.time())

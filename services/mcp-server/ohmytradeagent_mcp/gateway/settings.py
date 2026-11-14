@@ -16,8 +16,16 @@ Optional:
   OMT_RATE_TOOLS_PER_MIN_SUBJECT — per-subject tool call RPM (default 60)
   OMT_RATE_TOOLS_PER_MIN_CLIENT  — per-client tool call RPM (default 300)
   OMT_RATE_AUTH_PER_MIN_IP       — per-IP auth endpoint RPM (default 30)
+  OMT_TRUSTED_PROXY_CIDRS — comma-separated CIDRs of trusted reverse proxies
+      (e.g. "10.42.0.0/16").  When a request arrives from a socket peer inside
+      one of these CIDRs, the ``CF-Connecting-IP`` header is trusted and used as
+      the rate-limit key; otherwise the socket peer address is used.  Default is
+      empty (never trust the header).  PR 5 sets this to the cloudflared pod CIDR.
+      An invalid CIDR causes startup to abort with exit code 2.
 """
 from __future__ import annotations
+
+import ipaddress
 
 
 class ConfigError(Exception):
@@ -67,6 +75,25 @@ class GatewaySettings:
         self.rate_tools_per_min_subject: int = _int("OMT_RATE_TOOLS_PER_MIN_SUBJECT", 60)
         self.rate_tools_per_min_client: int = _int("OMT_RATE_TOOLS_PER_MIN_CLIENT", 300)
         self.rate_auth_per_min_ip: int = _int("OMT_RATE_AUTH_PER_MIN_IP", 30)
+
+        # Trusted reverse-proxy CIDRs — CF-Connecting-IP is only honoured when
+        # the socket peer falls inside one of these networks.
+        raw_cidrs = env.get("OMT_TRUSTED_PROXY_CIDRS", "").strip()
+        if raw_cidrs:
+            trusted: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+            for token in raw_cidrs.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    trusted.append(ipaddress.ip_network(token, strict=False))
+                except ValueError as exc:
+                    raise ConfigError(
+                        f"Invalid OMT_TRUSTED_PROXY_CIDRS entry {token!r}: {exc}"
+                    ) from exc
+            self.trusted_proxy_cidrs: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = trusted
+        else:
+            self.trusted_proxy_cidrs = []
 
     @property
     def mcp_resource_url(self) -> str:

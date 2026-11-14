@@ -126,6 +126,7 @@ def make_app(
     email_verified: bool = True,
     idp=None,
     auth_rate_limiter=None,
+    extra_env: dict | None = None,
 ) -> Any:
     """Create a gateway Starlette app for testing.
 
@@ -144,6 +145,7 @@ def make_app(
         "OMT_BFF_URL": BFF_URL,
         "MCP_GATEWAY_SIGNING_KEY": TEST_SIGNING_KEY_PEM,
         "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
+        **(extra_env or {}),
     }
     settings = GatewaySettings(env)
     store = InMemoryStore(membership=dict(_DEFAULT_MEMBERSHIP))

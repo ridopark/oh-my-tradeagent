@@ -144,15 +144,8 @@ class PostgresStore:
             )
 
     # ------------------------------------------------------------------
-    # Protocol: get_membership / get_membership_sync (not supported)
+    # Protocol: get_membership
     # ------------------------------------------------------------------
-
-    def get_membership_sync(self, subject: str) -> list[str]:
-        """Not supported on PostgresStore — always use ``await get_membership()``."""
-        raise NotImplementedError(
-            "PostgresStore does not support synchronous get_membership_sync. "
-            "Call `await store.get_membership(subject)` instead."
-        )
 
     async def get_membership(self, subject: str) -> list[str]:
         """Return tenant ids for *subject* from dashboard_user.

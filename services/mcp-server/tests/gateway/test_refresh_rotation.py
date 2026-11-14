@@ -153,6 +153,93 @@ async def test_refresh_expiredToken_isInvalidGrant():
 
 
 @pytest.mark.asyncio
+async def test_refresh_concurrentDoubleRefresh_revokesGrant():
+    """Atomic-rotate returning False (concurrent double-refresh race loser) → invalid_grant + grant revoked.
+
+    Simulates the race: Thread A and Thread B both call load_refresh_token before
+    either rotation is committed.  Thread A wins the atomic UPDATE; Thread B's
+    exchange_refresh_token sees rotate_refresh_token return False.  Thread B must
+    get invalid_grant AND the whole grant is revoked so Thread A's new tokens die too.
+
+    Guard: ``if not rotated: revoke_grant_by_id`` in
+    ``OmtAuthorizationServerProvider.exchange_refresh_token``.
+    RED when that branch is removed (grant stays alive, no TokenError).
+    """
+    import time as _time
+
+    from mcp.server.auth.provider import RefreshToken, TokenError
+    from mcp.shared.auth import OAuthClientInformationFull
+    from pydantic import AnyUrl
+
+    from ohmytradeagent_mcp.gateway.provider import OmtAuthorizationServerProvider
+    from ohmytradeagent_mcp.gateway.store import InMemoryStore, RefreshTokenRecord
+
+    store = InMemoryStore(membership={"sub-1": ["acme"]})
+
+    grant_id = await store.create_grant(
+        client_id="cli-race",
+        provider="google",
+        subject="sub-1",
+        tenants=["acme"],
+        client_name="Race Test",
+    )
+    rt = RefreshTokenRecord(
+        token="rt-race",
+        grant_id=grant_id,
+        client_id="cli-race",
+        scopes=["read"],
+        subject="sub-1",
+        resource=None,
+        expires_at=int(_time.time()) + 86400 * 30,
+    )
+    await store.put_refresh_token(rt)
+
+    # Simulate Thread A winning the atomic rotate first
+    ok = await store.rotate_refresh_token("rt-race", "thread-a-new-token")
+    assert ok is True, "Thread A's rotation should succeed"
+
+    # Thread B now calls exchange_refresh_token with the same (now-rotated) token.
+    # It saw rotated_at=None when it called load_refresh_token (the race),
+    # but rotate_refresh_token returns False → must revoke + raise invalid_grant.
+    provider = OmtAuthorizationServerProvider(
+        store=store,
+        idp=None,
+        resource="https://example.com/mcp",
+        google_callback_url="https://example.com/oauth/google/callback",
+    )
+    client_info = OAuthClientInformationFull(
+        client_id="cli-race",
+        redirect_uris=[AnyUrl("https://example.com/cb")],
+        grant_types=["authorization_code"],
+        response_types=["code"],
+        scope="read",
+        token_endpoint_auth_method="none",
+    )
+    refresh_token_obj = RefreshToken(
+        token="rt-race",
+        client_id="cli-race",
+        scopes=["read"],
+        expires_at=int(_time.time()) + 86400 * 30,
+        resource=None,
+        subject="sub-1",
+    )
+
+    with pytest.raises(TokenError) as exc_info:
+        await provider.exchange_refresh_token(client_info, refresh_token_obj, ["read"])
+
+    assert exc_info.value.error == "invalid_grant", (
+        f"Concurrent race loser must raise invalid_grant, got: {exc_info.value.error}"
+    )
+
+    # Grant must be revoked so Thread A's new tokens are dead too
+    grant = await store.get_grant(grant_id)
+    assert grant is not None
+    assert grant.revoked_at is not None, (
+        "Grant must be revoked after concurrent double-refresh is detected"
+    )
+
+
+@pytest.mark.asyncio
 async def test_refresh_wrongClient_isInvalidClient():
     """Using a refresh token with a different client_id is rejected."""
     app = make_app()

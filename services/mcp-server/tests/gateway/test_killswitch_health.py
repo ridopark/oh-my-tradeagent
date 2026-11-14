@@ -1,13 +1,27 @@
 """Kill switch and health endpoint tests — Seam H.
 
-Tests 10-11: kill switch, host allow-list.
+Tests 10-11: kill switch, host allow-list, unhealthy store.
 """
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from tests.gateway.fixtures import make_app, make_app_disabled
+from ohmytradeagent_mcp.gateway.store import InMemoryStore
+from tests.gateway.fixtures import (
+    BFF_URL,
+    PUBLIC_URL,
+    TEST_SIGNING_KEY_PEM,
+    make_app,
+    make_app_disabled,
+)
+
+
+class _UnhealthyStore(InMemoryStore):
+    """InMemoryStore that always reports itself as unhealthy."""
+
+    async def is_healthy(self) -> bool:
+        return False
 
 # ---------------------------------------------------------------------------
 # Test 10: kill switch
@@ -57,6 +71,41 @@ async def test_readyz_200_whenEnabled():
 # ---------------------------------------------------------------------------
 # Test 11: host allow-list
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_readyz_503_whenStoreUnhealthy():
+    """/readyz returns 503 when the store is not healthy.
+
+    Guard: ``if not await store.is_healthy()`` in the ``_readyz`` handler.
+    RED when that check is removed (readyz always returns 200).
+    """
+    from ohmytradeagent_mcp.gateway.app import build_gateway_app
+    from ohmytradeagent_mcp.gateway.settings import GatewaySettings
+
+    env = {
+        "OMT_PUBLIC_URL": PUBLIC_URL,
+        "OMT_BFF_URL": BFF_URL,
+        "MCP_GATEWAY_SIGNING_KEY": TEST_SIGNING_KEY_PEM,
+        "OMT_ALLOWED_HOSTS": "tradeagent-mcp.ridopark.com",
+    }
+    settings = GatewaySettings(env)
+    store = _UnhealthyStore()
+    app = build_gateway_app(settings, store)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=PUBLIC_URL,
+    ) as client:
+        readyz_resp = await client.get("/readyz")
+        healthz_resp = await client.get("/healthz")
+
+    assert readyz_resp.status_code == 503, (
+        f"/readyz with unhealthy store must return 503, got {readyz_resp.status_code}"
+    )
+    assert healthz_resp.status_code == 200, (
+        "/healthz must remain 200 regardless of store health"
+    )
 
 
 @pytest.mark.asyncio

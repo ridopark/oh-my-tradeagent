@@ -160,11 +160,125 @@ async def test_authRate_perIp_31stRegister_is429_withRetryAfter():
 
 
 @pytest.mark.asyncio
-async def test_authRate_usesCfConnectingIp_whenPresent():
-    """CF-Connecting-IP header is used as the client IP for rate limiting."""
+async def test_authRate_untrustedPeer_cfHeaderIgnored():
+    """Security: without trusted-proxy config, CF-Connecting-IP is IGNORED.
+
+    Two requests from the same socket peer "127.0.0.1" but with different
+    CF-Connecting-IP values must share the peer's bucket, not the CF IPs'.
+
+    RED against unfixed code: the second request with a different CF IP is
+    not rate-limited (each CF IP has its own bucket in the broken version).
+    """
     clock = _make_clock(0.0)
     auth_limiter = AuthRateLimiter(per_ip_rpm=1, clock=clock)
+    # No OMT_TRUSTED_PROXY_CIDRS → CF header must be ignored
     app = make_app(auth_rate_limiter=auth_limiter)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=PUBLIC_URL,
+    ) as client:
+        # Request 1 — exhausts the peer bucket for "127.0.0.1"
+        resp1 = await client.post(
+            "/register",
+            json={"client_name": "Spoof1", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "10.10.10.1"},
+        )
+        assert resp1.status_code != 429
+
+        # Request 2 — DIFFERENT CF IP, same socket peer "127.0.0.1"
+        # CF header must be ignored → same bucket → 429
+        resp2 = await client.post(
+            "/register",
+            json={"client_name": "Spoof2", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "10.10.10.2"},
+        )
+        assert resp2.status_code == 429, (
+            "CF-Connecting-IP from untrusted peer must be ignored; "
+            "both requests share the peer-IP bucket so the second must be 429"
+        )
+
+
+@pytest.mark.asyncio
+async def test_authRate_trustedPeer_cfHeaderUsed():
+    """With a trusted-proxy CIDR covering the socket peer, CF-Connecting-IP is used."""
+    clock = _make_clock(0.0)
+    auth_limiter = AuthRateLimiter(per_ip_rpm=1, clock=clock)
+    # Socket peer is "127.0.0.1" (httpx ASGITransport default) → trust it
+    app = make_app(
+        auth_rate_limiter=auth_limiter,
+        extra_env={"OMT_TRUSTED_PROXY_CIDRS": "127.0.0.1/32"},
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=PUBLIC_URL,
+    ) as client:
+        # Request 1 from CF IP "1.2.3.4" — trusted peer, CF header is used
+        resp1 = await client.post(
+            "/register",
+            json={"client_name": "CF1", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "1.2.3.4"},
+        )
+        assert resp1.status_code != 429
+
+        # Request 2 from DIFFERENT CF IP "5.5.5.5" — different bucket, NOT rate-limited
+        resp2 = await client.post(
+            "/register",
+            json={"client_name": "CF2", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "5.5.5.5"},
+        )
+        assert resp2.status_code != 429, "Different CF IP from trusted peer gets its own bucket"
+
+
+@pytest.mark.asyncio
+async def test_authRate_ipv6TrustedPeer_cfHeaderUsed():
+    """IPv6 socket peer inside a trusted /128 CIDR: CF-Connecting-IP is used."""
+    clock = _make_clock(0.0)
+    auth_limiter = AuthRateLimiter(per_ip_rpm=1, clock=clock)
+    app = make_app(
+        auth_rate_limiter=auth_limiter,
+        extra_env={"OMT_TRUSTED_PROXY_CIDRS": "::1/128"},
+    )
+
+    # Simulate IPv6 socket peer "::1"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("::1", 123)),
+        base_url=PUBLIC_URL,
+    ) as client:
+        # Request 1 from CF IPv6 "2001:db8::1" — trusted peer, CF header used
+        resp1 = await client.post(
+            "/register",
+            json={"client_name": "V6App1", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "2001:db8::1"},
+        )
+        assert resp1.status_code != 429
+
+        # Request 2 from DIFFERENT CF IP "2001:db8::2" — different bucket, NOT rate-limited
+        resp2 = await client.post(
+            "/register",
+            json={"client_name": "V6App2", "redirect_uris": ["https://example.com/cb"],
+                  "grant_types": ["authorization_code"], "response_types": ["code"]},
+            headers={"CF-Connecting-IP": "2001:db8::2"},
+        )
+        assert resp2.status_code != 429, "Different CF IP from IPv6 trusted peer gets its own bucket"
+
+
+@pytest.mark.asyncio
+async def test_authRate_usesCfConnectingIp_whenPresent():
+    """CF-Connecting-IP header is used as the client IP when peer is trusted."""
+    clock = _make_clock(0.0)
+    auth_limiter = AuthRateLimiter(per_ip_rpm=1, clock=clock)
+    # Peer is "127.0.0.1" (httpx default); declare it trusted so CF header is honoured
+    app = make_app(
+        auth_rate_limiter=auth_limiter,
+        extra_env={"OMT_TRUSTED_PROXY_CIDRS": "127.0.0.1/32"},
+    )
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),

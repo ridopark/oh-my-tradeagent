@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import secrets
 import time
 
@@ -153,17 +154,46 @@ def _is_auth_rate_path(path: str) -> bool:
     return path in _AUTH_RATE_PATHS or path.startswith("/oauth/")
 
 
+def _is_peer_trusted(peer_ip: str, cidrs: list) -> bool:
+    """Return True when *peer_ip* falls inside any of the given *cidrs*.
+
+    Handles IPv4, IPv6, and IPv4-mapped IPv6 addresses (::ffff:a.b.c.d).
+    """
+    if not cidrs:
+        return False
+    try:
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(peer_ip)
+        # Unwrap IPv4-mapped IPv6 so "::ffff:10.0.0.1" matches "10.0.0.0/8"
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+    except ValueError:
+        return False
+    for cidr in cidrs:
+        try:
+            if addr in cidr:
+                return True
+        except TypeError:
+            # IPv4Address vs IPv6Network or vice versa — skip
+            pass
+    return False
+
+
 class _AuthRateLimitMiddleware:
     """ASGI middleware that enforces per-IP rate limits on OAuth auth endpoints.
 
-    Checks ``CF-Connecting-IP`` first (Cloudflare trusted header), then falls
-    back to the socket peer address.  Returns HTTP 429 + ``Retry-After`` when
-    the per-IP bucket is exhausted.
+    ``CF-Connecting-IP`` is only trusted when the socket peer address falls
+    inside one of the ``trusted_proxy_cidrs`` CIDRs (configured via
+    ``OMT_TRUSTED_PROXY_CIDRS``).  When the CIDR list is empty (the default)
+    the header is always ignored and the socket peer address is used directly.
+    This prevents spoofed headers from untrusted callers.
+
+    Returns HTTP 429 + ``Retry-After`` when the per-IP bucket is exhausted.
     """
 
-    def __init__(self, app: ASGIApp, limiter) -> None:
+    def __init__(self, app: ASGIApp, limiter, *, trusted_proxy_cidrs: list | None = None) -> None:
         self._app = app
         self._limiter = limiter
+        self._trusted_proxy_cidrs: list = trusted_proxy_cidrs or []
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -175,13 +205,16 @@ class _AuthRateLimitMiddleware:
             await self._app(scope, receive, send)
             return
 
-        # Extract client IP: CF-Connecting-IP > socket peer > fallback
+        # Extract client IP: socket peer first; trust CF-Connecting-IP only when
+        # the peer is inside a configured trusted-proxy CIDR.
+        client = scope.get("client")
+        peer_ip = client[0] if client else "127.0.0.1"
+
         cf_ip = _Headers(scope=scope).get("cf-connecting-ip")
-        if cf_ip:
+        if cf_ip and _is_peer_trusted(peer_ip, self._trusted_proxy_cidrs):
             ip = cf_ip.strip()
         else:
-            client = scope.get("client")
-            ip = client[0] if client else "127.0.0.1"
+            ip = peer_ip
 
         allowed, retry_after = self._limiter.check(ip)
         if not allowed:
@@ -590,7 +623,11 @@ def build_gateway_app(
 
     _inner = _CompositeApp()
     if auth_rate_limiter is not None:
-        _inner = _AuthRateLimitMiddleware(_inner, auth_rate_limiter)  # type: ignore[assignment]
+        _inner = _AuthRateLimitMiddleware(  # type: ignore[assignment]
+            _inner,
+            auth_rate_limiter,
+            trusted_proxy_cidrs=settings.trusted_proxy_cidrs,
+        )
     composite = _inner
     wrapped = _KillSwitchMiddleware(composite, disabled=settings.disabled)
 

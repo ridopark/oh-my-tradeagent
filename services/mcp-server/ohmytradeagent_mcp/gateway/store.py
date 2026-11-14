@@ -127,10 +127,6 @@ class OAuthStore(Protocol):
         """Update last_used_at on the grant, at most once per interval_s."""
         ...
 
-    def get_membership_sync(self, subject: str) -> list[str]:
-        """Return current tenant list for the given Google subject (synchronous, for re-checks)."""
-        ...
-
     async def get_membership(self, subject: str) -> list[str]:
         """Return current tenant list for subject (async; use this in app + provider)."""
         ...
@@ -225,12 +221,9 @@ class InMemoryStore:
         if now - last >= interval_s:
             self._last_used[grant_id] = now
 
-    def get_membership_sync(self, subject: str) -> list[str]:
-        return list(self._membership.get(subject, []))
-
     async def get_membership(self, subject: str) -> list[str]:
-        """Async membership lookup (wraps get_membership_sync)."""
-        return self.get_membership_sync(subject)
+        """Return current tenant list for subject."""
+        return list(self._membership.get(subject, []))
 
     async def store_access_token(
         self,
