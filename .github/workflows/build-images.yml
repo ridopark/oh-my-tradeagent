@@ -157,6 +157,12 @@ jobs:
             module: ""
             dockerfile: services/stc-intent-service/Dockerfile
             cache_scope: stc-intent-service
+          # Remote MCP gateway (#1060): Streamable HTTP + OAuth AS. Repo-root build context
+          # (the Dockerfile copies services/mcp-server/...). Own cache scope.
+          - service: mcp-server
+            module: ""
+            dockerfile: services/mcp-server/Dockerfile
+            cache_scope: mcp-server
     steps:
       - uses: actions/checkout@v4
 
