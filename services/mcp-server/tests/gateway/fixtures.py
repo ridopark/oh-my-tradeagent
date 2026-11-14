@@ -121,16 +121,22 @@ def make_app(
     return_store: bool = False,
     capture_bff: bool = False,
     bff_reject: bool = False,
+    sub: str = ACME_SUB,
+    wrong_nonce: bool = False,
+    email_verified: bool = True,
+    idp=None,
 ) -> Any:
     """Create a gateway Starlette app for testing.
 
     Returns:
-        The Starlette ASGI app, or (app, store) or (app, store, bff_calls)
-        depending on return_store and capture_bff.
+        - ``app`` when both flags are False
+        - ``(app, store)`` when ``return_store=True``
+        - ``(app, store, bff_calls)`` when both flags are True
     """
     from ohmytradeagent_mcp.gateway.app import build_gateway_app
     from ohmytradeagent_mcp.gateway.settings import GatewaySettings
     from ohmytradeagent_mcp.gateway.store import InMemoryStore
+    from tests.gateway.fake_idp import FakeIdP
 
     env = {
         "OMT_PUBLIC_URL": PUBLIC_URL,
@@ -147,7 +153,10 @@ def make_app(
         reject=bff_reject,
     )
 
-    app = build_gateway_app(settings, store, bff_transport=bff_transport)
+    if idp is None:
+        idp = FakeIdP(sub=sub, wrong_nonce=wrong_nonce, email_verified=email_verified)
+
+    app = build_gateway_app(settings, store, bff_transport=bff_transport, idp=idp)
 
     if capture_bff:
         return app, store, bff_calls

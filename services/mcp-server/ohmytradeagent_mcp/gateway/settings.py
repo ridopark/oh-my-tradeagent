@@ -6,9 +6,11 @@ Required:
   MCP_GATEWAY_SIGNING_KEY — Ed25519 private key PEM used to sign BFF assertions
 
 Optional:
-  OMT_GATEWAY_DISABLED — set to "true" to return 503 for all /mcp requests
-  OMT_ALLOWED_HOSTS    — comma-separated list of allowed Host header values
-  OMT_LISTEN           — listen address in host:port form (default "0.0.0.0:8080")
+  OMT_GATEWAY_DISABLED    — set to "true" to return 503 for all /mcp requests
+  OMT_ALLOWED_HOSTS       — comma-separated list of allowed Host header values
+  OMT_LISTEN              — listen address in host:port form (default "0.0.0.0:8080")
+  OMT_GOOGLE_CLIENT_ID    — Google OAuth 2.0 client id (required for production AS)
+  OMT_GOOGLE_CLIENT_SECRET — Google OAuth 2.0 client secret (required for production AS)
 """
 from __future__ import annotations
 
@@ -43,7 +45,16 @@ class GatewaySettings:
 
         self.listen: str = env.get("OMT_LISTEN", "0.0.0.0:8080").strip()
 
+        # Google OAuth — optional (tests inject a FakeIdP instead)
+        self.google_client_id: str | None = env.get("OMT_GOOGLE_CLIENT_ID") or None
+        self.google_client_secret: str | None = env.get("OMT_GOOGLE_CLIENT_SECRET") or None
+
     @property
     def mcp_resource_url(self) -> str:
         """The full URL of the /mcp endpoint, used as the OAuth resource indicator."""
         return f"{self.public_url}/mcp"
+
+    @property
+    def google_callback_url(self) -> str:
+        """The URL Google redirects to after authentication."""
+        return f"{self.public_url}/oauth/google/callback"

@@ -1,38 +1,51 @@
 """Gateway ASGI app builder.
 
-`build_gateway_app(settings, store, *, bff_transport=None)` returns a Starlette
-ASGI app that exposes the MCP server over Streamable HTTP with per-request
-OAuth token verification.
+``build_gateway_app(settings, store, *, bff_transport, idp, fetch_cimd)`` returns
+a Starlette ASGI app that exposes the MCP server over Streamable HTTP with a
+full OAuth 2.1 AS (Step 3b) or bare token verification (backward-compatible with
+Step 3a tests that seed tokens directly).
 
-The app structure (outside-in):
+App structure (outside-in):
   1. KillSwitchMiddleware — 503 for all paths except /healthz when disabled
   2. /healthz           — always 200 {"status":"ok"}
-  3. /readyz            — 200 {"status":"ok"} when enabled; 503 when disabled
-  4. /.well-known/oauth-protected-resource      — RFC 9728 protected-resource doc
-  5. /.well-known/oauth-protected-resource/mcp  — same (SDK-generated)
-  6. /mcp               — MCP Streamable HTTP endpoint, auth-gated by bearer
-                          token from InMemoryStore / PostgresStore
+  3. /readyz            — 200 when enabled; 503 when disabled
+  4. /.well-known/oauth-protected-resource — RFC 9728 doc (root path)
+  5. SDK Starlette app:
+       /.well-known/oauth-authorization-server  (patched: adds CIMD flag)
+       /authorize, /token, /register, /revoke   (SDK AS routes)
+       /oauth/google/callback                   (custom: IdP callback)
+       /oauth/consent                           (custom: consent POST)
+       /mcp                                     (MCP endpoint, auth-gated)
+       /.well-known/oauth-protected-resource/mcp (SDK-generated)
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import secrets
+import time
 
-from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.settings import (
+    AuthSettings,
+    ClientRegistrationOptions,
+    RevocationOptions,
+)
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.datastructures import Headers as _Headers
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ohmytradeagent_mcp.gateway.assertion import Signer
+from ohmytradeagent_mcp.gateway.consent import render_consent
+from ohmytradeagent_mcp.gateway.provider import OmtAuthorizationServerProvider
 from ohmytradeagent_mcp.gateway.resolver import OAuthIdentityResolver
 from ohmytradeagent_mcp.gateway.settings import GatewaySettings
 from ohmytradeagent_mcp.gateway.store import InMemoryStore
-from ohmytradeagent_mcp.gateway.verifier import StoreTokenVerifier
 from ohmytradeagent_mcp.tools import build_server
 
 
@@ -57,15 +70,12 @@ class _LazyLifespanApp:
         self._lifespan_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     def _get_lock(self) -> asyncio.Lock:
-        # Create the lock lazily so it is bound to the running event loop.
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
-            # Pass real lifespan events through (e.g. from uvicorn) and mark as
-            # started when startup.complete is sent, so the lazy path is skipped.
             async def _intercept_send(msg: dict) -> None:
                 if msg.get("type") == "lifespan.startup.complete":
                     self._started = True
@@ -103,16 +113,10 @@ class _LazyLifespanApp:
 
 
 def _get_host_from_scope(scope: Scope) -> str | None:
-    """Return the ``Host`` header value from an ASGI HTTP scope, or ``None``."""
     return _Headers(scope=scope).get("host")
 
 
 def _host_matches_allowed(host: str, allowed_hosts: list[str]) -> bool:
-    """Return True if *host* matches any entry in *allowed_hosts*.
-
-    Supports trailing ``:*`` patterns for wildcard-port matching, e.g.
-    ``"127.0.0.1:*"`` matches ``"127.0.0.1:12345"``.
-    """
     if host in allowed_hosts:
         return True
     for pattern in allowed_hosts:
@@ -124,8 +128,6 @@ def _host_matches_allowed(host: str, allowed_hosts: list[str]) -> bool:
 
 
 class _KillSwitchMiddleware:
-    """Return 503 for every path except /healthz when gateway is disabled."""
-
     def __init__(self, app: ASGIApp, *, disabled: bool) -> None:
         self._app = app
         self._disabled = disabled
@@ -144,37 +146,284 @@ class _KillSwitchMiddleware:
         await self._app(scope, receive, send)
 
 
+def _patch_as_metadata(sdk_app: Starlette, issuer_url, auth_settings) -> None:
+    """Replace the SDK's AS metadata route to add ``client_id_metadata_document_supported``."""
+    from mcp.server.auth.handlers.metadata import MetadataHandler
+    from mcp.server.auth.routes import build_metadata, cors_middleware
+
+    metadata = build_metadata(
+        issuer_url,
+        None,
+        auth_settings.client_registration_options,
+        auth_settings.revocation_options,
+    )
+    metadata.client_id_metadata_document_supported = True
+
+    new_route = Route(
+        "/.well-known/oauth-authorization-server",
+        endpoint=cors_middleware(MetadataHandler(metadata).handle, ["GET", "OPTIONS"]),
+        methods=["GET", "OPTIONS"],
+    )
+
+    routes = sdk_app.router.routes
+    for i, route in enumerate(routes):
+        if getattr(route, "path", None) == "/.well-known/oauth-authorization-server":
+            routes[i] = new_route
+            return
+    # Not found (shouldn't happen when auth_server_provider is set), just append
+    routes.append(new_route)
+
+
+def _make_google_callback_handler(
+    provider: OmtAuthorizationServerProvider,
+    store: InMemoryStore,
+    settings: GatewaySettings,
+):
+    """Return the ASGI handler for GET /oauth/google/callback."""
+
+    async def google_callback(request: Request) -> Response:
+        code = request.query_params.get("code", "")
+        state = request.query_params.get("state", "")
+
+        if not state:
+            return JSONResponse({"error": "missing_state"}, status_code=400)
+
+        pending = await store.get_pending_auth(state)
+        if pending is None:
+            return JSONResponse({"error": "unknown_state"}, status_code=400)
+
+        if pending.expires_at < time.time():
+            await store.consume_pending_auth(state)
+            return JSONResponse({"error": "expired_pending"}, status_code=400)
+
+        # Exchange code with IdP
+        try:
+            identity = await provider._idp.exchange(code, settings.google_callback_url)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                {"error": "idp_error", "detail": str(exc)},
+                status_code=502,
+            )
+
+        # Verify nonce
+        if identity.nonce != pending.nonce:
+            return JSONResponse({"error": "nonce_mismatch"}, status_code=400)
+
+        # Verify email is verified
+        if not identity.email_verified:
+            from mcp.server.auth.provider import construct_redirect_uri
+            redirect_url = construct_redirect_uri(
+                pending.redirect_uri,
+                error="access_denied",
+                error_description="email_not_verified",
+                state=pending.client_state,
+            )
+            return RedirectResponse(redirect_url, status_code=302)
+
+        # Look up tenant membership
+        tenants = store.get_membership_sync(identity.sub)
+        if not tenants:
+            from mcp.server.auth.provider import construct_redirect_uri
+            await store.consume_pending_auth(state)
+            redirect_url = construct_redirect_uri(
+                pending.redirect_uri,
+                error="access_denied",
+                error_description="not_a_member",
+                state=pending.client_state,
+            )
+            return RedirectResponse(redirect_url, status_code=302)
+
+        # Generate CSRF token
+        csrf_token = secrets.token_hex(32)
+        csrf_hash = hashlib.sha256(csrf_token.encode()).hexdigest()
+
+        # Update pending auth with identity and CSRF
+        await store.update_pending_after_callback(
+            state,
+            csrf_hash=csrf_hash,
+            provider="google",
+            subject=identity.sub,
+            tenants=tenants,
+        )
+
+        # Render consent page
+        client_name = pending.client_name
+        body, headers = render_consent(
+            client_name=client_name,
+            client_id=pending.client_id,
+            tenants=tenants,
+            state=state,
+            csrf_token=csrf_token,
+        )
+        return HTMLResponse(content=body, status_code=200, headers=headers)
+
+    return google_callback
+
+
+def _make_consent_handler(
+    provider: OmtAuthorizationServerProvider,
+    store: InMemoryStore,
+    settings: GatewaySettings,
+):
+    """Return the ASGI handler for POST /oauth/consent."""
+
+    async def consent_post(request: Request) -> Response:
+        # Same-origin check: Sec-Fetch-Site must be "same-origin" OR
+        # Origin header must match our public URL
+        sec_fetch_site = request.headers.get("sec-fetch-site", "")
+        origin = request.headers.get("origin", "")
+        public_origin = settings.public_url  # e.g. https://tradeagent-mcp.ridopark.com
+
+        if sec_fetch_site:
+            if sec_fetch_site != "same-origin":
+                return JSONResponse(
+                    {"error": "forbidden", "detail": "cross-site request"},
+                    status_code=403,
+                )
+        elif origin and origin.rstrip("/") != public_origin.rstrip("/"):
+            return JSONResponse(
+                {"error": "forbidden", "detail": "origin mismatch"},
+                status_code=403,
+            )
+        # If neither header present, we still proceed (direct API calls, e.g. curl tests)
+
+        form = await request.form()
+        state = form.get("state", "")
+        csrf = form.get("csrf", "")
+        action = form.get("action", "")
+        tenant_values = form.getlist("tenants")
+
+        if not state:
+            return JSONResponse({"error": "missing_state"}, status_code=400)
+
+        pending = await store.get_pending_auth(state)
+        if pending is None:
+            return JSONResponse({"error": "unknown_state"}, status_code=400)
+
+        if pending.csrf_hash is None:
+            return JSONResponse({"error": "csrf_not_set"}, status_code=400)
+
+        # Verify CSRF
+        actual_hash = hashlib.sha256(csrf.encode()).hexdigest()
+        if actual_hash != pending.csrf_hash:
+            return JSONResponse({"error": "invalid_csrf"}, status_code=400)
+
+        # Consume pending auth (also invalidates the CSRF — single-use)
+        await store.consume_pending_auth(state)
+
+        from mcp.server.auth.provider import construct_redirect_uri
+
+        if action == "deny":
+            redirect_url = construct_redirect_uri(
+                pending.redirect_uri,
+                error="access_denied",
+                state=pending.client_state,
+            )
+            return RedirectResponse(redirect_url, status_code=302)
+
+        if action != "approve":
+            return JSONResponse({"error": "invalid_action"}, status_code=400)
+
+        # Validate tenants: must be non-empty and a subset of pending.tenants
+        if not tenant_values:
+            return JSONResponse({"error": "no_tenant_selected"}, status_code=400)
+
+        tenant_set = set(pending.tenants)
+        for t in tenant_values:
+            if t not in tenant_set:
+                return JSONResponse(
+                    {"error": "tenant_not_in_set", "tenant": t},
+                    status_code=400,
+                )
+
+        # Create grant
+        grant_id = await store.create_grant(
+            client_id=pending.client_id,
+            provider=pending.provider or "google",
+            subject=pending.subject or "",
+            tenants=list(tenant_values),
+            client_name=pending.client_name,
+        )
+
+        # Mint authorization code (5-min lifetime)
+        code_value = secrets.token_hex(32)
+        from ohmytradeagent_mcp.gateway.store import CodeRecord
+        await store.put_code(
+            CodeRecord(
+                code=code_value,
+                grant_id=grant_id,
+                client_id=pending.client_id,
+                code_challenge=pending.code_challenge,
+                redirect_uri=pending.redirect_uri,
+                redirect_uri_provided_explicitly=pending.redirect_uri_provided_explicitly,
+                resource=pending.resource,
+                scopes=pending.scopes,
+                subject=pending.subject or "",
+                expires_at=time.time() + 300,  # 5 minutes
+            )
+        )
+
+        redirect_url = construct_redirect_uri(
+            pending.redirect_uri,
+            code=code_value,
+            state=pending.client_state,
+        )
+        return RedirectResponse(redirect_url, status_code=302)
+
+    return consent_post
+
+
 def build_gateway_app(
     settings: GatewaySettings,
     store: InMemoryStore,
     *,
     bff_transport=None,
-) -> Starlette:
-    """Build and return the gateway Starlette ASGI app.
+    idp=None,
+    fetch_cimd=None,
+):
+    """Build and return the gateway ASGI app.
 
     Args:
         settings: Parsed gateway settings.
-        store: OAuth token store (InMemoryStore for tests; PostgresStore in prod).
+        store: OAuth store (InMemoryStore for tests; PostgresStore in prod).
         bff_transport: Optional httpx transport override for BFF calls (testing).
+        idp: Identity provider (GoogleIdP or FakeIdP; None → build GoogleIdP).
+        fetch_cimd: Optional injectable CIMD fetcher (None → real cached fetcher).
 
     Returns:
-        A Starlette app ready to serve.  Wrap it in uvicorn for production.
+        A callable ASGI app ready to serve.
     """
-    signer = Signer(settings.signing_key_pem)
+    if idp is None:
+        from ohmytradeagent_mcp.gateway.google import GoogleIdP
+        idp = GoogleIdP(
+            settings.google_client_id or "",
+            settings.google_client_secret or "",
+        )
 
-    # Build MCP server with auth (resource-server only; issuer_url = gateway itself
-    # because Step 3b will add the AS here; for 3a it's a placeholder that makes
-    # the SDK generate valid protected-resource metadata).
+    signer = Signer(settings.signing_key_pem)
     resource_url = AnyHttpUrl(settings.mcp_resource_url)
     issuer_url = AnyHttpUrl(settings.public_url)
+
+    provider = OmtAuthorizationServerProvider(
+        store=store,
+        idp=idp,
+        resource=settings.mcp_resource_url,
+        google_callback_url=settings.google_callback_url,
+        fetch_cimd_fn=fetch_cimd,
+    )
 
     auth_settings = AuthSettings(
         issuer_url=issuer_url,
         resource_server_url=resource_url,
         required_scopes=["read"],
-        validate_token_resource=False,  # StoreTokenVerifier checks resource itself
+        validate_token_resource=False,
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=["read"],
+            default_scopes=["read"],
+        ),
+        revocation_options=RevocationOptions(enabled=True),
     )
-    verifier = StoreTokenVerifier(store, resource=settings.mcp_resource_url)
 
     mcp_server = MCPServer(
         name="omt-mcp",
@@ -183,21 +432,27 @@ def build_gateway_app(
             "risk state and market context.  Cannot trade."
         ),
         auth=auth_settings,
-        token_verifier=verifier,
+        auth_server_provider=provider,
     )
 
-    # Scope callable: OAuthIdentityResolver reads the auth contextvar per tool call
     resolver = OAuthIdentityResolver(
         store=store,
         signer=signer,
         bff_url=settings.bff_url,
         bff_transport=bff_transport,
     )
-
-    # Register tools + prompt on the pre-built MCPServer
     build_server(resolver, mcp=mcp_server)
 
-    # Allowed hosts: configured hosts + always allow localhost for local/e2e testing
+    # Register custom routes BEFORE building the Starlette app
+    @mcp_server.custom_route("/oauth/google/callback", methods=["GET"])
+    async def google_callback(request: Request) -> Response:
+        return await _make_google_callback_handler(provider, store, settings)(request)
+
+    @mcp_server.custom_route("/oauth/consent", methods=["POST"])
+    async def consent_post(request: Request) -> Response:
+        return await _make_consent_handler(provider, store, settings)(request)
+
+    # Allowed hosts
     allowed_hosts = list(settings.allowed_hosts)
     for _local in ("127.0.0.1:*", "localhost:*", "[::1]:*"):
         if _local not in allowed_hosts:
@@ -212,8 +467,6 @@ def build_gateway_app(
     else:
         transport_security = None
 
-    # Build the SDK Starlette app (includes /mcp, auth middleware, and
-    # /.well-known/oauth-protected-resource/mcp route)
     sdk_app = mcp_server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,
@@ -221,13 +474,12 @@ def build_gateway_app(
         transport_security=transport_security,
     )
 
-    # Wrap the SDK app to lazily start its ASGI lifespan on the first HTTP
-    # request.  httpx.ASGITransport (used in tests) skips lifespan events, which
-    # would leave StreamableHTTPSessionManager._task_group as None.  Under
-    # uvicorn the real lifespan is forwarded unchanged.
+    # Patch AS metadata to add client_id_metadata_document_supported: true
+    _patch_as_metadata(sdk_app, issuer_url, auth_settings)
+
     lazy_sdk_app = _LazyLifespanApp(sdk_app)
 
-    # Build a bare protected-resource metadata doc for the extra route
+    # Build extra routes (health, readyz, root protected-resource metadata)
     _resource_metadata = {
         "resource": settings.mcp_resource_url,
         "authorization_servers": [settings.public_url],
@@ -246,43 +498,32 @@ def build_gateway_app(
             return JSONResponse({"error": "disabled"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
-    # Mount health routes + extra metadata route on a wrapper Starlette app
-    # so they don't go through the SDK's transport security / auth middleware.
-    # The kill-switch middleware wraps everything.
     extra_routes = [
         Route("/healthz", endpoint=_healthz, methods=["GET"]),
         Route("/readyz", endpoint=_readyz, methods=["GET"]),
-        # RFC 9728 §3.1: canonical path WITHOUT the resource suffix
         Route(
             "/.well-known/oauth-protected-resource",
             endpoint=_protected_resource_meta,
             methods=["GET"],
         ),
     ]
-
-    # We need a composite app:
-    # - /healthz, /readyz, /.well-known/oauth-protected-resource handled by our routes
-    # - everything else goes to the lazy SDK app (with pre-auth host guard)
     extra_starlette = Starlette(routes=extra_routes)
 
-    # Capture the allowed_hosts list in the closure so _CompositeApp can check it.
     _allowed_hosts_snapshot = list(allowed_hosts)
 
-    class _CompositeApp:
-        _HANDLED = frozenset([
-            "/healthz",
-            "/readyz",
-            "/.well-known/oauth-protected-resource",
-        ])
+    _HANDLED = frozenset([
+        "/healthz",
+        "/readyz",
+        "/.well-known/oauth-protected-resource",
+    ])
 
+    class _CompositeApp:
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] == "http":
                 path = scope.get("path", "")
-                if path in self._HANDLED:
+                if path in _HANDLED:
                     await extra_starlette(scope, receive, send)
                     return
-                # Apply DNS-rebinding host guard BEFORE the SDK's auth middleware
-                # so a disallowed host gets 421 even when no bearer is present.
                 if _allowed_hosts_snapshot:
                     host = _get_host_from_scope(scope)
                     if not host or not _host_matches_allowed(host, _allowed_hosts_snapshot):
@@ -296,12 +537,7 @@ def build_gateway_app(
     composite = _CompositeApp()
     wrapped = _KillSwitchMiddleware(composite, disabled=settings.disabled)
 
-    # Wrap in Starlette for type compatibility (some test helpers expect Starlette)
-    # but we need the actual ASGI app to be the wrapped one.
-    # Return a lightweight Starlette that delegates to the wrapped composite.
     class _GatewayApp:
-        """Thin ASGI wrapper that is callable like Starlette."""
-
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             await wrapped(scope, receive, send)
 

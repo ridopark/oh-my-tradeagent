@@ -11,12 +11,90 @@ Token storage: tokens are stored by their raw string (the opaque bearer).  The
 SDK.  Hashing is done at the store boundary: `InMemoryStore` stores raw strings
 (for simplicity in tests), while `PostgresStore` will store SHA-256 hex hashes,
 matching V17.
+
+Step 3b additions: `PendingAuth`, `GrantRecord`, `CodeRecord`,
+`RefreshTokenRecord` dataclasses; extended `InMemoryStore` with methods for
+the full OAuth authorization-code flow.
 """
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+# ------------------------------------------------------------------
+# Step 3b data classes
+# ------------------------------------------------------------------
+
+
+@dataclass
+class PendingAuth:
+    """One in-flight authorization request (10-minute lifetime)."""
+
+    state: str                          # raw 256-bit state; keyed by this
+    client_id: str
+    client_state: str | None            # the client's original state param
+    redirect_uri: str
+    redirect_uri_provided_explicitly: bool
+    code_challenge: str
+    scopes: list[str]
+    resource: str | None
+    nonce: str                          # our nonce sent to the IdP
+    created_at: float
+    expires_at: float
+    client_name: str | None = None
+    # Set after IdP callback, consumed by /consent POST:
+    csrf_hash: str | None = None
+    provider: str | None = None
+    subject: str | None = None
+    tenants: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GrantRecord:
+    """One mcp_oauth_grant row."""
+
+    grant_id: str
+    client_id: str
+    provider: str
+    subject: str
+    tenants: list[str]
+    created_at: float
+    last_used_at: float
+    revoked_at: float | None = None
+    client_name: str | None = None
+
+
+@dataclass
+class CodeRecord:
+    """One mcp_oauth_code row."""
+
+    code: str                           # raw; stored as hash in Postgres
+    grant_id: str
+    client_id: str
+    code_challenge: str
+    redirect_uri: str
+    redirect_uri_provided_explicitly: bool
+    resource: str | None
+    scopes: list[str]
+    subject: str
+    expires_at: float
+    consumed_at: float | None = None
+
+
+@dataclass
+class RefreshTokenRecord:
+    """One mcp_oauth_refresh_token row."""
+
+    token: str                          # raw; stored as hash in Postgres
+    grant_id: str
+    client_id: str
+    scopes: list[str]
+    subject: str
+    resource: str | None
+    expires_at: int                     # epoch seconds
+    rotated_at: float | None = None     # None = still valid
 
 
 @dataclass
@@ -35,7 +113,7 @@ class AccessTokenRecord:
 
 @runtime_checkable
 class OAuthStore(Protocol):
-    """Minimal store interface for Step 3a."""
+    """Store interface for the MCP gateway (Steps 3a + 3b)."""
 
     async def get_access_token(self, token: str) -> AccessTokenRecord | None:
         """Return the token record if found, or None."""
@@ -61,14 +139,27 @@ class InMemoryStore:
     """
 
     def __init__(self, membership: dict[str, list[str]] | None = None) -> None:
+        # -- access tokens (Step 3a + 3b) --
         # {token: AccessTokenRecord}
         self._tokens: dict[str, AccessTokenRecord] = {}
-        # {grant_id: float | None} — revoked_at timestamps
+        # {grant_id: float} — revoked_at timestamps
         self._revoked: dict[str, float] = {}
         # {grant_id: float} — last_used_at
         self._last_used: dict[str, float] = {}
         # {subject: [tenant_id, ...]} — fake membership for tests
         self._membership: dict[str, list[str]] = dict(membership or {})
+
+        # -- Step 3b additions --
+        # {state: PendingAuth}
+        self._pending_auths: dict[str, PendingAuth] = {}
+        # {grant_id: GrantRecord}
+        self._grants: dict[str, GrantRecord] = {}
+        # {code: CodeRecord}
+        self._codes: dict[str, CodeRecord] = {}
+        # {token: RefreshTokenRecord}
+        self._refresh_tokens: dict[str, RefreshTokenRecord] = {}
+        # {client_id: OAuthClientInformationFull}
+        self._clients: dict = {}
 
     # ------------------------------------------------------------------
     # OAuthStore protocol
@@ -117,9 +208,15 @@ class InMemoryStore:
         expires_at: int,
         resource: str | None,
         revoked: bool = False,
+        grant_id: str | None = None,
     ) -> None:
-        """Seed an access token for tests."""
-        grant_id = f"grant-{token}"
+        """Seed or store an access token.
+
+        ``grant_id`` is optional; when absent a synthetic id is generated for
+        backward-compat with 3a tests that seed tokens directly.
+        """
+        if grant_id is None:
+            grant_id = f"grant-{token}"
         rec = AccessTokenRecord(
             token=token,
             grant_id=grant_id,
@@ -141,3 +238,124 @@ class InMemoryStore:
     def set_membership(self, subject: str, tenants: list[str]) -> None:
         """Set the full tenant list for a subject."""
         self._membership[subject] = list(tenants)
+
+    # ------------------------------------------------------------------
+    # Step 3b helpers
+    # ------------------------------------------------------------------
+
+    async def put_pending_auth(self, pending: PendingAuth) -> None:
+        """Store a pending authorization request."""
+        self._pending_auths[pending.state] = pending
+
+    async def get_pending_auth(self, state: str) -> PendingAuth | None:
+        """Return the pending auth for *state*, or None."""
+        return self._pending_auths.get(state)
+
+    async def update_pending_after_callback(
+        self,
+        state: str,
+        *,
+        csrf_hash: str,
+        provider: str,
+        subject: str,
+        tenants: list[str],
+    ) -> bool:
+        """Fill in the IdP-side fields after the callback; return True if found."""
+        pending = self._pending_auths.get(state)
+        if pending is None:
+            return False
+        pending.csrf_hash = csrf_hash
+        pending.provider = provider
+        pending.subject = subject
+        pending.tenants = list(tenants)
+        return True
+
+    async def consume_pending_auth(self, state: str) -> PendingAuth | None:
+        """Remove and return the pending auth for *state* (single-use)."""
+        return self._pending_auths.pop(state, None)
+
+    async def create_grant(
+        self,
+        *,
+        client_id: str,
+        provider: str,
+        subject: str,
+        tenants: list[str],
+        client_name: str | None,
+    ) -> str:
+        """Create a new grant and return its id."""
+        grant_id = str(uuid.uuid4())
+        now = time.time()
+        self._grants[grant_id] = GrantRecord(
+            grant_id=grant_id,
+            client_id=client_id,
+            provider=provider,
+            subject=subject,
+            tenants=list(tenants),
+            created_at=now,
+            last_used_at=now,
+            client_name=client_name,
+        )
+        return grant_id
+
+    async def get_grant(self, grant_id: str) -> GrantRecord | None:
+        """Return the grant record, or None."""
+        return self._grants.get(grant_id)
+
+    async def revoke_grant_by_id(self, grant_id: str) -> None:
+        """Revoke a grant (also revokes all its tokens via revoke_grant)."""
+        await self.revoke_grant(grant_id)
+        # Also stamp the GrantRecord itself so load_refresh_token can detect it
+        gr = self._grants.get(grant_id)
+        if gr is not None and gr.revoked_at is None:
+            gr.revoked_at = time.time()
+
+    async def put_code(self, code: CodeRecord) -> None:
+        """Store an authorization code."""
+        self._codes[code.code] = code
+
+    async def get_code(self, code: str) -> CodeRecord | None:
+        """Return the code record, or None."""
+        return self._codes.get(code)
+
+    async def consume_code(self, code: str) -> None:
+        """Mark a code as consumed (single-use enforcement)."""
+        rec = self._codes.get(code)
+        if rec is not None:
+            rec.consumed_at = time.time()
+
+    async def put_refresh_token(self, rt: RefreshTokenRecord) -> None:
+        """Store a refresh token."""
+        self._refresh_tokens[rt.token] = rt
+
+    async def get_refresh_token(self, token: str) -> RefreshTokenRecord | None:
+        """Return the refresh token record, or None."""
+        return self._refresh_tokens.get(token)
+
+    async def rotate_refresh_token(self, old_token: str, new_token: str) -> None:
+        """Mark *old_token* as rotated (reuse-detection sentinal)."""
+        rec = self._refresh_tokens.get(old_token)
+        if rec is not None:
+            rec.rotated_at = time.time()
+
+    async def put_client(self, client) -> None:  # client: OAuthClientInformationFull
+        """Store a registered DCR client."""
+        self._clients[client.client_id] = client
+
+    async def get_client_record(self, client_id: str):  # -> OAuthClientInformationFull | None
+        """Return a registered client, or None."""
+        return self._clients.get(client_id)
+
+    async def sweep_expired_clients(self) -> None:
+        """Remove clients whose ``expires_at`` has passed and have never been used."""
+        now = time.time()
+        to_delete = [
+            cid
+            for cid, c in self._clients.items()
+            if hasattr(c, "_expires_at")
+            and c._expires_at is not None
+            and c._expires_at < now
+            and not hasattr(c, "_last_used_at")
+        ]
+        for cid in to_delete:
+            del self._clients[cid]
