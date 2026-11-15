@@ -222,6 +222,9 @@ async def test_dns_rebinding_pins_to_vetted_ip(monkeypatch):
         "sni_hostname extension missing — TLS hostname verification would not apply "
         "to the original hostname"
     )
+    # httpcore/anyio require a str here; bytes crashes the real TLS handshake
+    # (AttributeError in idna2008_resolve), which a mock transport never reaches.
+    assert sni == _CIMD_HOST, f"sni_hostname must be the str hostname, got {sni!r}"
 
 
 @pytest.mark.asyncio

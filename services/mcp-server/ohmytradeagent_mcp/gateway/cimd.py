@@ -191,7 +191,7 @@ async def fetch_cimd_document(url: str, *, _transport=None) -> dict:
             headers={"Accept": "application/json", "Host": host_header},
             # sni_hostname tells httpcore to verify TLS against the original
             # hostname, not the IP — preserving certificate verification.
-            extensions={"sni_hostname": host.encode()},
+            extensions={"sni_hostname": host},
         ) as resp:
             # Never follow redirects: CIMD documents are fetched directly.
             if 300 <= resp.status_code < 400:
