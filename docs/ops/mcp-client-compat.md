@@ -224,7 +224,7 @@ For **Pro/Max plans**:
    This app cannot place, change or cancel orders.", and checkboxes for the
    tenant(s) the account belongs to.
 9. Select the tenant(s) to share and click **Approve**.
-10. The browser closes and the connector is active. The 7 tools and the
+10. The browser closes and the connector is active. The 13 tools and the
     `analyze_positions` prompt are available in new conversations.
 
 For **Team/Enterprise plans**: an owner first adds the connector under

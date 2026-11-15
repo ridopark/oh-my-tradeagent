@@ -1,0 +1,28 @@
+{
+  "ticker": "SMCI",
+  "price": 95.5,
+  "trade_time": "2026-11-13T20:59:58Z",
+  "bid": 95.4,
+  "ask": 95.6,
+  "quote_time": "2026-11-13T20:59:59Z",
+  "day": {
+    "date": "2026-11-13",
+    "open": 94.0,
+    "high": 96.2,
+    "low": 93.5,
+    "close": 95.5,
+    "volume": 1200000,
+    "vwap": 95.1
+  },
+  "prev_day": {
+    "date": "2026-11-12",
+    "open": 92.0,
+    "high": 94.4,
+    "low": 91.8,
+    "close": 94.0,
+    "volume": 1100000,
+    "vwap": 93.2
+  },
+  "day_change": 1.5,
+  "day_change_pct": 1.6
+}

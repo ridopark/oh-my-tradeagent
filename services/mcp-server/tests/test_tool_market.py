@@ -56,15 +56,19 @@ def test_getQuote_returnsBffFields(test_binding, stub_bff):
 
 
 # ---------------------------------------------------------------------------
-# test 2: get_quote — 404 manual_entry_disabled is a clear ToolError
+# test 2: get_quote — reads the ungated market route, never the manual-entry one
 # ---------------------------------------------------------------------------
 
 
-def test_getQuote_manualEntryDisabled404_isClearToolError(test_binding):
+def test_getQuote_usesMarketRoute_notManualEntryRoute(test_binding):
+    seen: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/entries/quote":
-            return httpx.Response(404, json={"error": "manual_entry_disabled"})
-        return httpx.Response(404, json={"error": "not_found"})
+        seen.append(request.url.path)
+        if request.url.path == "/api/market/option-quote":
+            return httpx.Response(200, json={"occ": "SMCI261120C00050000", "bid": 2.0, "ask": None})
+        # What a tenant with manual entry off gets from the old route.
+        return httpx.Response(404, json={"error": "manual_entry_disabled"})
 
     from ohmytradeagent_mcp.bff import BffClient
 
@@ -76,12 +80,10 @@ def test_getQuote_manualEntryDisabled404_isClearToolError(test_binding):
             return await client.call_tool("get_quote", {"occ": "SMCI261120C00050000"})
 
     result = _run(run())
-    assert result.is_error
-    text = result.content[0].text
-    assert "manual entry is disabled" in text
-    assert "manual_entry_disabled" in text
-    # Must not raise as a bare Python exception
-    assert "Traceback" not in text
+    assert not result.is_error, result.content[0].text
+    data = json.loads(result.content[0].text)
+    assert data["bid"] == 2.0 and data["ask"] is None
+    assert seen == ["/api/market/option-quote"]
 
 
 # ---------------------------------------------------------------------------

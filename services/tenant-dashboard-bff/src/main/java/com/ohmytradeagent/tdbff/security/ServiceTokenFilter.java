@@ -102,7 +102,17 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
           "/api/darkpool/prints",
           "/api/darkpool/summary",
           "/api/mcp/whoami",
-          "/api/notional-cap");
+          "/api/notional-cap",
+          "/api/market/snapshot",
+          "/api/market/bars",
+          "/api/market/news",
+          "/api/market/movers",
+          "/api/market/clock",
+          "/api/market/corporate-actions",
+          "/api/market/open-interest",
+          "/api/market/option-quote",
+          "/api/market/chain-expirations",
+          "/api/market/chain");
 
   private final String sharedToken;
   private final String optionsChatIngestToken;

@@ -1,0 +1,15 @@
+{
+  "underlying": "SMCI",
+  "expiration": "2026-11-20",
+  "right": "C",
+  "contracts": {
+    "SMCI261120C00090000": {
+      "open_interest": 1500,
+      "open_interest_date": "2026-11-12"
+    },
+    "SMCI261120C00095000": {
+      "open_interest": 4200,
+      "open_interest_date": "2026-11-12"
+    }
+  }
+}

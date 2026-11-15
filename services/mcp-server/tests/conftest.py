@@ -68,14 +68,35 @@ def _stub_handler(request: httpx.Request) -> httpx.Response:
     if path == "/api/orders":
         return _json_response(_load("orders.json"))
 
-    if path == "/api/entries/quote":
-        return _json_response(_load("entries_quote.json"))
+    if path == "/api/market/option-quote":
+        return _json_response(_load("market_option_quote.json"))
 
-    if path == "/api/entries/chain/expirations":
-        return _json_response(_load("entries_chain_expirations.json"))
+    if path == "/api/market/chain-expirations":
+        return _json_response(_load("market_chain_expirations.json"))
 
-    if path == "/api/entries/chain":
-        return _json_response(_load("entries_chain.json"))
+    if path == "/api/market/chain":
+        return _json_response(_load("market_chain.json"))
+
+    if path == "/api/market/snapshot":
+        return _json_response(_load("market_snapshot.json"))
+
+    if path == "/api/market/bars":
+        return _json_response(_load("market_bars.json"))
+
+    if path == "/api/market/news":
+        return _json_response(_load("market_news.json"))
+
+    if path == "/api/market/movers":
+        return _json_response(_load("market_movers.json"))
+
+    if path == "/api/market/clock":
+        return _json_response(_load("market_clock.json"))
+
+    if path == "/api/market/corporate-actions":
+        return _json_response(_load("market_corporate_actions.json"))
+
+    if path == "/api/market/open-interest":
+        return _json_response(_load("market_open_interest.json"))
 
     if path == "/api/flow/summary":
         return _json_response(_load("flow_summary.json"))

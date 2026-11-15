@@ -97,12 +97,26 @@ def _make_bff_handler(
             return _json_response(_load_fixture("trades.json"))
         if path == "/api/orders":
             return _json_response(_load_fixture("orders.json"))
-        if path == "/api/entries/quote":
-            return _json_response(_load_fixture("entries_quote.json"))
-        if path == "/api/entries/chain/expirations":
-            return _json_response(_load_fixture("entries_chain_expirations.json"))
-        if path == "/api/entries/chain":
-            return _json_response(_load_fixture("entries_chain.json"))
+        if path == "/api/market/option-quote":
+            return _json_response(_load_fixture("market_option_quote.json"))
+        if path == "/api/market/chain-expirations":
+            return _json_response(_load_fixture("market_chain_expirations.json"))
+        if path == "/api/market/chain":
+            return _json_response(_load_fixture("market_chain.json"))
+        if path == "/api/market/snapshot":
+            return _json_response(_load_fixture("market_snapshot.json"))
+        if path == "/api/market/bars":
+            return _json_response(_load_fixture("market_bars.json"))
+        if path == "/api/market/news":
+            return _json_response(_load_fixture("market_news.json"))
+        if path == "/api/market/movers":
+            return _json_response(_load_fixture("market_movers.json"))
+        if path == "/api/market/clock":
+            return _json_response(_load_fixture("market_clock.json"))
+        if path == "/api/market/corporate-actions":
+            return _json_response(_load_fixture("market_corporate_actions.json"))
+        if path == "/api/market/open-interest":
+            return _json_response(_load_fixture("market_open_interest.json"))
         if path == "/api/flow/summary":
             return _json_response(_load_fixture("flow_summary.json"))
         if path == "/api/flow/orders":
