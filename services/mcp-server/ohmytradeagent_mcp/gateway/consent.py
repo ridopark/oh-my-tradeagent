@@ -7,13 +7,37 @@ X-Frame-Options: DENY, Cache-Control: no-store, and Referrer-Policy.
 from __future__ import annotations
 
 import html
+import re
+from urllib.parse import urlsplit
 
-_CSP = (
-    "default-src 'none'; "
-    "style-src 'unsafe-inline'; "
-    "form-action 'self'; "
-    "frame-ancestors 'none'"
-)
+_ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?$")
+
+
+def _redirect_origin(redirect_uri: str) -> str:
+    """Return the http(s) origin of *redirect_uri*, or "" if it is not a plain one.
+
+    Browsers (Chrome) apply ``form-action`` to the redirect that follows the
+    consent POST, so the client's redirect origin must be listed or the 302
+    back to the client is blocked.
+    """
+    try:
+        parts = urlsplit(redirect_uri)
+        port = f":{parts.port}" if parts.port else ""
+        origin = f"{parts.scheme}://{parts.hostname}{port}"
+    except ValueError:
+        return ""
+    return origin if _ORIGIN_RE.match(origin) else ""
+
+
+def _csp(redirect_uri: str) -> str:
+    origin = _redirect_origin(redirect_uri)
+    form_action = f"'self' {origin}" if origin else "'self'"
+    return (
+        "default-src 'none'; "
+        "style-src 'unsafe-inline'; "
+        f"form-action {form_action}; "
+        "frame-ancestors 'none'"
+    )
 
 
 def render_consent(
@@ -23,6 +47,7 @@ def render_consent(
     tenants: list[str],
     state: str,
     csrf_token: str,
+    redirect_uri: str,
 ) -> tuple[str, dict[str, str]]:
     """Render the consent page HTML and return ``(html_body, headers)``.
 
@@ -35,6 +60,7 @@ def render_consent(
         tenants: Tenant ids available for this user; at least one.
         state: Our internal state (used to look up the pending auth).
         csrf_token: Raw CSRF token for the hidden field (hash stored server-side).
+        redirect_uri: The client's redirect URI; its origin is allowed in form-action.
     """
     _name = html.escape(client_name or client_id, quote=True)
     _client_id_e = html.escape(client_id, quote=True)
@@ -81,7 +107,7 @@ trading data.</p>
 
     headers = {
         "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": _CSP,
+        "Content-Security-Policy": _csp(redirect_uri),
         "X-Frame-Options": "DENY",
         "Cache-Control": "no-store",
         "Referrer-Policy": "no-referrer",

@@ -296,3 +296,65 @@ async def test_consent_expiredPending_is400():
         f"expected 400 for expired pending, got {resp.status_code}; body: {resp.text[:200]}"
     )
     assert resp.json().get("error") == "expired_pending", resp.json()
+
+
+# ---------------------------------------------------------------------------
+# CSP form-action must allow the post-approval redirect target
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_consentPage_cspFormAction_allowsRedirectOrigin():
+    """Chrome applies form-action to the redirect that follows the consent POST.
+
+    With only 'self', the 302 to the client's redirect_uri is blocked: the grant
+    and code are minted, the browser never leaves the page, and a second click
+    returns unknown_state (seen live with Claude Code's loopback callback).
+    """
+    app = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        reg = await register_client(client, client_name="TC")
+        _verifier, challenge = await pkce_pair()
+        auth_resp = await client.get(
+            "/authorize",
+            params={
+                "client_id": reg["client_id"],
+                "redirect_uri": "https://example.com/callback",
+                "response_type": "code",
+                "scope": "read",
+                "state": "cs",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+        our_state = extract_state_from_location(auth_resp.headers["location"])
+        cb_resp = await client.get(
+            "/oauth/google/callback", params={"code": "code", "state": our_state}
+        )
+    csp = cb_resp.headers["content-security-policy"]
+    form_action = next(d.strip() for d in csp.split(";") if d.strip().startswith("form-action"))
+    assert form_action.split() == ["form-action", "'self'", "https://example.com"]
+
+
+def test_renderConsent_cspFormAction_loopbackKeepsPort_andRejectsJunk():
+    from ohmytradeagent_mcp.gateway.consent import render_consent
+
+    def form_action(redirect_uri: str) -> list[str]:
+        _body, headers = render_consent(
+            client_name="x", client_id="c", tenants=["acme"], state="s",
+            csrf_token="t", redirect_uri=redirect_uri,
+        )
+        csp = headers["Content-Security-Policy"]
+        return next(
+            d.split() for d in csp.split(";") if d.strip().startswith("form-action")
+        )
+
+    assert form_action("http://localhost:53123/callback?x=1") == [
+        "form-action", "'self'", "http://localhost:53123",
+    ]
+    # A redirect_uri that cannot be reduced to a plain http(s) origin adds nothing.
+    assert form_action("javascript:alert(1)") == ["form-action", "'self'"]
+    assert form_action("https://evil.example;script-src *") == ["form-action", "'self'"]
