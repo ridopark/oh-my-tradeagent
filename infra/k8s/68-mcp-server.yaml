@@ -1,7 +1,7 @@
 # Remote MCP gateway — Streamable HTTP + OAuth AS (PLAN-2026-11-13-mcp-remote-oauth.md, PR 5).
 #
-# SHIPS DARK. OMT_GATEWAY_DISABLED=true is set below so all /mcp and OAuth routes return 503
-# immediately. No DB connection is attempted, no BFF delegated-assertion flag is live.
+# ENABLED 2026-11-15 (runbook Steps 1-8 done): OMT_GATEWAY_DISABLED=false below matches the live
+# deployment, so a CI roll keeps it on. It shipped dark (true) until enablement.
 #
 # READINESS PROBE DECISION. /readyz returns 503 when the gateway is disabled (the store is not
 # connected). Using /healthz for BOTH probes so the pod becomes Ready as soon as the process is
@@ -97,7 +97,7 @@ spec:
             # To enable: kubectl set env deploy/mcp-server OMT_GATEWAY_DISABLED=false
             # AND edit this manifest so a later CI roll does not re-darken (darkpool-collector precedent).
             - name: OMT_GATEWAY_DISABLED
-              value: "true"
+              value: "false"
 
             # Public base URL (D2). Used as the OAuth issuer, resource indicator, and consent
             # callback prefix. Changing this after clients have registered requires re-consent.
