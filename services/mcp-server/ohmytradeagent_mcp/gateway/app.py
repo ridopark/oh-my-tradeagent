@@ -532,6 +532,7 @@ def _make_google_callback_handler(
             tenants=tenants,
             state=state,
             csrf_token=csrf_token,
+            redirect_uri=pending.redirect_uri,
         )
         return HTMLResponse(content=body, status_code=200, headers=headers)
 
