@@ -7,37 +7,51 @@ X-Frame-Options: DENY, Cache-Control: no-store, and Referrer-Policy.
 from __future__ import annotations
 
 import html
-import re
-from urllib.parse import urlsplit
 
-_ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d+)?$")
+_CSP = (
+    "default-src 'none'; "
+    "style-src 'unsafe-inline'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+_REDIRECT_CSP = "default-src 'none'; frame-ancestors 'none'"
 
 
-def _redirect_origin(redirect_uri: str) -> str:
-    """Return the http(s) origin of *redirect_uri*, or "" if it is not a plain one.
+def render_client_redirect(url: str) -> tuple[str, dict[str, str]]:
+    """Render the page that sends the browser back to the client after consent.
 
-    Browsers (Chrome) apply ``form-action`` to the redirect that follows the
-    consent POST, so the client's redirect origin must be listed or the 302
-    back to the client is blocked.
+    The consent POST answers with this 200 page rather than a 3xx.  Browsers
+    (Chrome) apply the consent page's ``form-action`` to every hop of a redirect
+    that follows a form submission, so a 302 is blocked whenever the client's
+    redirect URI itself redirects to another origin (Gemini's
+    oauth-redirect.googleusercontent.com relay does).  A page that navigates by
+    meta refresh is an ordinary navigation and is not subject to that check.
+
+    *url* carries the authorization code, so the page is never cached, framed or
+    sent as a referrer.  Redirect URIs are validated as http(s) at registration.
     """
-    try:
-        parts = urlsplit(redirect_uri)
-        port = f":{parts.port}" if parts.port else ""
-        origin = f"{parts.scheme}://{parts.hostname}{port}"
-    except ValueError:
-        return ""
-    return origin if _ORIGIN_RE.match(origin) else ""
-
-
-def _csp(redirect_uri: str) -> str:
-    origin = _redirect_origin(redirect_uri)
-    form_action = f"'self' {origin}" if origin else "'self'"
-    return (
-        "default-src 'none'; "
-        "style-src 'unsafe-inline'; "
-        f"form-action {form_action}; "
-        "frame-ancestors 'none'"
-    )
+    _url = html.escape(url, quote=True)
+    body = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0;url={_url}">
+<title>Returning to the application</title>
+</head>
+<body>
+<p>Returning you to the application. <a href="{_url}">Continue</a> if nothing happens.</p>
+</body>
+</html>"""
+    headers = {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": _REDIRECT_CSP,
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+    }
+    return body, headers
 
 
 def render_consent(
@@ -47,7 +61,6 @@ def render_consent(
     tenants: list[str],
     state: str,
     csrf_token: str,
-    redirect_uri: str,
 ) -> tuple[str, dict[str, str]]:
     """Render the consent page HTML and return ``(html_body, headers)``.
 
@@ -60,7 +73,6 @@ def render_consent(
         tenants: Tenant ids available for this user; at least one.
         state: Our internal state (used to look up the pending auth).
         csrf_token: Raw CSRF token for the hidden field (hash stored server-side).
-        redirect_uri: The client's redirect URI; its origin is allowed in form-action.
     """
     _name = html.escape(client_name or client_id, quote=True)
     _client_id_e = html.escape(client_id, quote=True)
@@ -107,7 +119,7 @@ trading data.</p>
 
     headers = {
         "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": _csp(redirect_uri),
+        "Content-Security-Policy": _CSP,
         "X-Frame-Options": "DENY",
         "Cache-Control": "no-store",
         "Referrer-Policy": "no-referrer",

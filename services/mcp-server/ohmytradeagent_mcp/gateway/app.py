@@ -52,7 +52,7 @@ from starlette.routing import Route, request_response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ohmytradeagent_mcp.gateway.assertion import Signer
-from ohmytradeagent_mcp.gateway.consent import render_consent
+from ohmytradeagent_mcp.gateway.consent import render_client_redirect, render_consent
 from ohmytradeagent_mcp.gateway.provider import OmtAuthorizationServerProvider
 from ohmytradeagent_mcp.gateway.resolver import OAuthIdentityResolver
 from ohmytradeagent_mcp.gateway.settings import GatewaySettings
@@ -532,11 +532,16 @@ def _make_google_callback_handler(
             tenants=tenants,
             state=state,
             csrf_token=csrf_token,
-            redirect_uri=pending.redirect_uri,
         )
         return HTMLResponse(content=body, status_code=200, headers=headers)
 
     return google_callback
+
+
+def _client_redirect(url: str) -> HTMLResponse:
+    """Send the browser to *url* after the consent POST (see render_client_redirect)."""
+    body, headers = render_client_redirect(url)
+    return HTMLResponse(content=body, status_code=200, headers=headers)
 
 
 def _make_consent_handler(
@@ -614,7 +619,7 @@ def _make_consent_handler(
                 error="access_denied",
                 state=pending.client_state,
             )
-            return RedirectResponse(redirect_url, status_code=302)
+            return _client_redirect(redirect_url)
 
         if action != "approve":
             return JSONResponse({"error": "invalid_action"}, status_code=400)
@@ -663,7 +668,7 @@ def _make_consent_handler(
             code=code_value,
             state=pending.client_state,
         )
-        return RedirectResponse(redirect_url, status_code=302)
+        return _client_redirect(redirect_url)
 
     return consent_post
 

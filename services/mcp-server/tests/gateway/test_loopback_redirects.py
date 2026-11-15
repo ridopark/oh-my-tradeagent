@@ -18,6 +18,7 @@ import pytest
 from ohmytradeagent_mcp.gateway.redirects import loopback_port_agnostic_match
 from tests.gateway.fixtures import PUBLIC_URL, make_app
 from tests.gateway.oauth_helpers import (
+    consent_redirect_target,
     encode_form,
     extract_code_from_location,
     extract_csrf_from_html,
@@ -164,8 +165,7 @@ async def test_loopback_portAgnosticMatch_fullFlow():
             },
             follow_redirects=False,
         )
-        assert consent_resp.status_code == 302
-        code = extract_code_from_location(consent_resp.headers["location"])
+        code = extract_code_from_location(consent_redirect_target(consent_resp))
 
         # Token exchange — same redirect_uri with same port
         token_resp = await client.post(

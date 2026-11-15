@@ -21,6 +21,7 @@ import pytest
 
 from tests.gateway.fixtures import ACME_SUB, PUBLIC_URL, make_app
 from tests.gateway.oauth_helpers import (
+    consent_redirect_target,
     encode_form,
     extract_csrf_from_html,
     extract_state_from_location,
@@ -102,8 +103,7 @@ async def test_logRedaction_fullFlow_noRawSubjectOrTokensInLogs(caplog, capsys):
                 },
                 follow_redirects=False,
             )
-            assert deny_resp.status_code == 302, deny_resp.text
-            assert "access_denied" in deny_resp.headers["location"]
+            assert "access_denied" in consent_redirect_target(deny_resp)
 
             # -----------------------------------------------------------------
             # Flow B: consent APPROVE → token → refresh → tool call → revoke
@@ -152,8 +152,7 @@ async def test_logRedaction_fullFlow_noRawSubjectOrTokensInLogs(caplog, capsys):
                 },
                 follow_redirects=False,
             )
-            assert approve_resp.status_code == 302, approve_resp.text
-            code_b = _extract_code_from_location(approve_resp.headers["location"])
+            code_b = _extract_code_from_location(consent_redirect_target(approve_resp))
             assert code_b, "No code in redirect"
             issued_secrets.append(code_b)
 
