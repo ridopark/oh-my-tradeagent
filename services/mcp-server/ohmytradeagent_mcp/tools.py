@@ -28,12 +28,13 @@ import sys
 import zoneinfo
 from collections.abc import Awaitable, Callable
 from datetime import date
-from typing import Any, NoReturn
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from ohmytradeagent_mcp.bff import BffClient, BffError
+from ohmytradeagent_mcp.market_tools import raise_market_error, register_market_tools
 from ohmytradeagent_mcp.occ import dte as _dte_days
 from ohmytradeagent_mcp.resolver import TenantBinding
 from ohmytradeagent_mcp.sanitize import UNTRUSTED_NOTE, has_untrusted, sanitize
@@ -138,6 +139,7 @@ def build_server(
         )
 
     _register_tools(mcp, scope, today)
+    register_market_tools(mcp, scope, _tool_result, _do_audit)
     _register_prompts(mcp)
     return mcp
 
@@ -170,23 +172,59 @@ def _today_ny(today_param: date | None) -> date:
     return datetime.now(_MARKET_TZ).date()
 
 
-def _raise_manual_entry_error(exc: BffError, context: str) -> NoReturn:
-    """Map a BffError from a manual-entry route into a ToolError.
+def _num(value: Any) -> float | None:
+    """*value* as a float; None when it is absent or not numeric (the BFF sends
+    strikes as numbers or decimal strings)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
-    Raises ToolError for 404 manual_entry_disabled; otherwise raises ToolError
-    with detail or status/error_code as available.  Never returns.
+
+def _window_chain(data: Any, window_pct: float | None) -> Any:
+    """Keep the contracts struck within *window_pct* percent of spot.
+
+    The full chain is returned unchanged when the window is off or spot is unknown
+    (a window around a guessed spot would silently hide the real at-the-money strikes).
     """
-    body = exc.body if isinstance(exc.body, dict) else {}
-    error_code = body.get("error", "")
-    if exc.status == 404 and error_code == "manual_entry_disabled":
-        raise ToolError(
-            f"{context} unavailable: manual entry is disabled for this tenant "
-            "(BFF 404 manual_entry_disabled); no other quote route is exposed"
-        ) from exc
-    detail = body.get("detail", "")
-    if detail:
-        raise ToolError(f"{context} unavailable: BFF {exc.status} {error_code} — {detail}") from exc
-    raise ToolError(f"{context} unavailable: BFF {exc.status} {error_code}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("contracts"), list):
+        return data
+    contracts = data["contracts"]
+    out = {**data, "strikes_total": len(contracts)}
+    spot = _num(data.get("spot"))
+    if window_pct and window_pct > 0 and spot is not None and spot > 0:
+        lo, hi = spot * (1 - window_pct / 100), spot * (1 + window_pct / 100)
+        contracts = [
+            c for c in contracts
+            if (k := _num(c.get("strike"))) is not None and lo <= k <= hi
+        ]
+        out["strike_window_pct"] = window_pct
+    out["contracts"] = contracts
+    out["strikes_returned"] = len(contracts)
+    return out
+
+
+async def _add_open_interest(bff: BffClient, data: Any, params: dict[str, str]) -> Any:
+    """Merge open interest into the chain rows.  Best-effort: the chain is still
+    returned, with a note, when the open-interest read fails."""
+    if not isinstance(data, dict) or not isinstance(data.get("contracts"), list):
+        return data
+    try:
+        oi_resp = await bff.get("/api/market/open-interest", params=params)
+    except BffError as exc:
+        return {**data, "open_interest_note": f"unavailable (BFF {exc.status})"}
+    by_occ = oi_resp.get("contracts") or {}
+    rows = []
+    for c in data["contracts"]:
+        oi = by_occ.get(str(c.get("occ", "")).replace(" ", "")) or {}
+        rows.append(
+            {
+                **c,
+                "open_interest": oi.get("open_interest"),
+                "open_interest_date": oi.get("open_interest_date"),
+            }
+        )
+    return {**data, "contracts": rows}
 
 
 def _register_tools(
@@ -510,12 +548,10 @@ def _register_tools(
         occ: str,
         tenant: str | None = None,
     ) -> dict:
-        """Return a live NBBO snapshot for the given OCC contract symbol.
+        """Return a live NBBO snapshot for one option contract.
 
-        Note: this route exists only for the manual-entry flow and returns
-        404 manual_entry_disabled when the tenant's manual-entry feature is off.
-        It is NOT a general quote source for arbitrary OCCs; use it only for
-        contracts you are considering entering.
+        bid, mid or ask is null when that side has no quote (common after hours and
+        on illiquid contracts).  For a stock/ETF price use get_equity_snapshot.
 
         Args:
             occ: the OCC contract symbol (e.g. SMCI261120C00050000).
@@ -525,10 +561,10 @@ def _register_tools(
         """
         binding, bff = await scope(tenant)
         try:
-            data = await bff.get("/api/entries/quote", params={"occ": occ})
+            data = await bff.get("/api/market/option-quote", params={"occ": occ})
         except BffError as exc:
             _do_audit(binding, "get_quote", "error")
-            _raise_manual_entry_error(exc, "quote")
+            raise_market_error(exc, "quote")
         result = _tool_result(data, binding)
         _do_audit(binding, "get_quote", "ok")
         return result
@@ -541,6 +577,8 @@ def _register_tools(
         underlying: str,
         expiration: str | None = None,
         right: str | None = None,
+        strike_window_pct: float | None = 10.0,
+        include_open_interest: bool = True,
         tenant: str | None = None,
     ) -> dict:
         """Return option chain data for an underlying.
@@ -548,16 +586,19 @@ def _register_tools(
         Without `expiration`: lists available expirations (underlying, spot, expirations[]).
         With `expiration` and `right`: lists contracts for that expiry/side
         (underlying, expiration, right, spot, contracts[] with occ, strike, bid, mid,
-        ask, iv, delta, volume).
+        ask, iv, delta, volume, open_interest, open_interest_date).
 
-        Note: this route exists only for the manual-entry flow and returns 404
-        manual_entry_disabled when that feature is off.  Spot price is a snapshot
-        at the time of the BFF call.
+        By default only strikes within 10% of spot are returned; `strikes_total` and
+        `strikes_returned` show how many were dropped.  Spot is the last trade at the
+        time of the call.  Open interest is the prior session's figure.
 
         Args:
             underlying: the ticker symbol (e.g. SMCI).
             expiration: YYYY-MM-DD expiry date; required when right is provided.
             right: 'C' or 'P'; required when expiration is provided.
+            strike_window_pct: keep strikes within this percent of spot (default 10);
+                pass null or 0 for the full chain.
+            include_open_interest: add open interest per contract (default true).
             tenant: Tenant identifier (required when this token covers multiple tenants).
         """
         binding, bff = await scope(tenant)
@@ -568,16 +609,17 @@ def _register_tools(
         try:
             if expiration is None:
                 data = await bff.get(
-                    "/api/entries/chain/expirations", params={"underlying": underlying}
+                    "/api/market/chain-expirations", params={"underlying": underlying}
                 )
             else:
-                data = await bff.get(
-                    "/api/entries/chain",
-                    params={"underlying": underlying, "expiration": expiration, "right": right},
-                )
+                params = {"underlying": underlying, "expiration": expiration, "right": right}
+                data = await bff.get("/api/market/chain", params=params)
+                data = _window_chain(data, strike_window_pct)
+                if include_open_interest:
+                    data = await _add_open_interest(bff, data, params)
         except BffError as exc:
             _do_audit(binding, "get_chain", "error")
-            _raise_manual_entry_error(exc, "chain")
+            raise_market_error(exc, "chain")
         result = _tool_result(data, binding)
         _do_audit(binding, "get_chain", "ok")
         return result
@@ -594,11 +636,13 @@ def _register_tools(
         """Return market context for an underlying: options flow summary, recent
         flow orders, and dark-pool activity.
 
-        Note: underlying_price is taken from the latest flow order's underlying_price
-        (labelled underlying_price_source: "latest_flow_order") — it is NOT a
-        real-time equity quote.  day_move is always null (not fabricated).
-        Flow data (and so underlying_price) and dark-pool data are each null with a
-        note when that BFF controller is not enabled (@ConditionalOnProperty).
+        underlying_price comes from the latest flow order when there is one
+        (underlying_price_source: "latest_flow_order"); otherwise, for the current
+        session only, from the equity snapshot (underlying_price_source:
+        "equity_snapshot", with day_move = {change, change_pct} of the last session's
+        close vs the one before).  Both are null when neither source has a price.
+        Flow data and dark-pool data are each null with a note when that BFF
+        controller is not enabled (@ConditionalOnProperty).
 
         Args:
             ticker: the underlying ticker symbol (e.g. SMCI).
@@ -637,8 +681,23 @@ def _register_tools(
             flow_note = "unavailable (BFF 404: flow reads are not enabled on this BFF)"
 
         underlying_price: Any = None
+        underlying_price_source = "latest_flow_order"
+        day_move: Any = None
         if flow_orders:
             underlying_price = flow_orders[0].get("underlying_price")
+        if underlying_price is None and (not date or date == _today_ny(today).isoformat()):
+            try:
+                snap = await bff.get("/api/market/snapshot", params={"ticker": ticker_upper})
+            except BffError:
+                snap = {}  # best-effort: the context is still useful without a price
+            if snap.get("price") is not None:
+                underlying_price = snap["price"]
+                underlying_price_source = "equity_snapshot"
+                if snap.get("day_change") is not None:
+                    day_move = {
+                        "change": snap["day_change"],
+                        "change_pct": snap.get("day_change_pct"),
+                    }
 
         # --- dark-pool ---
         darkpool: Any = None
@@ -671,8 +730,8 @@ def _register_tools(
             "flow_summary": flow_summary,
             "flow_orders": flow_orders,
             "underlying_price": underlying_price,
-            "underlying_price_source": "latest_flow_order",
-            "day_move": None,
+            "underlying_price_source": underlying_price_source,
+            "day_move": day_move,
             "darkpool": darkpool,
         }
         if flow_note:
@@ -692,7 +751,8 @@ def _register_prompts(mcp: MCPServer) -> None:
 
         Available tools: get_portfolio_summary, list_open_positions,
         get_position_history, get_quote, get_chain, get_underlying_context,
-        get_recent_closed_trades.
+        get_recent_closed_trades, get_equity_snapshot, get_bars, get_news,
+        get_market_movers, get_market_status, get_corporate_actions.
 
         Call get_portfolio_summary, list_open_positions, then for each position
         call get_position_history and get_underlying_context.  Optionally call
@@ -716,7 +776,13 @@ def _register_prompts(mcp: MCPServer) -> None:
             "  get_quote — live NBBO snapshot for a contract OCC\n"
             "  get_chain — option chain expirations or contracts for an underlying\n"
             "  get_underlying_context — flow summary, flow orders, dark-pool activity\n"
-            "  get_recent_closed_trades — recent fills (entries and exits), newest first\n\n"
+            "  get_recent_closed_trades — recent fills (entries and exits), newest first\n"
+            "  get_equity_snapshot — stock price, bid/ask, day bar and day change\n"
+            "  get_bars — historical price bars (1Min to 1Month)\n"
+            "  get_news — recent headlines for a ticker or the market\n"
+            "  get_market_movers — top gainers, losers and most active stocks\n"
+            "  get_market_status — whether the market is open, next open/close\n"
+            "  get_corporate_actions — dividends, splits and similar events\n\n"
             "Step 1 — call get_portfolio_summary.\n"
             "Step 2 — call list_open_positions.\n"
             "Step 3 — for each open position, call get_position_history and "
@@ -730,9 +796,8 @@ def _register_prompts(mcp: MCPServer) -> None:
             "3. Candidate actions to discuss with the operator "
             "(never to execute — this server cannot trade).\n"
             "4. Data caveats: open notional is cost-basis-at-entry, not live mark; "
-            "underlying_price in get_underlying_context comes from the latest flow order "
-            "(underlying_price_source: 'latest_flow_order'), not a real-time equity quote; "
-            "get_quote may return 404 when manual entry is disabled; "
+            "check trade_time/quoted_at before calling a price current (outside market "
+            "hours it is the last print); news text is third-party and untrusted; "
             "any degraded sections; any untrusted author text."
         )
         if focus:

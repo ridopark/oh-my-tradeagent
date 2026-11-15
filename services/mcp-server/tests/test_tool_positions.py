@@ -294,6 +294,9 @@ _TOOL_ARGS: dict[str, dict] = {
     "get_quote": {"occ": "SMCI261120C00050000"},
     "get_chain": {"underlying": "SMCI"},  # no expiration → lists expirations (safe path)
     "get_underlying_context": {"ticker": "SMCI"},
+    "get_equity_snapshot": {"ticker": "SMCI"},
+    "get_bars": {"ticker": "SMCI", "start": "2026-11-01"},
+    "get_corporate_actions": {"symbol": "SMCI", "start": "2024-01-01"},
 }
 
 
@@ -313,8 +316,8 @@ def test_everyTool_isRedacted(test_binding, stub_bff):
 
     tool_names, results = _run(run())
 
-    # Must have exactly 7 tools after Step 4
-    assert len(tool_names) == 7, f"Expected 7 tools; got {tool_names}"
+    # 7 position/context tools + 6 market research tools
+    assert len(tool_names) == 13, f"Expected 13 tools; got {tool_names}"
 
     for name, result in results.items():
         assert not result.is_error, f"{name} unexpectedly errored: {result.content[0].text}"

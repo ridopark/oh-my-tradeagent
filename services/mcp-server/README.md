@@ -46,17 +46,26 @@ one-line message.
 
 ## Tools and prompt
 
-Seven read-only tools and one prompt are registered:
+Thirteen read-only tools and one prompt are registered:
 
 | Tool | What it returns |
 |---|---|
 | `get_portfolio_summary` | Equity, cash, open exposure, notional-cap headroom per strategy, realized P&L, kill-switch state. |
 | `list_open_positions` | Each open position with contract, DTE, qty, entry/current premium, unrealized $/%, trail/floor status, partial exits, and the author's entry message (labelled untrusted). |
 | `get_position_history(workflow_id)` | Fills, partial exits and orders for one position. |
-| `get_quote(occ)` | Live bid/mid/ask for one OCC contract (requires manual-entry to be enabled for the tenant). |
-| `get_chain(underlying, expiration?, right?)` | Option expirations, or contracts with greeks for one expiry+right. |
+| `get_quote(occ)` | Live bid/mid/ask for one OCC contract (a side with no quote is null). |
+| `get_chain(underlying, expiration?, right?, strike_window_pct?, include_open_interest?)` | Option expirations, or contracts with greeks and open interest for one expiry+right. Strikes within 10% of spot by default. |
 | `get_underlying_context(ticker, date?)` | Options-flow summary and dark-pool prints for one underlying. |
 | `get_recent_closed_trades(limit?)` | Newest closed trade events (entries + exits), newest first. |
+| `get_equity_snapshot(ticker)` | Last trade, bid/ask, day and previous-day bars, day change, each with its timestamp. |
+| `get_bars(ticker, start, timeframe?, end?, limit?)` | Split/dividend-adjusted price bars, 1Min to 1Month. |
+| `get_news(symbols?, start?, limit?)` | Recent headlines (third-party text, labelled untrusted). |
+| `get_market_movers(top?)` | Top gainers, losers and most active stocks. |
+| `get_market_status()` | Whether the market is open, next open and close. |
+| `get_corporate_actions(symbol, start, end?)` | Dividends, splits, mergers and similar events. |
+
+The market tools read the BFF's `/api/market/*` routes (market-data service → Alpaca). They do not
+depend on the manual-entry feature and return the same data for every tenant.
 
 Prompt `analyze_positions(focus?)` assembles all of the above into a structured question asking
 the AI to assess exposure vs cap headroom, per-position risk, candidate actions to discuss
@@ -294,7 +303,7 @@ uv run pytest -q
 > to enable it. Per-client setup and the compatibility test matrix are in
 > `docs/ops/mcp-client-compat.md`.
 
-The gateway exposes the same seven read-only tools and the `analyze_positions`
+The gateway exposes the same thirteen read-only tools and the `analyze_positions`
 prompt over Streamable HTTP so that hosted AI clients — Claude web, Claude Desktop,
 Claude mobile, Claude Code, Gemini CLI, Gemini app, ChatGPT — can connect
 without a local CLI or a port-forward. Members sign in with the Google account

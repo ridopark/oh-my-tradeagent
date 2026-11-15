@@ -19,6 +19,12 @@ _ALL_TOOLS = [
     "get_chain",
     "get_underlying_context",
     "get_recent_closed_trades",
+    "get_equity_snapshot",
+    "get_bars",
+    "get_news",
+    "get_market_movers",
+    "get_market_status",
+    "get_corporate_actions",
 ]
 
 

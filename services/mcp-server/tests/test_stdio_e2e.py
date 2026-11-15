@@ -132,6 +132,12 @@ async def test_stdio_endToEnd_listsToolsAndPrompt(stub_bff_port):
         "get_chain",
         "get_underlying_context",
         "get_recent_closed_trades",
+        "get_equity_snapshot",
+        "get_bars",
+        "get_news",
+        "get_market_movers",
+        "get_market_status",
+        "get_corporate_actions",
     }
     assert expected_tools == tool_names, (
         f"Expected exactly {expected_tools}; got {tool_names}"
@@ -280,5 +286,11 @@ def test_stdout_cleanliness_rawSubprocess(stub_bff_port):
         "get_chain",
         "get_underlying_context",
         "get_recent_closed_trades",
+        "get_equity_snapshot",
+        "get_bars",
+        "get_news",
+        "get_market_movers",
+        "get_market_status",
+        "get_corporate_actions",
     }
     assert expected == tool_names, f"expected {expected}, got: {tool_names}"

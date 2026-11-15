@@ -1,0 +1,13 @@
+{
+  "symbol": "SMCI",
+  "corporate_actions": {
+    "forward_splits": [
+      {
+        "symbol": "SMCI",
+        "ex_date": "2024-10-01",
+        "new_rate": 10,
+        "old_rate": 1
+      }
+    ]
+  }
+}

@@ -589,6 +589,69 @@ class ServiceTokenFilterTest {
       "/api/mcp/whoami",
       "/api/notional-cap"
     };
+    assertMcpGetPassesThrough(allowlisted);
+  }
+
+  private static final String[] MARKET_PATHS = {
+    "/api/market/snapshot",
+    "/api/market/bars",
+    "/api/market/news",
+    "/api/market/movers",
+    "/api/market/clock",
+    "/api/market/corporate-actions",
+    "/api/market/open-interest",
+    "/api/market/option-quote",
+    "/api/market/chain-expirations",
+    "/api/market/chain"
+  };
+
+  @Test
+  void mcpToken_everyMarketResearchPath_passesThroughOnGet() throws Exception {
+    assertMcpGetPassesThrough(MARKET_PATHS);
+  }
+
+  @Test
+  void mcpToken_postOnMarketResearchPaths_is403() throws Exception {
+    for (String path : MARKET_PATHS) {
+      MockHttpServletRequest req = new MockHttpServletRequest("POST", path);
+      req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = new MockFilterChain();
+
+      mcpFilter.doFilter(req, res, chain);
+
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(res.getContentAsString()).as(path).isEqualTo("{\"error\":\"forbidden\"}");
+      assertThat(chain.getRequest()).as(path + " chain not invoked").isNull();
+    }
+  }
+
+  @Test
+  void marketResearchPaths_withoutAToken_are401() throws Exception {
+    // Not tenant data, but still behind authentication: no exemption was added for them.
+    for (String path : MARKET_PATHS) {
+      assertThat(run(path, null).getStatus()).as(path).isEqualTo(401);
+    }
+  }
+
+  @Test
+  void mcpToken_marketPathVariants_are403() throws Exception {
+    // Exact match only: no sub-path or trailing slash rides on the new entries.
+    for (String path :
+        new String[] {"/api/market", "/api/market/", "/api/market/chain/", "/api/market/chain/x"}) {
+      MockHttpServletRequest req = new MockHttpServletRequest("GET", path);
+      req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = new MockFilterChain();
+
+      mcpFilter.doFilter(req, res, chain);
+
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(chain.getRequest()).as(path + " chain not invoked").isNull();
+    }
+  }
+
+  private void assertMcpGetPassesThrough(String[] allowlisted) throws Exception {
     for (String path : allowlisted) {
       MockHttpServletRequest req = new MockHttpServletRequest("GET", path);
       req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
