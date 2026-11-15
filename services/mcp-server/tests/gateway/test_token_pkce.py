@@ -74,8 +74,8 @@ async def _do_authorize_and_consent(
         headers={"Content-Type": ct, "Sec-Fetch-Site": "same-origin"},
         follow_redirects=False,
     )
-    assert consent_resp.status_code == 302, consent_resp.text
-    loc = consent_resp.headers["location"]
+    from tests.gateway.oauth_helpers import consent_redirect_target
+    loc = consent_redirect_target(consent_resp)
     return parse_qs(urlparse(loc).query)["code"][0]
 
 

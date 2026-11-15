@@ -78,6 +78,23 @@ def extract_csrf_from_html(html_body: str) -> str:
     return m.group(1)
 
 
+def consent_redirect_target(resp) -> str:
+    """The URL the consent POST's interstitial page sends the browser to.
+
+    The consent POST answers 200 with a page that navigates (meta refresh), not a
+    302: Chrome applies CSP form-action to every hop of a redirect that follows a
+    form submission, which blocked clients whose redirect URI itself redirects.
+    """
+    import html as _html
+    import re as _re
+
+    assert resp.status_code == 200, f"/oauth/consent returned {resp.status_code}: {resp.text}"
+    assert "location" not in resp.headers
+    m = _re.search(r'<meta http-equiv="refresh" content="0;url=([^"]*)">', resp.text)
+    assert m, f"no meta refresh in consent response: {resp.text!r}"
+    return _html.unescape(m.group(1))
+
+
 def extract_code_from_location(location: str) -> str:
     """Extract the authorization ``code`` query param from a redirect URL."""
     parsed = urlparse(location)
@@ -169,10 +186,7 @@ async def do_oauth_flow(
             },
             follow_redirects=False,
         )
-        assert consent_resp.status_code == 302, (
-            f"/oauth/consent returned {consent_resp.status_code}: {consent_resp.text}"
-        )
-        code = extract_code_from_location(consent_resp.headers["location"])
+        code = extract_code_from_location(consent_redirect_target(consent_resp))
 
         # 6. Exchange code for tokens (none auth method: client_id only, no secret)
         token_resp = await client.post(

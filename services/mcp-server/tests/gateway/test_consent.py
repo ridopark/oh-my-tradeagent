@@ -12,6 +12,7 @@ Covers:
 """
 from __future__ import annotations
 
+import html
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -19,6 +20,7 @@ import pytest
 
 from tests.gateway.fixtures import PUBLIC_URL, make_app
 from tests.gateway.oauth_helpers import (
+    consent_redirect_target,
     encode_form,
     extract_csrf_from_html,
     extract_state_from_location,
@@ -161,8 +163,7 @@ async def test_consent_deny_redirectsAccessDenied():
         our_state, csrf = await _get_consent_page(client)
         resp = await _post_consent(client, state=our_state, csrf=csrf, action="deny",
                                    follow_redirects=False)
-    assert resp.status_code == 302
-    assert "access_denied" in resp.headers["location"]
+    assert "access_denied" in consent_redirect_target(resp)
 
 
 @pytest.mark.asyncio
@@ -204,7 +205,7 @@ async def test_consent_doublePost_secondIs400():
         resp1 = await _post_consent(
             client, state=our_state, csrf=csrf, tenants=["acme"], follow_redirects=False
         )
-        assert resp1.status_code == 302, f"First POST failed: {resp1.status_code} {resp1.text}"
+        assert resp1.status_code == 200, f"First POST failed: {resp1.status_code} {resp1.text}"
 
         # Second POST: pending auth consumed → must fail
         resp2 = await _post_consent(
@@ -226,8 +227,7 @@ async def test_consent_approve_yieldsCodeAndClientState():
         resp = await _post_consent(
             client, state=our_state, csrf=csrf, tenants=["acme"], follow_redirects=False
         )
-    assert resp.status_code == 302
-    location = resp.headers["location"]
+    location = consent_redirect_target(resp)
     parsed = parse_qs(urlparse(location).query)
     assert "code" in parsed, f"No code in redirect: {location}"
     assert parsed.get("state", [""])[0] == "cs", f"Wrong state in redirect: {location}"
@@ -299,18 +299,51 @@ async def test_consent_expiredPending_is400():
 
 
 # ---------------------------------------------------------------------------
-# CSP form-action must allow the post-approval redirect target
+# The consent POST navigates with an interstitial page, never a 3xx
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_consentPage_cspFormAction_allowsRedirectOrigin():
-    """Chrome applies form-action to the redirect that follows the consent POST.
-
-    With only 'self', the 302 to the client's redirect_uri is blocked: the grant
-    and code are minted, the browser never leaves the page, and a second click
-    returns unknown_state (seen live with Claude Code's loopback callback).
+async def test_consentApprove_answersWithInterstitialPage_notARedirect():
+    """Chrome applies CSP form-action to EVERY hop of a redirect that follows a form
+    submission.  A 302 from the consent POST was therefore blocked for clients whose
+    redirect URI itself redirects on (Gemini's oauth-redirect.googleusercontent.com
+    relay): grant and code minted, browser stuck, second click -> unknown_state.
+    A 200 page that navigates is not a form-submission redirect, so no hop is checked.
     """
+    app = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        our_state, csrf = await _get_consent_page(client)
+        resp = await _post_consent(client, state=our_state, csrf=csrf, tenants=["acme"])
+
+    assert resp.status_code == 200
+    assert "location" not in resp.headers
+    target = consent_redirect_target(resp)
+    assert target.startswith("https://example.com/callback?")
+    assert parse_qs(urlparse(target).query)["state"] == ["cs"]
+    # The page carries an authorization code: it must not be cached, framed or leak a referrer.
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["referrer-policy"] == "no-referrer"
+    assert resp.headers["x-frame-options"] == "DENY"
+    csp = resp.headers["content-security-policy"]
+    assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp
+    # A manual fallback for browsers that ignore meta refresh.
+    assert f'<a href="{html.escape(target, quote=True)}"' in resp.text
+
+
+def test_renderClientRedirect_escapesTheUrl():
+    from ohmytradeagent_mcp.gateway.consent import render_client_redirect
+
+    body, _headers = render_client_redirect('https://example.com/cb?state="><script>x</script>&code=1')
+    assert "<script>" not in body
+    assert 'content="0;url=https://example.com/cb?state=&quot;&gt;&lt;script&gt;x&lt;/script&gt;&amp;code=1"' in body
+
+
+@pytest.mark.asyncio
+async def test_consentPage_cspFormAction_isSelfOnly():
+    """The consent form only ever posts back to the gateway."""
     app = make_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
@@ -336,25 +369,4 @@ async def test_consentPage_cspFormAction_allowsRedirectOrigin():
         )
     csp = cb_resp.headers["content-security-policy"]
     form_action = next(d.strip() for d in csp.split(";") if d.strip().startswith("form-action"))
-    assert form_action.split() == ["form-action", "'self'", "https://example.com"]
-
-
-def test_renderConsent_cspFormAction_loopbackKeepsPort_andRejectsJunk():
-    from ohmytradeagent_mcp.gateway.consent import render_consent
-
-    def form_action(redirect_uri: str) -> list[str]:
-        _body, headers = render_consent(
-            client_name="x", client_id="c", tenants=["acme"], state="s",
-            csrf_token="t", redirect_uri=redirect_uri,
-        )
-        csp = headers["Content-Security-Policy"]
-        return next(
-            d.split() for d in csp.split(";") if d.strip().startswith("form-action")
-        )
-
-    assert form_action("http://localhost:53123/callback?x=1") == [
-        "form-action", "'self'", "http://localhost:53123",
-    ]
-    # A redirect_uri that cannot be reduced to a plain http(s) origin adds nothing.
-    assert form_action("javascript:alert(1)") == ["form-action", "'self'"]
-    assert form_action("https://evil.example;script-src *") == ["form-action", "'self'"]
+    assert form_action == "form-action 'self'"
