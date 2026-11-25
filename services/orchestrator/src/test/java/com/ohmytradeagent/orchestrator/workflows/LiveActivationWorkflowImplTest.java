@@ -396,16 +396,55 @@ class LiveActivationWorkflowImplTest {
   }
 
   @Test
-  void nonPositiveCash_isRejectedAccount_noActivate() {
+  void negativeCash_isRejectedAccount_noActivate() {
     when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
     when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
     when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-        .thenReturn(snap(ACCOUNT, BigDecimal.ZERO));
+        .thenReturn(snap(ACCOUNT, new BigDecimal("-0.01")));
 
     LiveActivationResult result = activateStub().activateLive(activateReq());
 
     assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_ACCOUNT);
     verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void nullCash_isRejectedAccount_noActivate() {
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
+    when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
+        .thenReturn(snap(ACCOUNT, null));
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.REJECTED_ACCOUNT);
+    verify(promotion, never()).activate(any());
+  }
+
+  @Test
+  void accountCash_unfundedZeroCash_activates() {
+    // Onboarding an account before its first deposit: a real account (account_number present)
+    // with exactly zero cash activates. Entries stay fail-closed at order time — the notional cap
+    // rejects on a zero cash base — until the account is funded.
+    when(strategy.get(TENANT, STRATEGY)).thenReturn(compliantConfig());
+    when(gate.killSwitchArmable(TENANT, STRATEGY)).thenReturn(true);
+    AccountSnapshotResult unfunded = snap(ACCOUNT, BigDecimal.ZERO);
+    unfunded.setEquity(BigDecimal.ZERO);
+    when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class))).thenReturn(unfunded);
+
+    LiveActivationResult result = activateStub().activateLive(activateReq());
+
+    assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+    assertThat(result.getExpectedAccountId()).isEqualTo(ACCOUNT);
+    verify(promotion, times(1)).activate(any());
+  }
+
+  @Test
+  void versionUnfundedCashConstantNameIsStable() throws Exception {
+    // Same pin as VERSION_ACCOUNT_CAP_AWARE: a rename would silently re-version in-flight runs.
+    Field marker = LiveActivationWorkflowImpl.class.getDeclaredField("VERSION_UNFUNDED_CASH");
+    marker.setAccessible(true);
+    assertThat((String) marker.get(null)).isEqualTo("live-activation-unfunded-cash-v1");
   }
 
   // ---- success paths ------------------------------------------------------------------------

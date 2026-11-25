@@ -135,7 +135,7 @@ function activateMsg(r: OnboardActionResult): { tone: "ok" | "err"; msg: string 
     case 422:
       return {
         tone: "err",
-        msg: "Rejected — a live gate failed (needs broker_target=alpaca-live, daily_loss_threshold>0 + notional cap, capital_source=account_cash, an armable kill switch, and a positive-cash account).",
+        msg: "Rejected — a live gate failed (needs broker_target=alpaca-live, daily_loss_threshold>0 + notional cap, capital_source=account_cash, an armable kill switch, and a real broker account — unfunded is fine, negative cash is not).",
       };
     case 404:
       return { tone: "err", msg: "Live activation not enabled, or no such tenant/strategy." };
@@ -783,8 +783,8 @@ export function OnboardForm({
           <p className="mb-3 text-xs text-amber-300/70">
             Promotes the armed strategy to real trading via the live-activation route, which re-runs
             every live gate server-side (live target, loss gates, capital_source=account_cash, an
-            armable kill switch, a fresh positive-cash account probe). Only unlocks once the strategy
-            is enabled above. The broker-403 canary lift at Alpaca stays a separate, manual step.
+            armable kill switch, a fresh account probe — an unfunded account passes and starts
+            trading once funded). Only unlocks once the strategy is enabled above. The broker-403 canary lift at Alpaca stays a separate, manual step.
           </p>
           <form action={submitActivate} onSubmit={() => setActivateResult(null)}>
             <button

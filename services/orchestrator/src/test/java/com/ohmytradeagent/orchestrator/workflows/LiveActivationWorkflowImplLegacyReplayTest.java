@@ -83,6 +83,15 @@ class LiveActivationWorkflowImplLegacyReplayTest {
               + "live-activation-pre-phase3b-legacy-history.json");
   private static final String EMULATOR_WORKFLOW_ID = "live-activation-pre-phase3b-emulator";
 
+  /** A pre-unfunded-cash history: the probe returned ZERO cash and the run ended REJECTED. */
+  private static final String ZERO_CASH_FIXTURE_RESOURCE =
+      "temporal/replay/live-activation-pre-unfunded-zero-cash-rejected-history.json";
+
+  private static final Path ZERO_CASH_FIXTURE_SOURCE_PATH =
+      Path.of("src/test/resources/" + ZERO_CASH_FIXTURE_RESOURCE);
+  private static final String ZERO_CASH_EMULATOR_WORKFLOW_ID =
+      "live-activation-pre-unfunded-zero-cash-emulator";
+
   /**
    * THE SENTINEL. A pre-3b activation history (no {@code live-activation-account-cap-aware-v1}
    * marker) replayed under the new impl: the gate resolves to {@code DEFAULT_VERSION}, the 2-arg
@@ -104,6 +113,22 @@ class LiveActivationWorkflowImplLegacyReplayTest {
         FIXTURE_RESOURCE, LiveActivationWorkflowImpl.class);
   }
 
+  /**
+   * Sentinel for {@code live-activation-unfunded-cash-v1}. A recorded zero-cash run ended at the
+   * probe with {@code REJECTED_ACCOUNT} and carries no marker, so the gate resolves to {@code
+   * DEFAULT_VERSION} and zero cash still rejects → clean replay. Omit the gate and the new impl
+   * issues {@code promotion.activate} where the history completed → this replay throws.
+   */
+  @Test
+  void legacyZeroCashRejectionHistoryReplaysCleanly() throws Exception {
+    assertThat(getClass().getClassLoader().getResource(ZERO_CASH_FIXTURE_RESOURCE))
+        .as("Missing fixture resource %s", ZERO_CASH_FIXTURE_RESOURCE)
+        .isNotNull();
+
+    WorkflowReplayer.replayWorkflowExecutionFromResource(
+        ZERO_CASH_FIXTURE_RESOURCE, LiveActivationWorkflowImpl.class);
+  }
+
   // ---------------------------------------------------------------------------
   // Fixture regeneration
   // ---------------------------------------------------------------------------
@@ -111,6 +136,21 @@ class LiveActivationWorkflowImplLegacyReplayTest {
   @Test
   @EnabledIfSystemProperty(named = "generate.legacy.fixture", matches = "true")
   void regenerateLegacyActivationFixture() throws Exception {
+    regenerateFixture(
+        new BigDecimal("5000"),
+        LiveActivationResult.Outcome.ACTIVATED,
+        EMULATOR_WORKFLOW_ID,
+        FIXTURE_SOURCE_PATH);
+    regenerateFixture(
+        BigDecimal.ZERO,
+        LiveActivationResult.Outcome.REJECTED_ACCOUNT,
+        ZERO_CASH_EMULATOR_WORKFLOW_ID,
+        ZERO_CASH_FIXTURE_SOURCE_PATH);
+  }
+
+  private void regenerateFixture(
+      BigDecimal cash, LiveActivationResult.Outcome expected, String workflowId, Path fixturePath)
+      throws Exception {
     TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
     String json;
     try {
@@ -125,7 +165,7 @@ class LiveActivationWorkflowImplLegacyReplayTest {
       when(strategy.get(anyString(), anyString())).thenReturn(compliantConfig());
       when(gate.killSwitchArmable(anyString(), anyString())).thenReturn(true);
       when(snapshot.accountSnapshot(any(AccountSnapshotRequest.class)))
-          .thenReturn(snap(ACCOUNT, new BigDecimal("5000")));
+          .thenReturn(snap(ACCOUNT, cash));
 
       coreWorker.registerActivitiesImplementations(strategy, gate, promotion);
       Worker brokerWorker = env.newWorker(EXEC_QUEUE);
@@ -138,19 +178,19 @@ class LiveActivationWorkflowImplLegacyReplayTest {
               LiveActivationWorkflow.class,
               WorkflowOptions.newBuilder()
                   .setTaskQueue(CORE_QUEUE)
-                  .setWorkflowId(EMULATOR_WORKFLOW_ID)
+                  .setWorkflowId(workflowId)
                   .build());
       LiveActivationResult result = wf.activateLive(activateReq());
-      assertThat(result.getOutcome()).isEqualTo(LiveActivationResult.Outcome.ACTIVATED);
+      assertThat(result.getOutcome()).isEqualTo(expected);
 
-      json = client.fetchHistory(EMULATOR_WORKFLOW_ID).toJson(true);
+      json = client.fetchHistory(workflowId).toJson(true);
     } finally {
       env.close();
     }
 
     assertThat(WorkflowExecutionHistory.fromJson(json).getEvents()).isNotEmpty();
-    Files.createDirectories(FIXTURE_SOURCE_PATH.getParent());
-    Files.writeString(FIXTURE_SOURCE_PATH, json, StandardCharsets.UTF_8);
+    Files.createDirectories(fixturePath.getParent());
+    Files.writeString(fixturePath, json, StandardCharsets.UTF_8);
   }
 
   // ---------------------------------------------------------------------------
