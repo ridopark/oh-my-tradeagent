@@ -62,8 +62,9 @@ import java.time.Duration;
  *   <li>kill switch armable ({@code LiveActivationGateActivities.killSwitchArmable}); not → {@code
  *       REJECTED_KILLSWITCH}.
  *   <li>fresh account probe ({@code AccountSnapshotActivity} on {@code broker-<target>}); blank
- *       account_number or cash &le; 0 → {@code REJECTED_ACCOUNT}. Captures account_number as {@code
- *       expected_account_id}.
+ *       account_number or cash &lt; 0 (zero cash is admitted for {@code account_cash} at {@link
+ *       #VERSION_UNFUNDED_CASH} v&ge;1) → {@code REJECTED_ACCOUNT}. Captures account_number as
+ *       {@code expected_account_id}.
  *   <li>all pass → {@code LivePromotionActivities.activate}, then {@code
  *       LiveActivationGateActivities.resetKillSwitch} (single-operator untrip so a prior one-click
  *       deactivate's trip no longer keeps the strategy halted) → {@code ACTIVATED}.
@@ -113,6 +114,17 @@ public class LiveActivationWorkflowImpl
   static final String VERSION_STATIC_CAPITAL = "live-activation-static-capital-v1";
 
   /**
+   * Version marker for activating an UNFUNDED {@code account_cash} account (onboarding before the
+   * first deposit). At {@code DEFAULT_VERSION} step (e) keeps the prior behavior: zero cash →
+   * {@code REJECTED_ACCOUNT}. At {@code v>=1} a real account with exactly zero cash passes; null or
+   * negative cash still refuses. Gated because a recorded zero-cash rejection would otherwise
+   * replay INTO the {@code promotion.activate} command. Entries on the unfunded account stay
+   * fail-closed at order time (the notional cap rejects on a zero cash base). {@code
+   * account_equity} is unchanged — zero equity still refuses. Pinned by a name-stability test.
+   */
+  static final String VERSION_UNFUNDED_CASH = "live-activation-unfunded-cash-v1";
+
+  /**
    * Ceiling on {@code (static base × capital_weight) / probed equity} for a static-capital live
    * activation. The #780 target encoding is ~10% of equity per position; 15% leaves headroom for
    * intraday equity drift without re-admitting the oversizing hazard step (c) exists to stop.
@@ -150,6 +162,10 @@ public class LiveActivationWorkflowImpl
     // ORDER is part of the replay contract) so it is recorded on every path.
     int staticCapitalVersion =
         Workflow.getVersion(VERSION_STATIC_CAPITAL, Workflow.DEFAULT_VERSION, 1);
+    // Unfunded-cash marker — read unconditionally, third (marker ORDER is part of the replay
+    // contract).
+    int unfundedCashVersion =
+        Workflow.getVersion(VERSION_UNFUNDED_CASH, Workflow.DEFAULT_VERSION, 1);
 
     // (a) stored config must be live.
     StrategyConfig config = strategy.get(tenant, strategyId);
@@ -215,13 +231,19 @@ public class LiveActivationWorkflowImpl
     boolean equitySource = config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_EQUITY;
     BigDecimal sizingBase =
         snapshot == null ? null : (equitySource ? snapshot.getEquity() : snapshot.getCash());
+    // An unfunded account_cash account (cash exactly 0) is admitted at unfunded-cash v>=1.
+    boolean unfundedCashAllowed =
+        unfundedCashVersion >= 1
+            && config.getCapitalSource() == StrategyConfig.CapitalSource.ACCOUNT_CASH;
     if (accountNumber == null
         || accountNumber.isBlank()
         || sizingBase == null
-        || sizingBase.signum() <= 0) {
+        || sizingBase.signum() < 0
+        || (sizingBase.signum() == 0 && !unfundedCashAllowed)) {
       return result(
           LiveActivationResult.Outcome.REJECTED_ACCOUNT,
-          "account probe returned no account or non-positive " + (equitySource ? "equity" : "cash"),
+          "account probe returned no account or "
+              + (equitySource ? "non-positive equity" : "invalid cash"),
           null);
     }
 
