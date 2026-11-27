@@ -37,8 +37,9 @@ final class PreviewProjection {
           "open_notional",
           "underlying_spot_entry",
           "underlying_price",
-          "entry_qty",
-          "realized_pl",
+          // NOT entry_qty / realized_pl: the tenant read sums them per entry signal id, which
+          // every leg of a watchlist shares, so a visible leg's figures would move when a hidden
+          // sibling fills or exits.
           "trailing_armed",
           "current_price",
           "unrealized_pl",
@@ -71,9 +72,13 @@ final class PreviewProjection {
           "filled_qty",
           "avg_fill_price",
           "filled_at");
-  static final List<String> MARK_FIELDS =
-      List.of("occ", "bid", "mid", "ask", "quote_at", "polled_at", "underlying", "warming");
+  private static final List<String> MARK_FIELDS =
+      List.of("bid", "mid", "ask", "quote_at", "polled_at", "warming");
+  private static final List<String> UNDERLYING_FIELDS = List.of("ticker", "price", "at");
 
+  private static final java.util.regex.Pattern BROKER_ORDER_ID =
+      java.util.regex.Pattern.compile(
+          "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
   private static final ObjectMapper JSON = new ObjectMapper();
 
   private PreviewProjection() {}
@@ -147,9 +152,24 @@ final class PreviewProjection {
         continue;
       }
       Map<String, Object> m = copy(r, ORDER_FIELDS);
+      if (!brokerOrderId(m.get("broker_order_id"))) {
+        m.remove("broker_order_id");
+      }
       Object err = r.get("last_error");
       m.put("failed", err != null && !String.valueOf(err).isBlank());
       out.add(m);
+    }
+    return out;
+  }
+
+  /** One market-data mark, re-keyed to the row-form symbol the positions table shows. */
+  @SuppressWarnings("unchecked")
+  static Map<String, Object> mark(Map<String, Object> mark, String rowFormOcc) {
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("occ", rowFormOcc);
+    out.putAll(copy(mark, MARK_FIELDS));
+    if (mark.get("underlying") instanceof Map<?, ?> u) {
+      out.put("underlying", copy((Map<String, Object>) u, UNDERLYING_FIELDS));
     }
     return out;
   }
@@ -174,6 +194,11 @@ final class PreviewProjection {
         : null;
   }
 
+  /** Broker order ids are UUIDs. Anything else in that field is not an id and is not published. */
+  private static boolean brokerOrderId(Object v) {
+    return v instanceof String s && BROKER_ORDER_ID.matcher(s).matches();
+  }
+
   private static boolean shown(Map<String, Object> row) {
     return row.get("strategy_id") instanceof String s && SHOWN_STRATEGIES.contains(s);
   }
@@ -191,7 +216,9 @@ final class PreviewProjection {
       for (String f : FILL_SUBJECT_FIELDS) {
         JsonNode v = node.get(f);
         // Scalars only: a nested object under an allowed name could carry anything.
-        if (v != null && v.isValueNode()) {
+        if (v != null
+            && v.isValueNode()
+            && (!f.equals("broker_order_id") || brokerOrderId(v.asText()))) {
           out.set(f, v);
         }
       }

@@ -44,6 +44,7 @@ class PreviewProjectionTest {
     p.put("entry_premium", new BigDecimal("3.36"));
     p.put("open_notional", new BigDecimal("3696.00"));
     p.put("entry_qty", 17L);
+    p.put("realized_pl", new BigDecimal("55.00"));
     p.put("current_price", new BigDecimal("0.90"));
     p.put("unrealized_pl", new BigDecimal("-2706.00"));
     p.put("trailing_armed", false);
@@ -102,7 +103,7 @@ class PreviewProjectionTest {
             + SECRET
             + "\",\"option_symbol\":\""
             + contract
-            + "\",\"filled_qty\":17,\"avg_fill_price\":3.36,\"broker_order_id\":\"b-123\"}");
+            + "\",\"filled_qty\":17,\"avg_fill_price\":3.36,\"broker_order_id\":\"11111111-2222-4333-8444-555555555555\"}");
     m.put("entry_basis", new BigDecimal("3.36"));
     return m;
   }
@@ -119,7 +120,7 @@ class PreviewProjectionTest {
     m.put("qty", 17L);
     m.put("limit_price", new BigDecimal("3.40"));
     m.put("state", lastError == null ? "FILLED" : "ERRORED");
-    m.put("broker_order_id", "b-123");
+    m.put("broker_order_id", "11111111-2222-4333-8444-555555555555");
     m.put("recorded_at", at);
     m.put("submitted_at", at);
     m.put("filled_qty", 17L);
@@ -153,7 +154,11 @@ class PreviewProjectionTest {
     assertThat(equity.fieldNames())
         .toIterable()
         .containsExactlyInAnyOrder("broker_target", "equity", "last_equity", "today_pl");
-    assertThat(JSON.readTree(body).get("open_positions").get(0).has("workflow_id")).isFalse();
+    JsonNode row = JSON.readTree(body).get("open_positions").get(0);
+    assertThat(row.has("workflow_id")).isFalse();
+    // Summed per entry signal id upstream, which watchlist legs share: never published.
+    assertThat(row.has("entry_qty")).isFalse();
+    assertThat(row.has("realized_pl")).isFalse();
   }
 
   @Test
@@ -244,7 +249,7 @@ class PreviewProjectionTest {
     assertThat(out.get(0)).doesNotContainKeys("intent_key", "signal_id", "last_error");
     assertThat(out.get(0).get("failed")).isEqualTo(false);
     assertThat(out.get(1).get("failed")).isEqualTo(true);
-    assertThat(out.get(0).get("broker_order_id")).isEqualTo("b-123");
+    assertThat(out.get(0).get("broker_order_id")).isEqualTo("11111111-2222-4333-8444-555555555555");
   }
 
   @Test
@@ -269,5 +274,23 @@ class PreviewProjectionTest {
 
     assertThat(out).hasSize(1);
     assertThat(out.get(0).get("side")).isEqualTo("SELL");
+  }
+
+  @Test
+  void brokerOrderId_thatIsNotAUuid_isNotPublished() throws Exception {
+    Map<String, Object> o = order("copytrade-v1", NVDA, "BUY", AN_HOUR_AGO, null);
+    o.put("broker_order_id", "adopt:" + SECRET);
+    Map<String, Object> f = fill("EntryFilled", "copytrade-v1", NVDA, AN_HOUR_AGO);
+    f.put(
+        "subject",
+        "{\"option_symbol\":\"" + NVDA + "\",\"broker_order_id\":\"adopt:" + SECRET + "\"}");
+
+    List<Map<String, Object>> orders =
+        PreviewProjection.orders(List.of(o), Map.of(), THIRTY_DAYS_AGO);
+    List<Map<String, Object>> fills = PreviewProjection.fills(List.of(f), Map.of());
+
+    assertThat(json(orders)).doesNotContain(SECRET);
+    assertThat(orders.get(0)).doesNotContainKey("broker_order_id");
+    assertThat(json(fills)).doesNotContain(SECRET).doesNotContain("broker_order_id");
   }
 }

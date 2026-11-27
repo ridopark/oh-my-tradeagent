@@ -85,13 +85,23 @@ class PreviewQuarantineTest {
   void openPositionOfUnknownAge_doesNotAnchorAFreshBuy() {
     // Fail-closed: an unknown entry time cannot be used to reveal a fresh entry.
     assertThat(hiddenFrom(List.of(new OpenPos(OCC, null)), List.of(new Buy(OCC, minutesAgo(2)))))
-        .containsEntry(OCC, minutesAgo(2));
+        .containsEntry(OCC, minutesAgo(15)); // hidden for the whole window
   }
 
   @Test
-  void openPositionOfUnknownAge_withNoRecentBuy_isVisible() {
-    // An adopted position has no entry event and no order; it is not a signal to protect.
-    assertThat(hiddenFrom(List.of(new OpenPos(OCC, null)), List.of())).isEmpty();
+  void openPositionOfUnknownAge_isHidden() {
+    // It may be seconds old. A position that cannot be dated is never shown.
+    assertThat(hiddenFrom(List.of(new OpenPos(OCC, null)), List.of()))
+        .containsEntry(OCC, minutesAgo(15));
+  }
+
+  @Test
+  void openPositionOfUnknownAge_besideAnOldOneInTheSameContract_isNotHidden() {
+    // The contract is already public through the old position.
+    assertThat(
+            hiddenFrom(
+                List.of(new OpenPos(OCC, null), new OpenPos(OCC, minutesAgo(60))), List.of()))
+        .isEmpty();
   }
 
   @Test
@@ -128,8 +138,17 @@ class PreviewQuarantineTest {
     assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(5))).isTrue();
     assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(1))).isTrue();
     assertThat(PreviewQuarantine.hides(h, "NVDA  261224C00200000", minutesAgo(1))).isTrue();
-    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(6))).isFalse();
+    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(8))).isFalse();
     assertThat(PreviewQuarantine.hides(h, "GOOGL261204C00285000", minutesAgo(1))).isFalse();
+  }
+
+  @Test
+  void rowStampedShortlyBeforeItsOwnBuyOrder_isStillHidden() {
+    // The fill's clock and the order journal's clock differ; allow two minutes of skew.
+    Map<String, Instant> h = Map.of(OCC, minutesAgo(5));
+
+    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(6))).isTrue();
+    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(7))).isTrue();
   }
 
   @Test
@@ -140,5 +159,14 @@ class PreviewQuarantineTest {
     assertThat(PreviewQuarantine.hides(h, OCC, null)).isTrue();
     assertThat(PreviewQuarantine.hides(h, null, minutesAgo(30))).isTrue();
     assertThat(PreviewQuarantine.hides(Map.of(), null, minutesAgo(30))).isTrue();
+  }
+
+  @Test
+  void buyWithNoTimestamp_hidesTheWholeWindow() {
+    Map<String, Instant> h = hiddenFrom(List.of(), List.of(new Buy(OCC, null)));
+
+    assertThat(h).containsEntry(OCC, minutesAgo(15));
+    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(14))).isTrue();
+    assertThat(PreviewQuarantine.hides(h, OCC, minutesAgo(18))).isFalse();
   }
 }

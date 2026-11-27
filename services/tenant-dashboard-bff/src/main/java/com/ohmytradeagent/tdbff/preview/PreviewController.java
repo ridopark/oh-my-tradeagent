@@ -5,6 +5,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -17,6 +22,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/preview")
 class PreviewController {
+
+  private static final Logger log = LoggerFactory.getLogger(PreviewController.class);
 
   private final PreviewService service;
   private final TenantContext ctx;
@@ -49,6 +56,22 @@ class PreviewController {
   @GetMapping("/marks")
   Map<String, Object> marks(HttpServletRequest req) {
     return service.marks(ctx.tenantId(req));
+  }
+
+  @ExceptionHandler(TenantContext.MissingTenantException.class)
+  ResponseEntity<Map<String, Object>> missingTenant() {
+    return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", "missing_tenant"));
+  }
+
+  /**
+   * Every other failure answers one fixed body. These responses are published, and the shared
+   * handler echoes some exception messages — which can carry ids this surface must never show.
+   */
+  @ExceptionHandler(Exception.class)
+  ResponseEntity<Map<String, Object>> unavailable(Exception e) {
+    log.warn("preview read failed", e);
+    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+        .body(Map.of("error", "unavailable"));
   }
 
   private static Map<String, Object> items(List<Map<String, Object>> rows) {
