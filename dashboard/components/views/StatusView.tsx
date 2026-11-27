@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { DataTable } from "@/components/DataTable";
-import type { AccountKillSwitch, Portfolio } from "@/lib/bff";
+import type { AccountKillSwitch, Portfolio } from "@/lib/types";
 import { brokerMode, brokerProvider } from "@/lib/mode";
 import { Pnl, fmtCurrency } from "@/components/Pnl";
 import { PositionsUnavailable } from "@/components/PositionsUnavailable";

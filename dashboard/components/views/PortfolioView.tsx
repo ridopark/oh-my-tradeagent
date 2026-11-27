@@ -2,7 +2,7 @@ import { DataTable } from "@/components/DataTable";
 import { contractCell } from "@/components/ContractLink";
 import { pnlCell, priceCell, fmtCurrency } from "@/components/Pnl";
 import { PositionsUnavailable } from "@/components/PositionsUnavailable";
-import type { Portfolio } from "@/lib/bff";
+import type { Portfolio } from "@/lib/types";
 
 // The Portfolio page body, rendered from a portfolio read passed as a prop.
 export function PortfolioView({ p }: { p: Portfolio }) {
