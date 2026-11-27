@@ -9,14 +9,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
- * {@code GET /md/marks?occ=..&occ=..} — cached display marks for the /live holdings table (PLAN
- * 2026-10-01 P1). Each request (re)registers display interest; the response only ever reads caches,
- * never calls a provider. Same no-auth, cluster-internal, display-only stance as {@code
+ * {@code GET /md/marks?occ=..&occ=..[&lane=demo]} — cached display marks for the /live holdings
+ * table (PLAN 2026-10-01 P1), or with {@code lane=demo} for the public demo's separate lane. Each
+ * request (re)registers display interest; the response only ever reads caches, never calls a
+ * provider. Same no-auth, cluster-internal, display-only stance as {@code
  * MarketDataQuoteController}; explicit {@code @RequestParam} name for the same -parameters reason.
  *
  * <p>{@code {now, marks:[{occ, bid, mid, ask, quote_at, polled_at, underlying:{ticker, price, at},
@@ -36,10 +39,19 @@ public class DisplayMarksController {
   }
 
   @GetMapping("/md/marks")
-  public Map<String, Object> marks(@RequestParam("occ") List<String> occs) {
+  public Map<String, Object> marks(
+      @RequestParam("occ") List<String> occs,
+      @RequestParam(value = "lane", required = false) String lane) {
+    // Absent = the operators' /live (every existing caller). "demo" = the public demo's own lane.
+    // Anything else is refused rather than guessed at.
+    boolean demo = "demo".equals(lane);
+    if (lane != null && !demo) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unknown lane");
+    }
+    int cap = demo ? DisplayMarksService.DEMO_CAP : DisplayInterestRegistry.CAP;
     Set<String> compact = new LinkedHashSet<>();
     for (String occ : occs) {
-      if (compact.size() >= DisplayInterestRegistry.CAP) {
+      if (compact.size() >= cap) {
         break;
       }
       String c = occ.replaceAll("\\s", "");
@@ -49,7 +61,8 @@ public class DisplayMarksController {
       }
     }
     List<Map<String, Object>> rows = new ArrayList<>();
-    for (DisplayMark m : service.marks(List.copyOf(compact))) {
+    List<String> wanted = List.copyOf(compact);
+    for (DisplayMark m : demo ? service.demoMarks(wanted) : service.marks(wanted)) {
       Quote q = m.quote();
       Map<String, Object> row = new LinkedHashMap<>();
       row.put("occ", m.occ());

@@ -10,7 +10,8 @@ import org.junit.jupiter.api.Test;
 class DisplayInterestRegistryTest {
 
   private final MutableClock clock = new MutableClock(Instant.parse("2026-10-01T14:30:00Z"));
-  private final DisplayInterestRegistry registry = new DisplayInterestRegistry(clock);
+  private final DisplayInterestRegistry registry =
+      new DisplayInterestRegistry(clock, DisplayInterestRegistry.CAP);
 
   @Test
   void admitsUpToTheCapThenCaps() {

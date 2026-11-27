@@ -5,11 +5,12 @@ import java.time.Duration;
 import java.time.Instant;
 
 /**
- * Display-wide Alpaca REST budget: at most {@link #PER_SECOND} permits in any rolling 1s window,
- * shared by every display option and stock snapshot. Non-blocking: no permit means skip this run.
- * Keeps display polling from eating the data-key rate budget that trail polls and the kill-switch
- * MTM quote depend on. A sliding log of the last N grant times, so the bound holds for every 1s
- * window (a fixed window or token bucket allows a 2N burst across a boundary).
+ * One display lane's Alpaca REST budget: at most {@code perSecond} permits in any rolling 1s
+ * window, shared by every option and stock snapshot in that lane ({@link #PER_SECOND} for the
+ * operators' /live). Non-blocking: no permit means skip this run. Keeps display polling from eating
+ * the data-key rate budget that trail polls and the kill-switch MTM quote depend on. A sliding log
+ * of the last N grant times, so the bound holds for every 1s window (a fixed window or token bucket
+ * allows a 2N burst across a boundary).
  */
 final class DisplayRequestBudget {
 
@@ -17,11 +18,12 @@ final class DisplayRequestBudget {
   private static final Duration WINDOW = Duration.ofSeconds(1);
 
   private final Clock clock;
-  private final Instant[] granted = new Instant[PER_SECOND]; // ring of the last N grant times
+  private final Instant[] granted; // ring of the last N grant times
   private int next;
 
-  DisplayRequestBudget(Clock clock) {
+  DisplayRequestBudget(Clock clock, int perSecond) {
     this.clock = clock;
+    this.granted = new Instant[perSecond];
   }
 
   synchronized boolean tryAcquire() {
@@ -31,7 +33,7 @@ final class DisplayRequestBudget {
       return false;
     }
     granted[next] = now;
-    next = (next + 1) % PER_SECOND;
+    next = (next + 1) % granted.length;
     return true;
   }
 }

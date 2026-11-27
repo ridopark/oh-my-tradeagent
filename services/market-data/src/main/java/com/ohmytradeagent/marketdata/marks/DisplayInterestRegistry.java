@@ -7,10 +7,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Which OCCs a viewer of /live is currently watching: last-request stamp per OCC, capped at {@link
- * #CAP} entries, expiring {@link #TTL} after the last request. Deliberately separate from (and
- * invisible to) the provider's trail premium subscribers. Not thread-safe: {@link
- * DisplayMarksService} guards every call with one lock.
+ * Which OCCs one display lane is currently watching: last-request stamp per OCC, capped at {@code
+ * cap} entries ({@link #CAP} for the operators' /live), expiring {@link #TTL} after the last
+ * request. Deliberately separate from (and invisible to) the provider's trail premium subscribers.
+ * Not thread-safe: {@link DisplayMarksService} guards every call with one lock.
  */
 final class DisplayInterestRegistry {
 
@@ -24,10 +24,12 @@ final class DisplayInterestRegistry {
   }
 
   private final Clock clock;
+  private final int cap;
   private final Map<String, Instant> lastRequested = new HashMap<>();
 
-  DisplayInterestRegistry(Clock clock) {
+  DisplayInterestRegistry(Clock clock, int cap) {
     this.clock = clock;
+    this.cap = cap;
   }
 
   /** Records a request for {@code occ}; a new OCC beyond the cap is refused (not recorded). */
@@ -36,7 +38,7 @@ final class DisplayInterestRegistry {
       lastRequested.put(occ, clock.instant());
       return Admission.EXISTING;
     }
-    if (lastRequested.size() >= CAP) {
+    if (lastRequested.size() >= cap) {
       return Admission.CAPPED;
     }
     lastRequested.put(occ, clock.instant());
