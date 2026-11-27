@@ -159,6 +159,46 @@ Extract the `/live` page body, split `AccountGuardBanner` markup from its action
 trailing-stop badge out of `StopLossButton`, make the polling URLs injectable; add the page to the
 demo and switch the landing page to it.
 
+## Security review 2026-11-26 (own pass + independent reviewer)
+
+Fixed in phase 1b before merge, each with a test watched failing:
+
+- Watchlist legs share one entry signal id, so a leg bought seconds ago was dated by the morning's
+  first leg and skipped the delay (confirmed on staging: 9 of 9 ids in 30 days span several
+  contracts). Entry time is now keyed by signal id AND contract, latest `EntryFilled`.
+- A position of unknown age was shown; it is now hidden.
+- A stale 15 s position cache could make a re-entry look like an add-on; a cached list older than
+  3 s is re-read before it may reveal anything.
+- Only an order marked exactly `BUY` started the delay; now anything that is not `SELL` does, and
+  an undated buy hides the whole window. Rows within 2 min before a buy are hidden (clock skew).
+- A position in a strategy the demo does not show could anchor; it no longer can.
+- `entry_qty` / `realized_pl` are summed per signal id upstream; dropped from the demo.
+- Error bodies echoed some exception messages; preview endpoints now answer one fixed body.
+- The quote's nested `underlying` block was copied whole; now named fields only.
+- `broker_order_id` is published only when it is a UUID.
+- A token holder could pin BFF threads / DB pools: at most 2 preview requests run at once (others
+  refused), and the broker-backed portfolio read runs at most once per 30 s.
+- A preview token bound to a tenant with any non-paper broker target is refused.
+
+Accepted, by the operator's "totals stay live" decision — these reveal THAT something happened,
+never which contract: equity, cash and realized P&L move on hidden entries and include
+`gated_condor`; the number of rows in a 500-row read shifts when a hidden order is journalled.
+
+Must be settled before the demo pod is admitted to the BFF's NetworkPolicy (phase 4):
+
+- `/actuator/**` needs no token and shares port 8083. `/actuator/prometheus` exposes per-route
+  request counters, so a compromised demo pod could watch operator actions (force-close, manual
+  entry) on LIVE tenants in real time. Move actuator to its own management port, or stop exempting
+  `/actuator/prometheus` for non-monitoring peers.
+- The poller is a second, independent tripwire: it refuses to publish any payload matching
+  forbidden patterns (account number, `chat-messages-`, `@`, `discord`, webhook hosts) and never
+  writes an error body to disk.
+- Pin the demo image by digest; this pod is internet-facing and `:latest` re-pulls on a reboot.
+- The page must render through React only (no `innerHTML`): order ids and symbols are data.
+
+Decided 2026-11-26: `trail_stop_price` stays published. The operator accepts that the live
+tenants' positions (after 15 min) and stop levels can be inferred from staging's.
+
 ## Capacity (estimates, not measured)
 
 Bandwidth is the limit, not the homelab. At roughly 10 KB compressed per refresh cycle a viewer
