@@ -121,14 +121,19 @@ class PreviewControllerWebMvcTest {
   }
 
   private static Map<String, Object> fill(String contract, OffsetDateTime at) {
+    return fill("EntryFilled", SECRET, contract, at);
+  }
+
+  private static Map<String, Object> fill(
+      String kind, String correlationId, String contract, OffsetDateTime at) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("event_id", SECRET);
     m.put("occurred_at", at);
-    m.put("kind", "EntryFilled");
+    m.put("kind", kind);
     m.put("actor", SECRET + "@example.com");
     m.put("strategy_id", "copytrade-v1");
     m.put("workflow_id", SECRET);
-    m.put("correlation_id", SECRET);
+    m.put("correlation_id", correlationId);
     m.put(
         "subject",
         "{\"signal_id\":\""
@@ -136,8 +141,15 @@ class PreviewControllerWebMvcTest {
             + "\",\"option_symbol\":\""
             + contract
             + "\",\"filled_qty\":11,\"avg_fill_price\":3.36,\"broker_order_id\":\"11111111-2222-4333-8444-555555555555\"}");
-    m.put("entry_basis", new BigDecimal("3.36"));
+    // What the tenant read attaches: a blend across EVERY contract sharing the correlation id.
+    m.put("entry_basis", new BigDecimal("999.99"));
     return m;
+  }
+
+  private static PreviewEntryTimes.EntryFill entry(
+      String signalId, String contract, long qty, String price, OffsetDateTime at) {
+    return new PreviewEntryTimes.EntryFill(
+        signalId, contract, qty, new BigDecimal(price), at.toInstant());
   }
 
   private static Map<String, Object> positionRow(String contract) {
@@ -453,7 +465,7 @@ class PreviewControllerWebMvcTest {
         .thenThrow(new IllegalArgumentException("bad workflow id chat-messages-" + SECRET));
     when(ordersReader.orders(eq("t-leaky"), anyInt())).thenReturn(List.of());
 
-    for (String path : new String[] {"portfolio", "fills", "orders", "marks"}) {
+    for (String path : new String[] {"status", "portfolio", "fills", "orders", "marks"}) {
       String body =
           mvc.perform(get("/api/preview/" + path).header("X-Tenant-Id", "t-leaky"))
               .andExpect(status().isServiceUnavailable())
@@ -609,5 +621,337 @@ class PreviewControllerWebMvcTest {
       release.countDown();
       pool.shutdownNow();
     }
+  }
+
+  // ---- second security review ----------------------------------------------------------------
+
+  @Test
+  void entryBasis_isPerContract_andNeverMovesWhenAHiddenLegFills() throws Exception {
+    // One watchlist id, two legs. NVDA filled 40 minutes ago at 2.00 and exited; GOOGL filled 2
+    // minutes ago at 9.00 and is hidden. The NVDA exit's basis must be NVDA's alone.
+    String tenant = "t-basis";
+    when(positions.openPositions(tenant))
+        .thenReturn(List.of(open(tenant, "watchlist-trigger-v1", GOOGL, "wl-1")));
+    when(entryTimes.entryAt(eq(tenant), any()))
+        .thenReturn(Map.of(key("wl-1", GOOGL), minutesAgo(2).toInstant()));
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenReturn(
+            List.of(order(GOOGL, "BUY", minutesAgo(2)), order(NVDA, "BUY", minutesAgo(40))));
+    Map<String, Object> exit = fill("PartialExitFilled", "wl-1", NVDA, minutesAgo(10));
+    exit.put("strategy_id", "watchlist-trigger-v1");
+    when(tradesReader.trades(eq(tenant), anyList(), anyString(), anyInt()))
+        .thenReturn(List.of(exit));
+    when(entryTimes.entryFills(eq(tenant), any()))
+        .thenReturn(
+            List.of(
+                entry("wl-1", NVDA, 10, "2.00", minutesAgo(40)),
+                entry("wl-1", GOOGL, 10, "9.00", minutesAgo(2))));
+
+    mvc.perform(get("/api/preview/fills").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(1))
+        .andExpect(jsonPath("$.items[0].entry_basis").value(2.00));
+  }
+
+  @Test
+  void entryBasis_ignoresAHiddenReEntryOfTheSameContract() throws Exception {
+    // NVDA was entered at 2.00, exited, and re-entered 2 minutes ago at 6.00 under the same id.
+    // The re-entry is hidden, so it must not shift the visible exit's basis either.
+    String tenant = "t-basis-reentry";
+    when(positions.openPositions(tenant))
+        .thenReturn(List.of(open(tenant, "watchlist-trigger-v1", NVDA, "wl-2")));
+    when(entryTimes.entryAt(eq(tenant), any()))
+        .thenReturn(Map.of(key("wl-2", NVDA), minutesAgo(2).toInstant()));
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenReturn(List.of(order(NVDA, "BUY", minutesAgo(2)), order(NVDA, "BUY", minutesAgo(50))));
+    Map<String, Object> exit = fill("PartialExitFilled", "wl-2", NVDA, minutesAgo(30));
+    exit.put("strategy_id", "watchlist-trigger-v1");
+    when(tradesReader.trades(eq(tenant), anyList(), anyString(), anyInt()))
+        .thenReturn(List.of(exit));
+    when(entryTimes.entryFills(eq(tenant), any()))
+        .thenReturn(
+            List.of(
+                entry("wl-2", NVDA, 10, "2.00", minutesAgo(50)),
+                entry("wl-2", NVDA, 10, "6.00", minutesAgo(2))));
+
+    mvc.perform(get("/api/preview/fills").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(1))
+        .andExpect(jsonPath("$.items[0].entry_basis").value(2.00));
+  }
+
+  @Test
+  void aBuyInAStrategyTheDemoDoesNotShow_doesNotHideShownRows() throws Exception {
+    // Otherwise shown rows would vanish whenever the hidden strategy trades the same contract.
+    String tenant = "t-hidden-buy";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    Map<String, Object> condorBuy = order(NVDA, "BUY", minutesAgo(1));
+    condorBuy.put("strategy_id", "gated_condor");
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenReturn(List.of(condorBuy, order(NVDA, "SELL", minutesAgo(1))));
+
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(1))
+        .andExpect(jsonPath("$.items[0].side").value("SELL"));
+  }
+
+  @Test
+  void aTenantWithNoStrategies_isNeverServed() throws Exception {
+    // A torn-down tenant has no strategy rows to prove it is paper; its old fills must not show.
+    String tenant = "t-no-strategies";
+    when(strategyResolver.strategyIdsForTenant(tenant)).thenReturn(List.of());
+
+    for (String path : new String[] {"status", "portfolio", "fills", "orders", "marks"}) {
+      mvc.perform(get("/api/preview/" + path).header("X-Tenant-Id", tenant))
+          .andExpect(status().isServiceUnavailable());
+    }
+    verify(positions, never()).openPositions(tenant);
+    verify(tradesReader, never()).trades(eq(tenant), anyList(), anyString(), anyInt());
+  }
+
+  @Test
+  void status_isReadAtMostOncePerFifteenSeconds() throws Exception {
+    String tenant = "t-status-ttl";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    KillSwitchState s = new KillSwitchState();
+    s.setSchemaVersion(1L);
+    s.setTripped(false);
+    WorkflowStub stub = mock(WorkflowStub.class);
+    when(workflowClient.newUntypedWorkflowStub(WorkflowIds.accountKillswitch(tenant)))
+        .thenReturn(stub);
+    when(stub.query("account_killswitch_state", KillSwitchState.class)).thenReturn(s);
+
+    for (int i = 0; i < 5; i++) {
+      mvc.perform(get("/api/preview/status").header("X-Tenant-Id", tenant))
+          .andExpect(status().isOk());
+    }
+    verify(stub, times(1)).query("account_killswitch_state", KillSwitchState.class);
+
+    service.clock = Clock.fixed(NOW.plusSeconds(16), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/status").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk());
+    verify(stub, times(2)).query("account_killswitch_state", KillSwitchState.class);
+  }
+
+  @Test
+  void aFailedOrRefusedLoad_isNotRetriedOnEveryRequest() throws Exception {
+    // A flood against a failing dependency must not re-run the slow read each time.
+    when(positions.openPositions("t-fail-once")).thenThrow(new IllegalStateException("down"));
+    when(ordersReader.orders(eq("t-fail-once"), anyInt())).thenReturn(List.of());
+    for (int i = 0; i < 6; i++) {
+      mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", "t-fail-once"))
+          .andExpect(status().isServiceUnavailable());
+    }
+    verify(positions, times(1)).openPositions("t-fail-once");
+
+    when(strategyRegistry.brokerTarget("t-live-once", "copytrade-v1")).thenReturn("alpaca-live");
+    for (int i = 0; i < 6; i++) {
+      mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", "t-live-once"))
+          .andExpect(status().isServiceUnavailable());
+    }
+    verify(strategyRegistry, times(1)).brokerTarget("t-live-once", "copytrade-v1");
+
+    // After the hold-off the load is attempted again.
+    service.clock = Clock.fixed(NOW.plusSeconds(6), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", "t-fail-once"))
+        .andExpect(status().isServiceUnavailable());
+    verify(positions, times(2)).openPositions("t-fail-once");
+  }
+
+  // ---- adversarial review --------------------------------------------------------------------
+
+  /** Orders as they stand AFTER the data read: a GOOGL buy lands while the data is loading. */
+  private void buyLandsDuringTheDataRead(String tenant, Runnable stubData) {
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    java.util.concurrent.atomic.AtomicBoolean dataRead =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    this.dataReadFlag = dataRead;
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenAnswer(
+            inv ->
+                dataRead.get()
+                    ? List.of(order(GOOGL, "BUY", minutesAgo(0)))
+                    : List.of()); // a read taken BEFORE the data sees no buy
+    stubData.run();
+  }
+
+  private java.util.concurrent.atomic.AtomicBoolean dataReadFlag;
+
+  @Test
+  void portfolio_aBuyThatLandsWhileTheBodyLoads_isStillHidden() throws Exception {
+    String tenant = "t-race-portfolio";
+    buyLandsDuringTheDataRead(
+        tenant,
+        () ->
+            when(portfolioCache.portfolio(tenant))
+                .thenAnswer(
+                    inv -> {
+                      dataReadFlag.set(true);
+                      return portfolioBody(List.of(positionRow(GOOGL)));
+                    }));
+
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.open_positions_count").value(0));
+  }
+
+  @Test
+  void fills_aBuyThatLandsWhileTheFillsLoad_isStillHidden() throws Exception {
+    String tenant = "t-race-fills";
+    buyLandsDuringTheDataRead(
+        tenant,
+        () ->
+            when(tradesReader.trades(eq(tenant), anyList(), anyString(), anyInt()))
+                .thenAnswer(
+                    inv -> {
+                      dataReadFlag.set(true);
+                      return List.of(fill(GOOGL, minutesAgo(0)));
+                    }));
+
+    mvc.perform(get("/api/preview/fills").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(0));
+  }
+
+  @Test
+  void marks_aPositionThatAppearsWhileThePositionsLoad_isStillHidden() throws Exception {
+    String tenant = "t-race-marks";
+    when(entryTimes.entryAt(eq(tenant), any()))
+        .thenReturn(Map.of(key("sig-new", GOOGL), minutesAgo(0).toInstant()));
+    java.util.concurrent.atomic.AtomicBoolean listed =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    when(positions.openPositions(tenant))
+        .thenAnswer(
+            inv -> {
+              listed.set(true);
+              return List.of(open(tenant, "copytrade-v1", GOOGL, "sig-new"));
+            });
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenAnswer(inv -> listed.get() ? List.of(order(GOOGL, "BUY", minutesAgo(0))) : List.of());
+    // Entry time unknown to this stub on purpose: only the journalled BUY can hide it.
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+
+    mvc.perform(get("/api/preview/marks").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.marks.length()").value(0));
+    verify(marksClient, never()).demoMarks(anyList());
+  }
+
+  @Test
+  void aBuyStampedAheadOfTheClock_stillHidesItsFill() throws Exception {
+    // The order journal's clock ran 3 minutes ahead of the audit clock.
+    String tenant = "t-future-buy";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenReturn(List.of(order(GOOGL, "BUY", minutesAgo(-3))));
+    when(tradesReader.trades(eq(tenant), anyList(), anyString(), anyInt()))
+        .thenReturn(List.of(fill(GOOGL, minutesAgo(0))));
+
+    mvc.perform(get("/api/preview/fills").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(0));
+  }
+
+  @Test
+  void aBuyIsFreshFromItsFill_notFromWhenItWasJournalled() throws Exception {
+    // Journalled 20 minutes ago, filled 2 minutes ago: the entry is 2 minutes old, not 20.
+    String tenant = "t-late-fill";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    Map<String, Object> lateFill = order(GOOGL, "BUY", minutesAgo(20));
+    lateFill.put("filled_at", minutesAgo(2));
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of(lateFill));
+
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(0));
+  }
+
+  @Test
+  void aBuyStillWorking_hidesItsContract_howeverLongAgoItWasJournalled() throws Exception {
+    // A resting buy with a long time-to-live must not be published before it fills.
+    String tenant = "t-resting";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    Map<String, Object> resting = order(GOOGL, "BUY", minutesAgo(40));
+    resting.put("state", "SUBMITTED");
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of(resting));
+
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(0));
+  }
+
+  @Test
+  void aBuyAbandonedMoreThanADayAgo_doesNotHideItsContractForever() throws Exception {
+    String tenant = "t-stuck";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    Map<String, Object> stuck = order(GOOGL, "BUY", minutesAgo(60 * 30));
+    stuck.put("state", "RECORDED");
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of(stuck));
+
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(1));
+  }
+
+  @Test
+  void anAddOnToAVisiblePosition_reReadsPositionsAtMostEveryFiveSeconds() throws Exception {
+    oneOldOneFresh("t-anchor-rate"); // includes a 1-minute-old NVDA buy anchored by an old position
+    for (int second = 0; second < 20; second++) {
+      service.clock = Clock.fixed(NOW.plusSeconds(second), ZoneOffset.UTC);
+      mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", "t-anchor-rate"))
+          .andExpect(status().isOk());
+    }
+    // 20 polls one second apart: loads at 0, 6, 12, 18 — not one per poll.
+    verify(positions, times(4)).openPositions("t-anchor-rate");
+  }
+
+  @Test
+  void portfolioBody_outsideMarketHours_isReadAtMostEveryFiveMinutes() throws Exception {
+    // NOW is a Friday 10:00 New York (market hours). Saturday 10:00 is not.
+    Instant saturday = Instant.parse("2026-11-28T15:00:00Z");
+    service.clock = Clock.fixed(saturday, ZoneOffset.UTC);
+    String tenant = "t-offhours";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of());
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBody(List.of()));
+
+    for (int s = 0; s <= 290; s += 29) {
+      service.clock = Clock.fixed(saturday.plusSeconds(s), ZoneOffset.UTC);
+      mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+          .andExpect(status().isOk());
+    }
+    verify(portfolioCache, times(1)).portfolio(tenant);
+
+    service.clock = Clock.fixed(saturday.plusSeconds(301), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk());
+    verify(portfolioCache, times(2)).portfolio(tenant);
+  }
+
+  @Test
+  void whenTheEntryFillsCannotBeRead_fillsStillServe_withoutABasis() throws Exception {
+    // One malformed audit row must not take the whole endpoint down for 30 days.
+    String tenant = "t-basis-fail";
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of());
+    when(tradesReader.trades(eq(tenant), anyList(), anyString(), anyInt()))
+        .thenReturn(List.of(fill("PartialExitFilled", "sig-x", NVDA, minutesAgo(60))));
+    when(entryTimes.entryFills(eq(tenant), any()))
+        .thenThrow(new IllegalStateException("invalid input syntax for type bigint"));
+
+    mvc.perform(get("/api/preview/fills").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.count").value(1))
+        .andExpect(jsonPath("$.items[0].entry_basis").value(org.hamcrest.Matchers.nullValue()));
   }
 }

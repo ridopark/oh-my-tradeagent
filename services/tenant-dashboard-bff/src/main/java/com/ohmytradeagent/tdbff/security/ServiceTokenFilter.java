@@ -156,6 +156,19 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     this.optionsChatIngestToken = optionsChatIngestToken;
     this.mcpTokenMap = parseReadTokens(mcpReadTokens, "bff.mcp-read-tokens");
     this.previewTokenMap = parseReadTokens(previewReadTokens, "bff.preview-read-tokens");
+    // A read token must never be a secret that can do more. If an operator reuses the shared or
+    // ingest token for a read client, rule 3/4 would match it first and that client would hold a
+    // write-capable credential while everyone believed it was read-only.
+    for (String secret : new String[] {sharedToken, optionsChatIngestToken}) {
+      if (secret == null || secret.isEmpty()) {
+        continue;
+      }
+      String hash = sha256hex(secret);
+      if (mcpTokenMap.containsKey(hash) || previewTokenMap.containsKey(hash)) {
+        throw new IllegalStateException(
+            "a read-token hash is the hash of the shared or ingest token — mint a separate token");
+      }
+    }
     for (String hash : previewTokenMap.keySet()) {
       if (mcpTokenMap.containsKey(hash)) {
         // One secret must never hold both the full MCP read surface and the public-demo surface.
@@ -193,9 +206,12 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
                 + " (expected <64-hex>:<tenant>)");
       }
       int colon = trimmed.indexOf(':');
-      map.put(
-          trimmed.substring(0, colon).toLowerCase(java.util.Locale.ROOT),
-          trimmed.substring(colon + 1));
+      String hash = trimmed.substring(0, colon).toLowerCase(java.util.Locale.ROOT);
+      if (map.put(hash, trimmed.substring(colon + 1)) != null) {
+        // The later entry would silently win; one token must map to exactly one tenant.
+        throw new IllegalStateException(
+            "Duplicate token hash in " + property + " at position " + pos);
+      }
     }
     return Collections.unmodifiableMap(map);
   }

@@ -69,7 +69,15 @@ class PreviewController {
    */
   @ExceptionHandler(Exception.class)
   ResponseEntity<Map<String, Object>> unavailable(Exception e) {
-    log.warn("preview read failed", e);
+    // Refusals (busy, not paper, a load still in its hold-off) are expected under load and already
+    // logged where they originate; logging each one here would let a flood fill the node's disk.
+    boolean refusal =
+        e instanceof PreviewService.BusyException
+            || e instanceof PreviewService.NotPaperException
+            || e instanceof PreviewService.UnavailableException;
+    if (!refusal) {
+      log.warn("preview read failed: {}", e.toString());
+    }
     return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
         .body(Map.of("error", "unavailable"));
   }

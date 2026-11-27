@@ -27,8 +27,17 @@ final class PreviewQuarantine {
   /** An open position: its contract and when it was first entered (null when unknown). */
   record OpenPos(String occ, Instant firstEntryAt) {}
 
-  /** A journalled buy order: its contract and when it was recorded. */
-  record Buy(String occ, Instant at) {}
+  /**
+   * A journalled buy order: its contract, when it was recorded ({@code at}: rows are hidden from
+   * here), and when it was last active ({@code activeAt}: its fill time, or now while it is still
+   * working). The delay runs from the LATEST activity — a buy journalled 20 minutes ago that filled
+   * 2 minutes ago is a 2-minute-old entry.
+   */
+  record Buy(String occ, Instant at, Instant activeAt) {
+    Buy(String occ, Instant at) {
+      this(occ, at, at);
+    }
+  }
 
   /**
    * Row times and the buy order's time come from different clocks (the order journal's database,
@@ -53,7 +62,9 @@ final class PreviewQuarantine {
         // Unknown age: it may be seconds old. Hidden, and it anchors nothing.
         fresh.merge(occ, windowStart, PreviewQuarantine::earlier);
       } else if (p.firstEntryAt().isAfter(windowStart)) {
-        fresh.merge(occ, p.firstEntryAt(), PreviewQuarantine::earlier);
+        // A time ahead of this clock is clamped: "from" must never sit in the future, or the
+        // rows it should hide would compare as older than it.
+        fresh.merge(occ, earlier(p.firstEntryAt(), now), PreviewQuarantine::earlier);
       } else {
         anchored.add(occ);
       }
@@ -66,8 +77,11 @@ final class PreviewQuarantine {
       if (b.at() == null) {
         // A buy that cannot be dated may be seconds old: hide the whole window.
         fresh.merge(occ, windowStart, PreviewQuarantine::earlier);
-      } else if (b.at().isAfter(windowStart)) {
-        fresh.merge(occ, b.at(), PreviewQuarantine::earlier);
+        continue;
+      }
+      Instant active = b.activeAt() == null ? b.at() : b.activeAt();
+      if (active.isAfter(windowStart) || b.at().isAfter(windowStart)) {
+        fresh.merge(occ, earlier(b.at(), now), PreviewQuarantine::earlier);
       }
     }
     fresh.keySet().removeAll(anchored);

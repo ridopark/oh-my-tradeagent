@@ -583,4 +583,24 @@ class DisplayMarksServiceTest {
     verify(scheduler.futures.get(1)).cancel(false); // demo task gone
     verify(scheduler.futures.get(0), never()).cancel(org.mockito.ArgumentMatchers.anyBoolean());
   }
+
+  @Test
+  void demoLane_runsItsPollsOnItsOwnScheduler() {
+    // The polls block on Alpaca REST. On a shared pool, a slow demo poll holds the threads the
+    // operators' marks need (measured: operator refreshes fell from 25 to 5 in 12s).
+    ManualScheduler operatorPool = new ManualScheduler();
+    ManualScheduler demoPool = new ManualScheduler();
+    DisplayMarksService split =
+        new DisplayMarksService(
+            provider, feedHealth, clock, 500L, operatorPool.executor, demoPool.executor);
+
+    split.marks(List.of(OCC));
+    split.demoMarks(List.of(OCC2));
+
+    assertThat(operatorPool.tasks).hasSize(1);
+    assertThat(demoPool.tasks).hasSize(1);
+    demoPool.runAll();
+    verify(provider).snapshotQuote(OCC2);
+    verify(provider, never()).snapshotQuote(OCC);
+  }
 }

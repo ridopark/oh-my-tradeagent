@@ -184,7 +184,7 @@ class PreviewProjectionTest {
   void fills_carryNoHiddenValue_andKeepTheFieldsTheRendererReads() throws Exception {
     List<Map<String, Object>> out =
         PreviewProjection.fills(
-            List.of(fill("EntryFilled", "copytrade-v1", NVDA, AN_HOUR_AGO)), Map.of());
+            List.of(fill("EntryFilled", "copytrade-v1", NVDA, AN_HOUR_AGO)), Map.of(), Map.of());
 
     assertThat(json(out)).doesNotContain(SECRET);
     assertThat(out).hasSize(1);
@@ -215,7 +215,8 @@ class PreviewProjectionTest {
                 fill("EntryFilled", "gated_condor", NVDA, AN_HOUR_AGO),
                 garbled,
                 noSymbol),
-            Map.of("NVDA261224C00200000", NOW.minus(Duration.ofMinutes(3))));
+            Map.of("NVDA261224C00200000", NOW.minus(Duration.ofMinutes(3))),
+            Map.of());
 
     // Only the hour-old copytrade fill: it predates the quarantine start.
     assertThat(out).hasSize(1);
@@ -229,7 +230,8 @@ class PreviewProjectionTest {
         "subject",
         "{\"option_symbol\":\"" + NVDA + "\",\"broker_order_id\":{\"x\":\"" + SECRET + "\"}}");
 
-    assertThat(json(PreviewProjection.fills(List.of(f), Map.of()))).doesNotContain(SECRET);
+    assertThat(json(PreviewProjection.fills(List.of(f), Map.of(), Map.of())))
+        .doesNotContain(SECRET);
   }
 
   // ---- orders -------------------------------------------------------------------------------
@@ -287,7 +289,7 @@ class PreviewProjectionTest {
 
     List<Map<String, Object>> orders =
         PreviewProjection.orders(List.of(o), Map.of(), THIRTY_DAYS_AGO);
-    List<Map<String, Object>> fills = PreviewProjection.fills(List.of(f), Map.of());
+    List<Map<String, Object>> fills = PreviewProjection.fills(List.of(f), Map.of(), Map.of());
 
     assertThat(json(orders)).doesNotContain(SECRET);
     assertThat(orders.get(0)).doesNotContainKey("broker_order_id");

@@ -117,7 +117,9 @@ final class PreviewProjection {
    * fill renderer parses it) but carries only the named fill fields.
    */
   static List<Map<String, Object>> fills(
-      List<Map<String, Object>> rows, Map<String, Instant> hiddenFrom) {
+      List<Map<String, Object>> rows,
+      Map<String, Instant> hiddenFrom,
+      Map<String, BigDecimal> entryBasis) {
     List<Map<String, Object>> out = new ArrayList<>();
     for (Map<String, Object> r : rows) {
       ObjectNode subject = fillSubject(r.get("subject"));
@@ -133,9 +135,40 @@ final class PreviewProjection {
       m.put("kind", r.get("kind"));
       m.put("strategy_id", r.get("strategy_id"));
       m.put("subject", subject.toString());
-      m.put("entry_basis", r.get("entry_basis"));
+      // NOT the tenant read's entry_basis: that one blends every contract sharing the row's
+      // correlation id, so a hidden watchlist leg filling would move a visible row's figure.
+      m.put(
+          "entry_basis",
+          r.get("correlation_id") instanceof String id
+              ? entryBasis.get(PreviewEntryTimes.key(id, occ))
+              : null);
       out.add(m);
     }
+    return out;
+  }
+
+  /**
+   * Weighted entry cost per (entry signal id, contract), from entry fills that are themselves
+   * visible. A fill inside its contract's quarantine contributes nothing, so a hidden entry can
+   * never be read off a visible row's basis.
+   */
+  static Map<String, BigDecimal> entryBasis(
+      List<PreviewEntryTimes.EntryFill> entries, Map<String, Instant> hiddenFrom) {
+    Map<String, BigDecimal> cost = new LinkedHashMap<>();
+    Map<String, Long> qty = new LinkedHashMap<>();
+    for (PreviewEntryTimes.EntryFill e : entries) {
+      if (e.signalId() == null || PreviewQuarantine.hides(hiddenFrom, e.occ(), e.at())) {
+        continue;
+      }
+      String key = PreviewEntryTimes.key(e.signalId(), e.occ());
+      cost.merge(key, e.price().multiply(BigDecimal.valueOf(e.qty())), BigDecimal::add);
+      qty.merge(key, e.qty(), Long::sum);
+    }
+    Map<String, BigDecimal> out = new LinkedHashMap<>();
+    cost.forEach(
+        (k, c) ->
+            out.put(
+                k, c.divide(BigDecimal.valueOf(qty.get(k)), 6, java.math.RoundingMode.HALF_UP)));
     return out;
   }
 

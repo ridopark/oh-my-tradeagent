@@ -86,7 +86,6 @@ public class DisplayMarksService {
   private final FeedHealth feedHealth;
   private final Clock clock;
   private final long intervalMs;
-  private final ScheduledExecutorService scheduler;
 
   static final int DEMO_CAP = 10;
   static final int DEMO_PER_SECOND = 2;
@@ -99,8 +98,11 @@ public class DisplayMarksService {
     final ConcurrentHashMap<String, Cached> quotes = new ConcurrentHashMap<>();
     // A lane whose cached quotes this lane may copy for free; null for none.
     final Lane reuseFrom;
+    // This lane's own poll threads.
+    final ScheduledExecutorService scheduler;
 
-    Lane(Clock clock, int cap, int perSecond, Lane reuseFrom) {
+    Lane(Clock clock, int cap, int perSecond, Lane reuseFrom, ScheduledExecutorService scheduler) {
+      this.scheduler = scheduler;
       this.registry = new DisplayInterestRegistry(clock, cap);
       this.budget = new DisplayRequestBudget(clock, perSecond);
       this.reuseFrom = reuseFrom;
@@ -118,7 +120,13 @@ public class DisplayMarksService {
       MarketDataProvider provider,
       FeedHealth feedHealth,
       @Value("${market-data.alpaca.premium-poll-interval-ms:500}") long intervalMs) {
-    this(provider, feedHealth, Clock.systemUTC(), intervalMs, defaultScheduler());
+    this(
+        provider,
+        feedHealth,
+        Clock.systemUTC(),
+        intervalMs,
+        pollScheduler(4, "display-marks-poll"),
+        pollScheduler(2, "display-marks-demo-poll"));
   }
 
   /**
@@ -130,24 +138,38 @@ public class DisplayMarksService {
       Clock clock,
       long intervalMs,
       ScheduledExecutorService scheduler) {
+    this(provider, feedHealth, clock, intervalMs, scheduler, scheduler);
+  }
+
+  /**
+   * Visible for tests: a separate scheduler per lane. Production always uses two: a poll blocks on
+   * Alpaca REST, so on one pool a slow demo poll would hold the threads the operators' marks need.
+   */
+  public DisplayMarksService(
+      MarketDataProvider provider,
+      FeedHealth feedHealth,
+      Clock clock,
+      long intervalMs,
+      ScheduledExecutorService scheduler,
+      ScheduledExecutorService demoScheduler) {
     this.provider = provider;
     this.feedHealth = feedHealth;
     this.clock = clock;
     // Same effective cadence as the trail poll (AlpacaMarketDataProperties: <=0 -> 500ms).
     this.intervalMs = intervalMs > 0 ? intervalMs : 500L;
-    this.scheduler = scheduler;
     this.operators =
-        new Lane(clock, DisplayInterestRegistry.CAP, DisplayRequestBudget.PER_SECOND, null);
-    this.demo = new Lane(clock, DEMO_CAP, DEMO_PER_SECOND, operators);
+        new Lane(
+            clock, DisplayInterestRegistry.CAP, DisplayRequestBudget.PER_SECOND, null, scheduler);
+    this.demo = new Lane(clock, DEMO_CAP, DEMO_PER_SECOND, operators, demoScheduler);
   }
 
-  private static ScheduledExecutorService defaultScheduler() {
+  private static ScheduledExecutorService pollScheduler(int threads, String name) {
     // Own pool, never the provider's: a slow display snapshot must not delay a trail poll.
     ScheduledThreadPoolExecutor pool =
         new ScheduledThreadPoolExecutor(
-            4,
+            threads,
             r -> {
-              Thread t = new Thread(r, "display-marks-poll");
+              Thread t = new Thread(r, name);
               t.setDaemon(true);
               return t;
             });
@@ -181,7 +203,7 @@ public class DisplayMarksService {
           try {
             lane.tasks.put(
                 occ,
-                scheduler.scheduleAtFixedRate(
+                lane.scheduler.scheduleAtFixedRate(
                     () -> pollOnce(lane, occ), 0L, intervalMs, TimeUnit.MILLISECONDS));
           } catch (RuntimeException e) {
             // e.g. RejectedExecutionException on a shutdown race: never keep a slot with no task.
@@ -328,6 +350,7 @@ public class DisplayMarksService {
 
   @PreDestroy
   void shutdown() {
-    scheduler.shutdownNow();
+    operators.scheduler.shutdownNow();
+    demo.scheduler.shutdownNow();
   }
 }
