@@ -39,8 +39,10 @@ deploy/tenant-dashboard-bff`.
 
 ## 1. Prerequisites
 
-- [ ] Images exist: `ghcr.io/ridopark/oh-my-tradeagent-demo-web:latest` and `-demo-poller:latest`
-      (built by "Build and push images" on `main`).
+- [ ] Images exist: `ghcr.io/ridopark/oh-my-tradeagent-demo-web` and `-demo-poller`, built by
+      "Build and push images" on `main`. The manifest pins both by **digest**, so a new build does
+      nothing until the digests in `69-demo.yaml` are changed and the file is applied (see "Update
+      the images" below).
 - [ ] The BFF runs the build that contains `/api/preview/*` **and** the second security review
       fixes (#1081). Check: `kubectl -n copytrade get pod -l app=tenant-dashboard-bff` is newer
       than that merge's deploy.
@@ -168,8 +170,30 @@ curl -s -o /dev/null -w '%{http_code}\n' https://tradeagent.ridopark.com/status 
 If `cf-cache-status` is `DYNAMIC`, add a Cache Rule for `/data/*.json` that respects the origin's
 `max-age=3`; without it every viewer's poll reaches the homelab. In that rule set **Browser TTL**
 to "Respect origin TTL": left unset, the zone default rewrites the header to `max-age=14400` and
-visitors' browsers hold each data file for four hours. (Rule in place since 2026-11-27, matching
-`https://tradeagent-demo.ridopark.com/data/*.json`.)
+visitors' browsers hold each data file for four hours. Also set **Cache key → Ignore query
+string**, and end the match pattern with `*`, or `marks.json?x=1` is a fresh origin request every
+time. (Rule in place since 2026-11-27, matching
+`https://tradeagent-demo.ridopark.com/data/*.json*`.)
+
+## Update the images
+
+The pod never follows `:latest`. After a merge that changes `demo/**`:
+
+```bash
+sha=$(git rev-parse origin/main)
+for img in demo-web demo-poller; do
+  gh api "/users/ridopark/packages/container/oh-my-tradeagent-$img/versions?per_page=10" \
+    -q ".[] | select(.metadata.container.tags | index(\"$sha\")) | \"$img \(.name)\""
+done
+```
+
+Put the two digests in `infra/k8s/69-demo.yaml`, `kubectl apply -f` it, and run `demo_verify.mjs`.
+
+## What the pod can reach
+
+Only the BFF. It has no DNS egress: the name `tenant-dashboard-bff` is a `hostAliases` entry holding
+the Service's ClusterIP. If every feed says `not published (fetch-TypeError)` after the BFF Service
+was recreated, the ClusterIP changed; update the `hostAliases` entry in `69-demo.yaml`.
 
 ## Rotate the token
 
