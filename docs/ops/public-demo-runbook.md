@@ -88,7 +88,7 @@ If the pod does not become Ready, read its log first: a malformed entry, a dupli
 hash equal to another credential's is a deliberate boot failure with a one-line reason. Roll back
 with `kubectl -n copytrade rollout undo deploy/tenant-dashboard-bff`.
 
-## 4. Start the pod (still dark)
+## 4. Start the pod
 
 ```bash
 kubectl apply -f infra/k8s/69-demo.yaml
@@ -96,13 +96,14 @@ kubectl -n copytrade rollout status deploy/demo
 kubectl -n copytrade logs deploy/demo -c poller --tail=20
 ```
 
-Expected poller log at this point: every feed `not published (fetch-...)`. The pod cannot reach
-the BFF yet; every page says "waiting for data". That is correct.
+The poller may log `not published (fetch-...)` for each feed once, before the network grant takes
+effect.
 
 ## 5. Let the poller reach the BFF
 
-Uncomment the `tenant-dashboard-bff-allow-demo` NetworkPolicy at the bottom of
-`infra/k8s/69-demo.yaml` and apply the file again. Within a few seconds:
+The `tenant-dashboard-bff-allow-demo` NetworkPolicy at the bottom of `infra/k8s/69-demo.yaml` is
+the grant, and since 2026-11-27 it is part of the file, so §4 already applied it and the "not
+published" stage there lasts only until the first successful poll. Within a few seconds:
 
 ```
 status: publishing
