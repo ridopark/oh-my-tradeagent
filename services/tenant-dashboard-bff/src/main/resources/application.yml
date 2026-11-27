@@ -161,6 +161,11 @@ bff:
   # A preview token reaches ONLY GET/HEAD on the exact /api/preview/* paths, as its bound tenant.
   # Default EMPTY: no preview token is accepted. A hash listed in both maps fails boot.
   preview-read-tokens: ${BFF_PREVIEW_READ_TOKENS:}
+  preview:
+    # A second, small HTTP port that serves /api/preview/* and nothing else; the demo pod's
+    # NetworkPolicy admits it to this port only. When set, preview tokens are refused on the main
+    # port. 0 (the default) opens no extra port and serves preview tokens on the main one.
+    port: ${BFF_PREVIEW_PORT:0}
   # Dark gate for the MCP delegated-assertion credential class (PLAN-2026-11-13-mcp-remote-oauth.md,
   # PR 1). Default OFF: both the DelegatedAssertionAuthenticator and the dashboardReadonlyDataSource
   # beans are absent when enabled=false, so a cluster without the MCP gateway never parses an Ed25519

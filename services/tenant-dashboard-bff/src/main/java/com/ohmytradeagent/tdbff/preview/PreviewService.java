@@ -20,7 +20,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -82,6 +84,11 @@ class PreviewService {
   // Outside the regular session nothing moves; the broker-backed read is not worth 2 workflows
   // every 30s around the clock.
   static final Duration PORTFOLIO_TTL_CLOSED = Duration.ofMinutes(5);
+  // Account totals are published from a reading between ENTRY_DELAY and this old. The window is one
+  // off-hours reload interval plus slack, so there is always a reading inside it while the demo is
+  // polling, and a reading from before a gap in polling is never passed off as recent.
+  static final Duration TOTALS_MAX_AGE =
+      ENTRY_DELAY.plus(PORTFOLIO_TTL_CLOSED).plus(Duration.ofMinutes(1));
   private static final java.time.ZoneId MARKET_TZ = java.time.ZoneId.of("America/New_York");
   // A buy still working after this long is abandoned, not resting: it must not hide its contract
   // for as long as the row stays in the journal.
@@ -113,6 +120,7 @@ class PreviewService {
   private final DbStrategyConfigReader strategyRegistry;
   private final Map<String, Open> openByTenant = new ConcurrentHashMap<>();
   private final Map<String, Body> portfolioByTenant = new ConcurrentHashMap<>();
+  private final Map<String, Deque<Body>> portfolioHistory = new ConcurrentHashMap<>();
   private final Map<String, Body> statusByTenant = new ConcurrentHashMap<>();
   private final Map<String, Failure> failureByTenant = new ConcurrentHashMap<>();
   private final Semaphore permits = new Semaphore(MAX_CONCURRENT);
@@ -161,7 +169,9 @@ class PreviewService {
           // is then always in the orders this computes the delay from.
           Map<String, Object> body = portfolioBody(tenant);
           return PreviewProjection.portfolio(
-              body, hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT)));
+              body,
+              hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT)),
+              delayedPortfolioBody(tenant));
         });
   }
 
@@ -186,8 +196,40 @@ class PreviewService {
       return cached.body();
     }
     Map<String, Object> body = portfolioCache.portfolio(tenant);
-    portfolioByTenant.put(tenant, new Body(body, now));
+    Body loaded = new Body(body, now);
+    portfolioByTenant.put(tenant, loaded);
+    Deque<Body> history = portfolioHistory.computeIfAbsent(tenant, t -> new ArrayDeque<>());
+    synchronized (history) {
+      history.addLast(loaded);
+      while (history.peekFirst().loadedAt().isBefore(now.minus(TOTALS_MAX_AGE))) {
+        history.removeFirst();
+      }
+    }
     return body;
+  }
+
+  /**
+   * The newest portfolio reading that is at least {@link #ENTRY_DELAY} old, or null when there is
+   * none recent enough (after a restart, or after a gap in polling). Account totals are published
+   * from this, so they run on the same delay as entries.
+   */
+  private Map<String, Object> delayedPortfolioBody(String tenant) {
+    Deque<Body> history = portfolioHistory.get(tenant);
+    if (history == null) {
+      return null;
+    }
+    Instant now = clock.instant();
+    Instant newest = now.minus(ENTRY_DELAY);
+    Instant oldest = now.minus(TOTALS_MAX_AGE);
+    Map<String, Object> found = null;
+    synchronized (history) {
+      for (Body b : history) {
+        if (!b.loadedAt().isAfter(newest) && !b.loadedAt().isBefore(oldest)) {
+          found = b.body();
+        }
+      }
+    }
+    return found;
   }
 
   List<Map<String, Object>> fills(String tenant) {
