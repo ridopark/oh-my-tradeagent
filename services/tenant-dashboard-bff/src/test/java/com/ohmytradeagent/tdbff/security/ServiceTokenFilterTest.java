@@ -1911,4 +1911,63 @@ class ServiceTokenFilterTest {
                     null))
         .isInstanceOf(IllegalStateException.class);
   }
+
+  private static String sha256(String v) throws Exception {
+    StringBuilder hex = new StringBuilder();
+    for (byte b :
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(v.getBytes(StandardCharsets.UTF_8))) {
+      hex.append(String.format("%02x", b));
+    }
+    return hex.toString();
+  }
+
+  @Test
+  void aReadTokenThatIsReallyTheSharedOrIngestToken_failsBoot() throws Exception {
+    // Reusing a write-capable secret for the internet-facing poller must not boot quietly.
+    for (String secret : new String[] {TOKEN, INGEST_TOKEN}) {
+      String hash = sha256(secret);
+      assertThatThrownBy(
+              () ->
+                  new ServiceTokenFilter(
+                      TOKEN,
+                      INGEST_TOKEN,
+                      "",
+                      hash + ":staging_paper",
+                      new MockEnvironment(),
+                      null))
+          .as("preview hash of " + secret)
+          .isInstanceOf(IllegalStateException.class);
+      assertThatThrownBy(
+              () ->
+                  new ServiceTokenFilter(
+                      TOKEN, INGEST_TOKEN, hash + ":acme", "", new MockEnvironment(), null))
+          .as("mcp hash of " + secret)
+          .isInstanceOf(IllegalStateException.class);
+    }
+  }
+
+  @Test
+  void theSameHashListedTwice_failsBoot() {
+    assertThatThrownBy(
+            () ->
+                new ServiceTokenFilter(
+                    TOKEN,
+                    INGEST_TOKEN,
+                    "",
+                    PREVIEW_HASH + ":staging_paper," + PREVIEW_HASH + ":prod_real",
+                    new MockEnvironment(),
+                    null))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void anUnsetIngestToken_doesNotTripTheOverlapCheck() {
+    // sha256("") must not be treated as a real credential to collide with.
+    assertThatCode(
+            () ->
+                new ServiceTokenFilter(
+                    TOKEN, "", "", PREVIEW_HASH + ":staging_paper", new MockEnvironment(), null))
+        .doesNotThrowAnyException();
+  }
 }

@@ -76,7 +76,18 @@ class PreviewService {
   private static final long CIRCUIT_BREAKER_SECONDS = 900;
 
   // How old a cached open-position list may be and still be trusted to REVEAL something.
-  private static final Duration ANCHOR_MAX_AGE = Duration.ofSeconds(1);
+  // Also the most often an add-on can force a re-read: during the 15 minutes after one, every
+  // poll would otherwise fan out to Temporal on the worker that runs the live tenants.
+  private static final Duration ANCHOR_MAX_AGE = Duration.ofSeconds(5);
+  // Outside the regular session nothing moves; the broker-backed read is not worth 2 workflows
+  // every 30s around the clock.
+  static final Duration PORTFOLIO_TTL_CLOSED = Duration.ofMinutes(5);
+  private static final java.time.ZoneId MARKET_TZ = java.time.ZoneId.of("America/New_York");
+  // A buy still working after this long is abandoned, not resting: it must not hide its contract
+  // for as long as the row stays in the journal.
+  private static final Duration WORKING_BUY_MAX_AGE = Duration.ofHours(24);
+  private static final Set<String> TERMINAL_ORDER_STATES =
+      Set.of("FILLED", "CANCELLED", "CANCELED", "ERRORED", "EXPIRED", "REJECTED");
   // The kill-switch state is a Temporal query on the worker that runs the live tenants' workflows.
   static final Duration STATUS_TTL = Duration.ofSeconds(15);
   // After a failed or refused load, do not try again for this long: a flood against a failing
@@ -146,16 +157,32 @@ class PreviewService {
     return guarded(
         tenant,
         () -> {
-          Map<String, Instant> hidden = hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT));
-          return PreviewProjection.portfolio(portfolioBody(tenant), hidden);
+          // Data FIRST, orders LAST (in every read below): a buy that lands while the data loads
+          // is then always in the orders this computes the delay from.
+          Map<String, Object> body = portfolioBody(tenant);
+          return PreviewProjection.portfolio(
+              body, hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT)));
         });
+  }
+
+  /** Regular US session, Monday to Friday 09:30-16:00 New York. Holidays count as open. */
+  private static boolean marketOpen(Instant now) {
+    java.time.ZonedDateTime t = now.atZone(MARKET_TZ);
+    java.time.DayOfWeek d = t.getDayOfWeek();
+    if (d == java.time.DayOfWeek.SATURDAY || d == java.time.DayOfWeek.SUNDAY) {
+      return false;
+    }
+    java.time.LocalTime time = t.toLocalTime();
+    return !time.isBefore(java.time.LocalTime.of(9, 30))
+        && time.isBefore(java.time.LocalTime.of(16, 0));
   }
 
   /** The un-projected portfolio, reused for {@link #PORTFOLIO_TTL}. The delay is applied fresh. */
   private Map<String, Object> portfolioBody(String tenant) {
     Instant now = clock.instant();
     Body cached = portfolioByTenant.get(tenant);
-    if (cached != null && now.isBefore(cached.loadedAt().plus(PORTFOLIO_TTL))) {
+    Duration ttl = marketOpen(now) ? PORTFOLIO_TTL : PORTFOLIO_TTL_CLOSED;
+    if (cached != null && now.isBefore(cached.loadedAt().plus(ttl))) {
       return cached.body();
     }
     Map<String, Object> body = portfolioCache.portfolio(tenant);
@@ -167,7 +194,6 @@ class PreviewService {
     return guarded(
         tenant,
         () -> {
-          Map<String, Instant> hidden = hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT));
           String since =
               OffsetDateTime.ofInstant(clock.instant().minus(HISTORY_WINDOW), ZoneOffset.UTC)
                   .toString();
@@ -180,11 +206,21 @@ class PreviewService {
               signalIds.add(id);
             }
           }
+          List<PreviewEntryTimes.EntryFill> entries = entryFills(tenant, signalIds);
+          Map<String, Instant> hidden = hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT));
           return PreviewProjection.fills(
-              rows,
-              hidden,
-              PreviewProjection.entryBasis(entryTimes.entryFills(tenant, signalIds), hidden));
+              rows, hidden, PreviewProjection.entryBasis(entries, hidden));
         });
+  }
+
+  /** Fail-soft: without entry fills a row simply carries no basis; the fills still serve. */
+  private List<PreviewEntryTimes.EntryFill> entryFills(String tenant, Set<String> signalIds) {
+    try {
+      return entryTimes.entryFills(tenant, signalIds);
+    } catch (RuntimeException e) {
+      log.warn("preview entry-fill read failed tenant={}: {}", tenant, e.toString());
+      return List.of();
+    }
   }
 
   List<Map<String, Object>> orders(String tenant) {
@@ -203,10 +239,11 @@ class PreviewService {
   }
 
   private Map<String, Object> marksUnguarded(String tenant) {
+    List<OpenPosition> listed = open(tenant).positions(); // data first, orders last
     Map<String, Instant> hidden = hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT));
     // compact OCC -> the row-form symbol(s) the positions table shows.
     Map<String, Set<String>> rowForms = new LinkedHashMap<>();
-    for (OpenPosition p : open(tenant).positions()) {
+    for (OpenPosition p : listed) {
       String compact = PreviewProjection.compact(p.contractSymbol());
       if (compact != null
           && PreviewProjection.SHOWN_STRATEGIES.contains(p.strategyId())
@@ -269,6 +306,7 @@ class PreviewService {
   }
 
   private Map<String, Instant> hiddenFrom(String tenant, List<Map<String, Object>> orderRows) {
+    Instant now = clock.instant();
     List<Buy> buys = new ArrayList<>();
     for (Map<String, Object> o : orderRows) {
       // Anything that is not plainly a SELL counts as an entry: an unfamiliar side value must
@@ -277,12 +315,23 @@ class PreviewService {
       // rows vanish (that would signal its activity).
       if (PreviewProjection.SHOWN_STRATEGIES.contains(String.valueOf(o.get("strategy_id")))
           && !"SELL".equalsIgnoreCase(String.valueOf(o.get("side")))) {
-        buys.add(
-            new Buy(
-                (String) o.get("option_symbol"), PreviewProjection.instant(o.get("recorded_at"))));
+        Instant recorded = PreviewProjection.instant(o.get("recorded_at"));
+        Instant active = recorded;
+        Instant filled = PreviewProjection.instant(o.get("filled_at"));
+        if (filled != null && (active == null || filled.isAfter(active))) {
+          active = filled;
+        }
+        // Still working (anything not plainly finished): the entry is happening NOW, however long
+        // ago it was journalled — unless it is so old it was simply abandoned.
+        boolean working =
+            !TERMINAL_ORDER_STATES.contains(
+                String.valueOf(o.get("state")).toUpperCase(java.util.Locale.ROOT));
+        if (working && recorded != null && recorded.isAfter(now.minus(WORKING_BUY_MAX_AGE))) {
+          active = now;
+        }
+        buys.add(new Buy((String) o.get("option_symbol"), recorded, active));
       }
     }
-    Instant now = clock.instant();
     Open cached = openByTenant.get(tenant);
     Open open = open(tenant);
     Map<String, Instant> hidden =

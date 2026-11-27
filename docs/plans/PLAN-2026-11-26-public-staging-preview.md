@@ -199,6 +199,29 @@ Must be settled before the demo pod is admitted to the BFF's NetworkPolicy (phas
 Decided 2026-11-26: `trail_stop_price` stays published. The operator accepts that the live
 tenants' positions (after 15 min) and stop levels can be inferred from staging's.
 
+## Second security review 2026-11-26 (structured review + adversarial red team, on merged code)
+
+No critical or high finding. The token gate, the allow-list projections, the paper-only check and
+the dashboard refactor held against both. Fixed, each with a test watched failing:
+
+- Race: the delay was computed BEFORE the data it filters, so a buy landing during a slow read was
+  published once (proved by the red team). Every read now loads data first and orders last.
+- `entry_basis` blended every contract sharing a correlation id, so a hidden watchlist leg moved a
+  visible row's figure. The demo now computes basis per (signal, contract) from visible fills only.
+- The delay ran from the order's journal time. It now runs from the latest activity: fill time, or
+  now while the buy is still working (bounded to 24 h so an abandoned row cannot hide a contract
+  forever). A buy stamped ahead of the BFF clock is clamped.
+- Demo and operator price lanes shared one 4-thread pool; slow Alpaca responses on the demo side
+  cut operator refreshes from 25 to 5 in 12 s (proved). Each lane now has its own pool.
+- A read-token hash equal to the shared or ingest token's hash, or listed twice, fails boot.
+- `/api/preview/status` cached 15 s; failed or refused loads held off 5 s and no longer logged per
+  request; an add-on forces a position re-read at most every 5 s; the portfolio read runs at most
+  every 5 min outside the regular session; only shown strategies' buys start a delay; a tenant with
+  no strategies is refused; a failed entry-fill read degrades to "no basis" rather than a 503.
+
+Open, low: the delay compares the BFF clock with database timestamps; a BFF clock running ahead
+shortens it by the same amount. Check the offset between the BFF pod and postgres in phase 5.
+
 ## Capacity (estimates, not measured)
 
 Bandwidth is the limit, not the homelab. At roughly 10 KB compressed per refresh cycle a viewer
