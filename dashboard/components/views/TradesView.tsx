@@ -4,8 +4,17 @@ import { LocalTime } from "@/components/LocalTime";
 import { Pnl, fmtCurrency, pnlCell, priceCell } from "@/components/Pnl";
 import { tradeFill, tradePnl, type Trade } from "@/lib/trades";
 
-// The Trades page body, rendered from the fill events passed as a prop.
-export function TradesView({ items }: { items: Trade[] }) {
+// The Trades page body, rendered from the fill events passed as a prop. `title` and `showDetail`
+// exist for the public demo, which names the page for what it lists and has no raw event to show.
+export function TradesView({
+  items,
+  title = "Trades",
+  showDetail = true,
+}: {
+  items: Trade[];
+  title?: string;
+  showDetail?: boolean;
+}) {
   // Flatten each event's audit `subject` into its own columns (contract / qty / fill price) so the
   // table answers "what did we trade, how many, at what price" without the operator reading JSON.
   // `subject` is kept as the last column: it still carries the broker_order_id and, on an exit, the
@@ -23,7 +32,7 @@ export function TradesView({ items }: { items: Trade[] }) {
   }));
   return (
     <main className="mx-auto max-w-6xl px-4 py-6">
-      <h1 className="mb-1 text-xl font-semibold text-slate-100">Trades</h1>
+      <h1 className="mb-1 text-xl font-semibold text-slate-100">{title}</h1>
       <p className="mb-4 text-sm text-slate-400">
         Confirmed entry and partial-exit fills, newest first.
       </p>
@@ -48,7 +57,7 @@ export function TradesView({ items }: { items: Trade[] }) {
             { key: "qty", label: "Qty" },
             { key: "avg_fill_price", label: "Fill price", render: priceCell },
             { key: "pnl", label: "P&L", render: pnlCell },
-            { key: "subject", label: "Detail" },
+            ...(showDetail ? [{ key: "subject", label: "Detail" }] : []),
           ]}
           rows={rows}
         />

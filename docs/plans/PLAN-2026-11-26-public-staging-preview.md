@@ -222,6 +222,33 @@ the dashboard refactor held against both. Fixed, each with a test watched failin
 Open, low: the delay compares the BFF clock with database timestamps; a BFF clock running ahead
 shortens it by the same amount. Check the offset between the BFF pod and postgres in phase 5.
 
+## Phase 4 as built (2026-11-27)
+
+- `demo/`: a Next.js static export (five pages, ~1.1 MB of files) that imports
+  `dashboard/components/views/*` and `NavHeader` directly. Pages are thin client wrappers: poll
+  `/data/<feed>.json`, adapt, render the dashboard's view. `lib/adapt.ts` supplies neutral values
+  for the fields the projections omit. A live quote is laid over a position only when the
+  dashboard's own `bidUsability` rule calls it live (polled within 10 s, not warming).
+- `demo/poller/`: `poller.mjs` + `check.mjs`, Node with no dependencies. `check` is a second
+  allow-list written independently of the BFF's: every key must be on the feed's list, fill
+  subjects are re-parsed, strategies must be shown ones, broker targets must end `-paper`, order ids
+  must be UUIDs, and no string may contain a Discord id, URL, email, workflow-id shape, account
+  number, markup or the hidden strategy's name. A refused or non-200 response is never written.
+- `demo/nginx.conf`: five exact data files, GET/HEAD only, per-visitor rate limit, CSP, noindex.
+- `infra/k8s/69-demo.yaml`: one pod (web + poller, in-memory volume), lowest priority, no service
+  account token, ingress from cloudflared only, egress to the BFF and DNS only. Validated with a
+  server-side dry run; NOT applied. The BFF-side grant is commented out until `/actuator/**` is
+  closed off.
+- Checked against production data: the five real `/api/preview/*` responses for staging_paper
+  (4 positions, 133 fills, 186 orders) pass the poller's gate and contain none of the hidden
+  values; the site renders them.
+- Differences from the plan text: the Fills table keeps no Detail column and is titled "Fills" via
+  two optional props on the dashboard's `TradesView`; the header brand still reads "Tenant
+  Dashboard".
+
+Still to do for phase 4: add `demo-web` and `demo-poller` to the image build matrix (a workflow
+edit, so a separate PR); the Dockerfiles are untested until then (no Docker on the workstation).
+
 ## Capacity (estimates, not measured)
 
 Bandwidth is the limit, not the homelab. At roughly 10 KB compressed per refresh cycle a viewer
