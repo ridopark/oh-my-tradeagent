@@ -136,7 +136,9 @@ class PreviewProjectionTest {
   void portfolio_carriesNoHiddenValue_andNoUnknownField() throws Exception {
     Map<String, Object> out =
         PreviewProjection.portfolio(
-            portfolioBody(List.of(position("copytrade-v1", NVDA))), Map.of());
+            portfolioBody(List.of(position("copytrade-v1", NVDA))),
+            Map.of(),
+            portfolioBody(List.of()));
 
     String body = json(out);
     assertThat(body).doesNotContain(SECRET);
@@ -162,6 +164,34 @@ class PreviewProjectionTest {
   }
 
   @Test
+  void portfolio_takesAccountTotalsFromTheDelayedBody_notTheLiveOne() {
+    Map<String, Object> live = portfolioBody(List.of(position("copytrade-v1", NVDA)));
+    live.put("realized_pnl_today", new BigDecimal("999.00"));
+    Map<String, Object> delayed = portfolioBody(List.of());
+
+    Map<String, Object> out = PreviewProjection.portfolio(live, Map.of(), delayed);
+
+    assertThat((BigDecimal) out.get("realized_pnl_today")).isEqualByComparingTo("12.50");
+    assertThat((BigDecimal) out.get("realized_pnl_all_time")).isEqualByComparingTo("-431.25");
+    assertThat((List<?>) out.get("account_equity")).hasSize(1);
+    // Positions still come from the live body.
+    assertThat(out.get("open_positions_count")).isEqualTo(1);
+  }
+
+  @Test
+  void portfolio_withNoDelayedBody_publishesNoAccountTotals() {
+    Map<String, Object> out =
+        PreviewProjection.portfolio(
+            portfolioBody(List.of(position("copytrade-v1", NVDA))), Map.of(), null);
+
+    assertThat(out.get("realized_pnl_today")).isNull();
+    assertThat(out.get("realized_pnl_all_time")).isNull();
+    assertThat((List<?>) out.get("account_equity")).isEmpty();
+    assertThat(out).containsKeys("realized_pnl_today", "realized_pnl_all_time", "account_equity");
+    assertThat(out.get("open_positions_count")).isEqualTo(1);
+  }
+
+  @Test
   void portfolio_dropsOtherStrategiesAndQuarantinedContracts_andRecomputesTotals() {
     List<Map<String, Object>> positions = new ArrayList<>();
     positions.add(position("copytrade-v1", NVDA));
@@ -171,7 +201,8 @@ class PreviewProjectionTest {
     Map<String, Object> out =
         PreviewProjection.portfolio(
             portfolioBody(positions),
-            Map.of("GOOGL261204C00285000", NOW.minus(Duration.ofMinutes(3))));
+            Map.of("GOOGL261204C00285000", NOW.minus(Duration.ofMinutes(3))),
+            portfolioBody(positions));
 
     assertThat(out.get("open_positions_count")).isEqualTo(1);
     assertThat((BigDecimal) out.get("sum_open_notional")).isEqualByComparingTo("3696.00");

@@ -83,8 +83,15 @@ final class PreviewProjection {
 
   private PreviewProjection() {}
 
-  /** The {@code /api/portfolio} body, reduced to the demo's fields and visible positions. */
-  static Map<String, Object> portfolio(Map<String, Object> body, Map<String, Instant> hiddenFrom) {
+  /**
+   * The {@code /api/portfolio} body, reduced to the demo's fields and visible positions.
+   *
+   * <p>Account totals (equity, realized P&L) come from {@code totals}, an earlier reading of the
+   * same body, never from {@code body}: they move the moment a hidden entry fills, so publishing
+   * the current ones would announce it. {@code null} publishes none.
+   */
+  static Map<String, Object> portfolio(
+      Map<String, Object> body, Map<String, Instant> hiddenFrom, Map<String, Object> totals) {
     List<Map<String, Object>> positions = new ArrayList<>();
     BigDecimal notional = BigDecimal.ZERO;
     for (Map<String, Object> p : rows(body.get("open_positions"))) {
@@ -97,7 +104,7 @@ final class PreviewProjection {
       }
     }
     List<Map<String, Object>> equity = new ArrayList<>();
-    for (Map<String, Object> e : rows(body.get("account_equity"))) {
+    for (Map<String, Object> e : rows(totals == null ? null : totals.get("account_equity"))) {
       equity.add(copy(e, EQUITY_FIELDS));
     }
     Map<String, Object> out = new LinkedHashMap<>();
@@ -106,8 +113,8 @@ final class PreviewProjection {
     out.put("open_positions_degraded", Boolean.TRUE.equals(body.get("open_positions_degraded")));
     out.put("open_positions_count", positions.size());
     out.put("sum_open_notional", notional);
-    out.put("realized_pnl_today", body.get("realized_pnl_today"));
-    out.put("realized_pnl_all_time", body.get("realized_pnl_all_time"));
+    out.put("realized_pnl_today", totals == null ? null : totals.get("realized_pnl_today"));
+    out.put("realized_pnl_all_time", totals == null ? null : totals.get("realized_pnl_all_time"));
     out.put("account_equity", equity);
     return out;
   }

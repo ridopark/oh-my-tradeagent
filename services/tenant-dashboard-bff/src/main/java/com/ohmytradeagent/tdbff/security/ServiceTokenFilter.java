@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
@@ -136,6 +137,23 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
   // constructed — the @ConditionalOnProperty on DelegatedAssertionAuthenticator guarantees the key
   // is valid and the reader is wired before this filter sees it.
   @Nullable private final DelegatedAssertionAuthenticator delegated;
+  // The local port of the preview-only connector (PreviewConnectorConfig); 0 means there is none
+  // and preview tokens are served on the main port. Set by setter, not constructor: a second
+  // constructor trips Spring's ambiguous-constructor abort.
+  private int previewPort;
+
+  /**
+   * The public-demo pod is admitted to this port and no other. When set, preview tokens work only
+   * here, and here nothing else works: no other credential, no actuator.
+   */
+  @Autowired
+  void setPreviewPort(@Value("${bff.preview.port:0}") int previewPort) {
+    this.previewPort = previewPort;
+  }
+
+  private boolean onPreviewPort(HttpServletRequest request) {
+    return previewPort > 0 && request.getLocalPort() == previewPort;
+  }
 
   public ServiceTokenFilter(
       @Value("${bff.service-token}") String sharedToken,
@@ -223,7 +241,10 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     // second clause, `/actuator/%2e%2e/api/positions` would skip this filter entirely and reach a
     // tenant read UNAUTHENTICATED — a worse version of the ingest-token problem documented in
     // doFilterInternal. Suspicious paths fall through to the filter, which rejects them.
-    return path != null && path.startsWith("/actuator/") && !hasSuspiciousPath(path);
+    return path != null
+        && path.startsWith("/actuator/")
+        && !hasSuspiciousPath(path)
+        && !onPreviewPort(request);
   }
 
   @Override
@@ -258,6 +279,18 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     }
     String presented = header.substring(BEARER_PREFIX.length());
 
+    // Rule 2p: the preview port accepts a preview token and nothing else. The demo pod's network
+    // access ends at this port, so a credential it should never hold is refused here even if valid.
+    if (onPreviewPort(request)) {
+      String previewTenant = boundTenant(previewTokenMap, sha256hex(presented));
+      if (previewTenant != null) {
+        applyPreviewReadRules(request, response, chain, previewTenant);
+      } else {
+        reject(response);
+      }
+      return;
+    }
+
     // Rule 3: ingest prefix — only the ingest token; the shared token and any MCP token are
     // rejected here (fall through to reject at the end). An MCP token on an ingest path is
     // therefore always a 401, with no special case.
@@ -290,7 +323,12 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
       // Rule 5p: preview read token (public demo). Same match, its own narrower allowlist.
       String previewTenant = boundTenant(previewTokenMap, presentedHash);
       if (previewTenant != null) {
-        applyPreviewReadRules(request, response, chain, previewTenant);
+        if (previewPort > 0) {
+          // A preview port exists, so this is not the door a preview token comes through.
+          forbidden(response);
+        } else {
+          applyPreviewReadRules(request, response, chain, previewTenant);
+        }
         return;
       }
     }

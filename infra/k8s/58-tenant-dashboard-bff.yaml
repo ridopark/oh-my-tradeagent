@@ -19,6 +19,11 @@ spec:
     - port: 8083
       targetPort: 8083
       name: http
+    # The preview-only port (BFF_PREVIEW_PORT below): the one door the public-demo pod is admitted
+    # to. It serves /api/preview/* and nothing else, on its own two request threads.
+    - port: 8085
+      targetPort: 8085
+      name: preview
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -96,6 +101,8 @@ spec:
           ports:
             - containerPort: 8083
               name: http
+            - containerPort: 8085
+              name: preview
           env:
             - name: TENANT_DASHBOARD_BFF_PORT
               value: "8083"
@@ -220,6 +227,18 @@ spec:
                   name: dashboard-secrets
                   key: BFF_MCP_READ_TOKENS
                   optional: true
+            # Public demo (docs/ops/public-demo-runbook.md). The token hash for the demo poller, and
+            # the port its requests must arrive on. With the port set, a preview token is refused on
+            # 8083, and 8085 serves the five /api/preview/* routes and nothing else (no actuator, no
+            # other credential). The demo pod's NetworkPolicy admits it to 8085 only.
+            - name: BFF_PREVIEW_READ_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-secrets
+                  key: BFF_PREVIEW_READ_TOKENS
+                  optional: true
+            - name: BFF_PREVIEW_PORT
+              value: "8085"
             # MCP delegated-assertion credential class (PLAN-2026-11-13-mcp-remote-oauth.md, PR 1).
             # BFF_MCP_DELEGATED_ENABLED is NOT set here (default false) — enabling is a manual
             # `kubectl set env deployment/tenant-dashboard-bff BFF_MCP_DELEGATED_ENABLED=true`

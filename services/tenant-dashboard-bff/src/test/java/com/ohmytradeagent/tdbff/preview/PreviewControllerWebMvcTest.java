@@ -913,6 +913,73 @@ class PreviewControllerWebMvcTest {
     verify(positions, times(4)).openPositions("t-anchor-rate");
   }
 
+  private static Map<String, Object> portfolioBodyWithEquity(String equity) {
+    Map<String, Object> body = portfolioBody(List.of());
+    Map<String, Object> row = new LinkedHashMap<>();
+    row.put("broker_target", "alpaca-paper");
+    row.put("equity", new BigDecimal(equity));
+    body.put("account_equity", List.of(row));
+    body.put("realized_pnl_today", new BigDecimal(equity));
+    return body;
+  }
+
+  private void noPositions(String tenant) {
+    when(positions.openPositions(tenant)).thenReturn(List.of());
+    when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
+    when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of());
+  }
+
+  /**
+   * Account totals move the moment a hidden entry fills, so they are published on the same delay as
+   * entries: what goes out is the reading from 15 minutes ago, never the current one.
+   */
+  @Test
+  void accountTotals_arePublishedFifteenMinutesLate() throws Exception {
+    String tenant = "t-totals-delay";
+    noPositions(tenant);
+
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBodyWithEquity("100.00"));
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.account_equity").isEmpty())
+        .andExpect(jsonPath("$.realized_pnl_today").value(org.hamcrest.Matchers.nullValue()));
+
+    // 14 minutes on, the account has moved. The first reading is not yet old enough to publish.
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(14)), ZoneOffset.UTC);
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBodyWithEquity("200.00"));
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(jsonPath("$.account_equity").isEmpty());
+
+    // 16 minutes on: the first reading goes out. The 14-minute one (200) and the current one
+    // (300) do not.
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(16)), ZoneOffset.UTC);
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBodyWithEquity("300.00"));
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(jsonPath("$.account_equity[0].equity").value(100.00))
+        .andExpect(jsonPath("$.realized_pnl_today").value(100.00));
+
+    // 30 minutes on: the 14-minute reading is now the newest one old enough.
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(30)), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(jsonPath("$.account_equity[0].equity").value(200.00));
+  }
+
+  @Test
+  void accountTotals_areWithheld_whenTheOnlyOldReadingIsFarTooOld() throws Exception {
+    String tenant = "t-totals-gap";
+    noPositions(tenant);
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBodyWithEquity("100.00"));
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk());
+
+    // Nothing polled for two hours: a two-hour-old balance is not "15 minutes ago".
+    service.clock = Clock.fixed(NOW.plus(Duration.ofHours(2)), ZoneOffset.UTC);
+    when(portfolioCache.portfolio(tenant)).thenReturn(portfolioBodyWithEquity("300.00"));
+    mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
+        .andExpect(jsonPath("$.account_equity").isEmpty())
+        .andExpect(jsonPath("$.realized_pnl_today").value(org.hamcrest.Matchers.nullValue()));
+  }
+
   @Test
   void portfolioBody_outsideMarketHours_isReadAtMostEveryFiveMinutes() throws Exception {
     // NOW is a Friday 10:00 New York (market hours). Saturday 10:00 is not.

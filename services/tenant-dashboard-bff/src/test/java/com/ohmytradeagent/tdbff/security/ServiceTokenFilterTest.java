@@ -1885,6 +1885,104 @@ class ServiceTokenFilterTest {
     assertThat(chain.getRequest()).isNull();
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // The preview port: a second, small connector that is the ONLY thing the public-demo pod can
+  // reach. It serves the preview routes and nothing else; the main port refuses preview tokens.
+  // ---------------------------------------------------------------------------------------------
+
+  private static final int MAIN_PORT = 8083;
+  private static final int PREVIEW_PORT = 8085;
+
+  private ServiceTokenFilter portedPreviewFilter() {
+    ServiceTokenFilter f =
+        new ServiceTokenFilter(
+            TOKEN,
+            INGEST_TOKEN,
+            MCP_ACME_HASH + ":acme",
+            PREVIEW_HASH + ":staging_paper",
+            new MockEnvironment(),
+            null);
+    f.setPreviewPort(PREVIEW_PORT);
+    return f;
+  }
+
+  private MockFilterChain runOnPort(
+      int port, String method, String path, String bearer, MockHttpServletResponse res)
+      throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest(method, path);
+    req.setLocalPort(port);
+    if (bearer != null) {
+      req.addHeader("Authorization", "Bearer " + bearer);
+    }
+    MockFilterChain chain = new MockFilterChain();
+    portedPreviewFilter().doFilter(req, res, chain);
+    return chain;
+  }
+
+  @Test
+  void previewPort_previewToken_everyPreviewPath_passesAsBoundTenant() throws Exception {
+    for (String path : PREVIEW_PATHS) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = runOnPort(PREVIEW_PORT, "GET", path, PREVIEW_TOKEN, res);
+      assertThat(res.getStatus()).as(path).isEqualTo(200);
+      assertThat(((HttpServletRequest) chain.getRequest()).getHeader("X-Tenant-Id"))
+          .isEqualTo("staging_paper");
+    }
+  }
+
+  @Test
+  void mainPort_refusesThePreviewToken_whenAPreviewPortIsConfigured() throws Exception {
+    for (String path : PREVIEW_PATHS) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = runOnPort(MAIN_PORT, "GET", path, PREVIEW_TOKEN, res);
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(chain.getRequest()).as(path).isNull();
+    }
+  }
+
+  @Test
+  void previewPort_refusesEveryOtherCredential_evenOnRoutesItNormallyOpens() throws Exception {
+    Object[][] cases = {
+      {"GET", "/api/positions", TOKEN}, // the shared token
+      {"GET", "/api/preview/portfolio", TOKEN},
+      {"POST", "/api/positions/force-close", TOKEN},
+      {"GET", "/api/positions", MCP_ACME_TOKEN},
+      {"GET", "/api/preview/portfolio", MCP_ACME_TOKEN},
+      {"POST", "/internal/options-chat/ingest", INGEST_TOKEN},
+      {"GET", "/api/preview/portfolio", null}, // no credential
+    };
+    for (Object[] c : cases) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain =
+          runOnPort(PREVIEW_PORT, (String) c[0], (String) c[1], (String) c[2], res);
+      assertThat(res.getStatus()).as(c[0] + " " + c[1]).isEqualTo(401);
+      assertThat(chain.getRequest()).as(c[0] + " " + c[1]).isNull();
+    }
+  }
+
+  @Test
+  void previewPort_servesNoActuator_withOrWithoutAToken() throws Exception {
+    for (String path :
+        new String[] {"/actuator/prometheus", "/actuator/health", "/actuator/info"}) {
+      for (String bearer : new String[] {null, PREVIEW_TOKEN, TOKEN}) {
+        MockHttpServletResponse res = new MockHttpServletResponse();
+        MockFilterChain chain = runOnPort(PREVIEW_PORT, "GET", path, bearer, res);
+        assertThat(res.getStatus()).as(path + " " + bearer).isIn(401, 403);
+        assertThat(chain.getRequest()).as(path + " " + bearer).isNull();
+      }
+    }
+  }
+
+  @Test
+  void mainPort_stillServesActuatorWithoutAToken_andTheSharedToken() throws Exception {
+    MockHttpServletResponse health = new MockHttpServletResponse();
+    assertThat(runOnPort(MAIN_PORT, "GET", "/actuator/health", null, health).getRequest())
+        .isNotNull();
+    MockHttpServletResponse shared = new MockHttpServletResponse();
+    assertThat(runOnPort(MAIN_PORT, "GET", "/api/positions", TOKEN, shared).getRequest())
+        .isNotNull();
+  }
+
   @Test
   void malformedPreviewTokenEntry_failsBoot() {
     for (String bad :
