@@ -478,4 +478,109 @@ class DisplayMarksServiceTest {
     assertThat(m.quote().bid()).isEqualByComparingTo("4.10");
     assertThat(m.polledAt()).isNull();
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Demo lane (public demo, PLAN-2026-11-26): its own slots and its own REST allowance, so a
+  // permanent demo watcher can never slow the operators' /live marks — nor the reverse.
+  // ---------------------------------------------------------------------------------------------
+
+  private static List<String> strikes(String root, int n) {
+    List<String> occs = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      occs.add((root + "260516C00%03d000").formatted(100 + i));
+    }
+    return occs;
+  }
+
+  private long restCalls() {
+    return org.mockito.Mockito.mockingDetails(provider).getInvocations().stream()
+        .filter(
+            inv ->
+                inv.getMethod().getName().equals("snapshotQuote")
+                    || inv.getMethod().getName().equals("snapshotEquityTrade"))
+        .count();
+  }
+
+  @Test
+  void demo_sixContractsTickingInsideOneSecond_issueAtMostTwoRestCalls() {
+    service.demoMarks(strikes("AMD", 6));
+    for (int tick = 0; tick < 4; tick++) { // 4 ticks x 6 OCCs, all within 999ms
+      scheduler.runAll();
+      clock.advance(Duration.ofMillis(250));
+    }
+    assertThat(restCalls()).isEqualTo(2);
+
+    clock.advance(Duration.ofSeconds(1)); // next second: the allowance refills
+    scheduler.runAll();
+    assertThat(restCalls()).isEqualTo(4);
+  }
+
+  @Test
+  void demo_exhaustingItsAllowance_leavesTheOperatorsBudgetWhole() {
+    service.demoMarks(strikes("AMD", 6));
+    scheduler.runAll();
+    assertThat(restCalls()).isEqualTo(2); // demo allowance spent
+
+    service.marks(strikes("NVDA", 25));
+    scheduler.runAll();
+
+    // The operators still got their full 10 in the same second.
+    assertThat(restCalls()).isEqualTo(12);
+  }
+
+  @Test
+  void operatorsExhaustingTheirBudget_doNotStarveTheDemo() {
+    service.marks(strikes("NVDA", 25));
+    scheduler.runAll();
+    assertThat(restCalls()).isEqualTo(10); // operator budget spent
+
+    service.demoMarks(List.of("AMD260516C00150000"));
+    scheduler.tasks.get(25).run();
+
+    verify(provider).snapshotQuote("AMD260516C00150000");
+  }
+
+  @Test
+  void demo_contractAnOperatorIsWatching_copiesThatQuoteAndSpendsNothing() {
+    when(provider.snapshotEquityTrade(anyString())).thenReturn(Optional.empty());
+    service.marks(List.of(OCC));
+    scheduler.runAll(); // operator lane cached OCC (1 option snapshot + 1 stock snapshot attempt)
+    long before = restCalls();
+
+    service.demoMarks(List.of(OCC));
+    scheduler.tasks.get(1).run(); // the demo lane's task for the same contract
+
+    verify(provider, times(1)).snapshotQuote(OCC);
+    // Nothing spent: the quote is copied, and the stock snapshot was fetched this second already.
+    assertThat(restCalls()).isEqualTo(before);
+    var m = service.demoMarks(List.of(OCC)).get(0);
+    assertThat(m.warming()).isFalse();
+    assertThat(m.quote().bid()).isEqualByComparingTo("2.90");
+  }
+
+  @Test
+  void demo_cap_admitsTenContracts_andTakesNoOperatorSlot() {
+    var demo = service.demoMarks(strikes("AMD", 11));
+    assertThat(demo.subList(0, 10)).allSatisfy(m -> assertThat(m.capped()).isFalse());
+    assertThat(demo.get(10).capped()).isTrue();
+
+    var ops = service.marks(strikes("NVDA", 25));
+    assertThat(ops).allSatisfy(m -> assertThat(m.capped()).isFalse());
+    // And the operators filling all 25 slots does not evict or cap the demo's ten.
+    assertThat(service.demoMarks(strikes("AMD", 10)))
+        .allSatisfy(m -> assertThat(m.capped()).isFalse());
+  }
+
+  @Test
+  void demo_interestExpiresOnItsOwn_withoutTouchingTheOperatorsTask() {
+    service.marks(List.of(OCC));
+    service.demoMarks(List.of(OCC));
+    clock.advance(Duration.ofSeconds(20));
+    service.marks(List.of(OCC)); // only the operator keeps asking
+    clock.advance(Duration.ofSeconds(15)); // demo idle 35s, operator idle 15s
+    scheduler.runAll();
+
+    verify(scheduler.futures.get(1)).cancel(false); // demo task gone
+    verify(scheduler.futures.get(0), never()).cancel(org.mockito.ArgumentMatchers.anyBoolean());
+  }
 }

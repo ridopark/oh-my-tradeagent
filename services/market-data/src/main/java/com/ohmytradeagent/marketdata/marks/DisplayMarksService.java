@@ -48,8 +48,13 @@ import org.springframework.stereotype.Component;
  * cached per ticker and refreshed at most once per {@link #SNAPSHOT_MIN_GAP}, stamped with the
  * trade's own time.
  *
- * <p>Every display REST call (option or stock snapshot) draws from one {@link
+ * <p>Every display REST call (option or stock snapshot) draws from its lane's {@link
  * DisplayRequestBudget}; without a permit the run is skipped and the cached value kept.
+ *
+ * <p><b>Two lanes.</b> The operators' /live and the public demo each have their own watch slots,
+ * tasks and REST allowance, so the demo — which watches around the clock — can never slow the
+ * operators' marks, and the operators can never starve the demo. The demo lane additionally copies
+ * a quote the operators' lane already holds, at no cost.
  */
 @Component
 public class DisplayMarksService {
@@ -83,11 +88,28 @@ public class DisplayMarksService {
   private final long intervalMs;
   private final ScheduledExecutorService scheduler;
 
+  static final int DEMO_CAP = 10;
+  static final int DEMO_PER_SECOND = 2;
+
+  /** One independent set of watch slots, poll tasks, cached quotes and REST allowance. */
+  private static final class Lane {
+    final DisplayInterestRegistry registry;
+    final DisplayRequestBudget budget;
+    final Map<String, ScheduledFuture<?>> tasks = new HashMap<>(); // guarded by lock
+    final ConcurrentHashMap<String, Cached> quotes = new ConcurrentHashMap<>();
+    // A lane whose cached quotes this lane may copy for free; null for none.
+    final Lane reuseFrom;
+
+    Lane(Clock clock, int cap, int perSecond, Lane reuseFrom) {
+      this.registry = new DisplayInterestRegistry(clock, cap);
+      this.budget = new DisplayRequestBudget(clock, perSecond);
+      this.reuseFrom = reuseFrom;
+    }
+  }
+
   private final Object lock = new Object();
-  private final DisplayInterestRegistry registry;
-  private final DisplayRequestBudget budget;
-  private final Map<String, ScheduledFuture<?>> tasks = new HashMap<>(); // guarded by lock
-  private final ConcurrentHashMap<String, Cached> quotes = new ConcurrentHashMap<>();
+  private final Lane operators;
+  private final Lane demo;
   private final ConcurrentHashMap<String, Underlying> snapshots = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Instant> snapshotFetchedAt = new ConcurrentHashMap<>();
 
@@ -114,8 +136,9 @@ public class DisplayMarksService {
     // Same effective cadence as the trail poll (AlpacaMarketDataProperties: <=0 -> 500ms).
     this.intervalMs = intervalMs > 0 ? intervalMs : 500L;
     this.scheduler = scheduler;
-    this.registry = new DisplayInterestRegistry(clock);
-    this.budget = new DisplayRequestBudget(clock);
+    this.operators =
+        new Lane(clock, DisplayInterestRegistry.CAP, DisplayRequestBudget.PER_SECOND, null);
+    this.demo = new Lane(clock, DEMO_CAP, DEMO_PER_SECOND, operators);
   }
 
   private static ScheduledExecutorService defaultScheduler() {
@@ -136,22 +159,33 @@ public class DisplayMarksService {
     return clock.instant();
   }
 
-  /** Registers/refreshes display interest for each OCC and returns the cached marks, in order. */
+  /**
+   * Registers/refreshes the OPERATORS' interest in each OCC; returns the cached marks, in order.
+   */
   public List<DisplayMark> marks(List<String> occs) {
+    return marks(operators, occs);
+  }
+
+  /** The same for the public demo's lane: its own slots and its own REST allowance. */
+  public List<DisplayMark> demoMarks(List<String> occs) {
+    return marks(demo, occs);
+  }
+
+  private List<DisplayMark> marks(Lane lane, List<String> occs) {
     List<DisplayMark> out = new ArrayList<>(occs.size());
     for (String occ : occs) {
       Admission admission;
       synchronized (lock) {
-        admission = registry.touch(occ);
+        admission = lane.registry.touch(occ);
         if (admission == Admission.NEW) {
           try {
-            tasks.put(
+            lane.tasks.put(
                 occ,
                 scheduler.scheduleAtFixedRate(
-                    () -> pollOnce(occ), 0L, intervalMs, TimeUnit.MILLISECONDS));
+                    () -> pollOnce(lane, occ), 0L, intervalMs, TimeUnit.MILLISECONDS));
           } catch (RuntimeException e) {
             // e.g. RejectedExecutionException on a shutdown race: never keep a slot with no task.
-            registry.forget(occ);
+            lane.registry.forget(occ);
             log.warn("display marks scheduling failed for {}: {}", occ, e.getMessage());
           }
         }
@@ -161,7 +195,7 @@ public class DisplayMarksService {
         out.add(new DisplayMark(occ, null, null, new Underlying(ticker, null, null), false, true));
         continue;
       }
-      Cached c = quotes.get(occ);
+      Cached c = lane.quotes.get(occ);
       out.add(
           c == null
               ? new DisplayMark(occ, null, null, underlying(ticker), true, false)
@@ -170,15 +204,15 @@ public class DisplayMarksService {
     return out;
   }
 
-  private void pollOnce(String occ) {
+  private void pollOnce(Lane lane, String occ) {
     try {
       synchronized (lock) {
-        if (registry.expireIfIdle(occ)) {
-          ScheduledFuture<?> task = tasks.remove(occ);
+        if (lane.registry.expireIfIdle(occ)) {
+          ScheduledFuture<?> task = lane.tasks.remove(occ);
           if (task != null) {
             task.cancel(false);
           }
-          quotes.remove(occ);
+          lane.quotes.remove(occ);
           return;
         }
       }
@@ -187,11 +221,19 @@ public class DisplayMarksService {
       if (provider.premiumPollActive(occ)) {
         // Two separate reads of the trail's state: the pair can be one trail poll (~500ms) apart.
         Instant trailOkAt = trailLastPollOkAt(occ);
-        provider.lastPolledQuote(occ).ifPresent(v -> quotes.put(occ, new Cached(v, trailOkAt)));
-      } else if (budget.tryAcquire()) {
-        provider.snapshotQuote(occ).ifPresent(v -> quotes.put(occ, new Cached(v, clock.instant())));
+        provider
+            .lastPolledQuote(occ)
+            .ifPresent(v -> lane.quotes.put(occ, new Cached(v, trailOkAt)));
+      } else if (lane.reuseFrom != null && lane.reuseFrom.quotes.get(occ) != null) {
+        // The other lane is polling this contract already (its entry is dropped when its interest
+        // expires): copy it, spend nothing.
+        lane.quotes.put(occ, lane.reuseFrom.quotes.get(occ));
+      } else if (lane.budget.tryAcquire()) {
+        provider
+            .snapshotQuote(occ)
+            .ifPresent(v -> lane.quotes.put(occ, new Cached(v, clock.instant())));
       }
-      refreshUnderlying(tickerOf(occ));
+      refreshUnderlying(lane, tickerOf(occ));
     } catch (RuntimeException e) {
       // Fail-soft: a thrown task would be silently descheduled by the executor.
       log.warn("display marks poll failed for {}: {}", occ, e.getMessage());
@@ -200,13 +242,13 @@ public class DisplayMarksService {
       // next request re-register a fresh task.
       log.error("display marks poll died for {}; releasing its slot", occ, e);
       synchronized (lock) {
-        registry.forget(occ);
-        ScheduledFuture<?> task = tasks.remove(occ);
+        lane.registry.forget(occ);
+        ScheduledFuture<?> task = lane.tasks.remove(occ);
         if (task != null) {
           task.cancel(false);
         }
       }
-      quotes.remove(occ);
+      lane.quotes.remove(occ);
       throw e;
     }
   }
@@ -234,7 +276,7 @@ public class DisplayMarksService {
     return snapshots.getOrDefault(ticker, new Underlying(ticker, null, null));
   }
 
-  private void refreshUnderlying(String ticker) {
+  private void refreshUnderlying(Lane lane, String ticker) {
     if (!isPlainTicker(ticker) || freshSipTick(ticker).isPresent()) {
       return;
     }
@@ -243,7 +285,8 @@ public class DisplayMarksService {
     snapshotFetchedAt.compute(
         ticker,
         (k, prev) -> {
-          if ((prev == null || !now.isBefore(prev.plus(SNAPSHOT_MIN_GAP))) && budget.tryAcquire()) {
+          if ((prev == null || !now.isBefore(prev.plus(SNAPSHOT_MIN_GAP)))
+              && lane.budget.tryAcquire()) {
             due[0] = true;
             return now;
           }

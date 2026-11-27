@@ -186,4 +186,44 @@ class DisplayMarksControllerTest {
     // An explicit null, not an absent key.
     org.assertj.core.api.Assertions.assertThat(body).contains("\"polled_at\":null");
   }
+
+  @Test
+  void laneDemo_usesTheDemoLane_neverTheOperators() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    when(service.demoMarks(List.of(LIVE)))
+        .thenReturn(
+            List.of(
+                new DisplayMark(
+                    LIVE, null, null, new Underlying("NVDA", null, null), true, false)));
+
+    mvc.perform(get("/md/marks").param("occ", LIVE).param("lane", "demo"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.marks.length()").value(1));
+
+    verify(service).demoMarks(List.of(LIVE));
+    verify(service, org.mockito.Mockito.never()).marks(org.mockito.ArgumentMatchers.anyList());
+  }
+
+  @Test
+  void laneDemo_acceptsAtMostTenContracts() throws Exception {
+    when(service.now()).thenReturn(Instant.parse("2026-10-01T14:30:01Z"));
+    String[] twelve = new String[12];
+    for (int i = 0; i < 12; i++) {
+      twelve[i] = "AMD260516C00%03d000".formatted(100 + i);
+    }
+
+    mvc.perform(get("/md/marks").param("occ", twelve).param("lane", "demo"))
+        .andExpect(status().isOk());
+
+    verify(service).demoMarks(List.of(twelve).subList(0, 10));
+  }
+
+  @Test
+  void unknownLane_is400_andReachesNoLane() throws Exception {
+    mvc.perform(get("/md/marks").param("occ", LIVE).param("lane", "operator"))
+        .andExpect(status().isBadRequest());
+
+    verify(service, org.mockito.Mockito.never()).marks(org.mockito.ArgumentMatchers.anyList());
+    verify(service, org.mockito.Mockito.never()).demoMarks(org.mockito.ArgumentMatchers.anyList());
+  }
 }
