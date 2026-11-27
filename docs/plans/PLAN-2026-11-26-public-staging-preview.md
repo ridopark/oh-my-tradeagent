@@ -219,8 +219,9 @@ the dashboard refactor held against both. Fixed, each with a test watched failin
   every 5 min outside the regular session; only shown strategies' buys start a delay; a tenant with
   no strategies is refused; a failed entry-fill read degrades to "no basis" rather than a 503.
 
-Open, low: the delay compares the BFF clock with database timestamps; a BFF clock running ahead
-shortens it by the same amount. Check the offset between the BFF pod and postgres in phase 5.
+Closed 2026-11-27: the delay compares the BFF clock with database timestamps. The cluster is one
+node, so both read the same kernel clock; three paired readings differed by ~160 ms, all of it the
+latency between the two commands. Re-check if the BFF and Postgres ever run on different nodes.
 
 ## Phase 4 as built (2026-11-27)
 
