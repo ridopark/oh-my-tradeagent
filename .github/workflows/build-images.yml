@@ -24,6 +24,7 @@ on:
       - "pom.xml"
       - "infra/docker/**"
       - "dashboard/**"
+      - "demo/**"
       - ".dockerignore"
       - ".github/workflows/build-images.yml"
   pull_request:
@@ -33,6 +34,7 @@ on:
       - "pom.xml"
       - "infra/docker/**"
       - "dashboard/**"
+      - "demo/**"
       - ".dockerignore"
       - ".github/workflows/build-images.yml"
 
@@ -163,6 +165,18 @@ jobs:
             module: ""
             dockerfile: services/mcp-server/Dockerfile
             cache_scope: mcp-server
+          # Public demo (PLAN-2026-11-26-public-staging-preview.md): the static site on nginx, and
+          # its poller. Repo-root build context; the web image also copies dashboard/components and
+          # dashboard/lib, which is why dashboard/** already triggers this workflow. Built and
+          # pushed here, but NOT rolled by deploy.yml: infra/k8s/69-demo.yaml is applied by hand.
+          - service: demo-web
+            module: ""
+            dockerfile: demo/Dockerfile
+            cache_scope: demo-web
+          - service: demo-poller
+            module: ""
+            dockerfile: demo/poller/Dockerfile
+            cache_scope: demo-poller
     steps:
       - uses: actions/checkout@v4
 
