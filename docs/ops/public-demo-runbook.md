@@ -166,7 +166,10 @@ curl -s -o /dev/null -w '%{http_code}\n' https://tradeagent.ridopark.com/status 
 ```
 
 If `cf-cache-status` is `DYNAMIC`, add a Cache Rule for `/data/*.json` that respects the origin's
-`max-age=3`; without it every viewer's poll reaches the homelab.
+`max-age=3`; without it every viewer's poll reaches the homelab. In that rule set **Browser TTL**
+to "Respect origin TTL": left unset, the zone default rewrites the header to `max-age=14400` and
+visitors' browsers hold each data file for four hours. (Rule in place since 2026-11-27, matching
+`https://tradeagent-demo.ridopark.com/data/*.json`.)
 
 ## Rotate the token
 

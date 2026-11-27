@@ -81,7 +81,10 @@ console.log(`\nDemo verification against ${base}\n`);
 console.log("Pages");
 {
   const { res } = await req("/");
-  expect(res.status === 302 && (res.headers.get("location") ?? "").endsWith("/status/"), "/ redirects to /status/", `status ${res.status}`);
+  // Exactly the path: an absolute Location would carry the server's own scheme and port (http, 8080),
+  // which no visitor can reach.
+  const location = res.headers.get("location") ?? "";
+  expect(res.status === 302 && location === "/status/", "/ redirects to the path /status/", `status ${res.status}, location ${location}`);
   for (const p of PAGES) {
     const { res, text } = await req(p);
     expect(res.status === 200 && text.includes("<html"), `${p} serves the page`, `status ${res.status}`);
