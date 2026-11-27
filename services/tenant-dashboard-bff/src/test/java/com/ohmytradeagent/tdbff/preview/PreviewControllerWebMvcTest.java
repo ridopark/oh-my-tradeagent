@@ -278,7 +278,7 @@ class PreviewControllerWebMvcTest {
     mark.put("occ", NVDA_COMPACT);
     mark.put("bid", 0.9);
     mark.put("some_future_field", SECRET);
-    when(marksClient.marks(anyList()))
+    when(marksClient.demoMarks(anyList()))
         .thenReturn(new MarksResponse("2026-11-27T15:00:00Z", List.of(mark)));
 
     String body =
@@ -292,8 +292,10 @@ class PreviewControllerWebMvcTest {
 
     assertThat(body).doesNotContain(SECRET);
     // The quarantined contract is never even sent to market-data.
-    verify(marksClient).marks(List.of(NVDA_COMPACT));
-    verify(marksClient, never()).marks(List.of(GOOGL_COMPACT));
+    verify(marksClient).demoMarks(List.of(NVDA_COMPACT));
+    // Never the operators' lane: the demo must not spend the budget their /live marks use.
+    verify(marksClient, never()).marks(anyList());
+    verify(marksClient, never()).demoMarks(List.of(GOOGL_COMPACT));
     verifyNoInteractions(portfolioCache);
   }
 
@@ -360,7 +362,7 @@ class PreviewControllerWebMvcTest {
     mark.put("occ", NVDA_COMPACT);
     mark.put("bid", 0.9);
     mark.put("underlying", underlying);
-    when(marksClient.marks(anyList()))
+    when(marksClient.demoMarks(anyList()))
         .thenReturn(new MarksResponse("2026-11-27T15:00:00Z", List.of(mark)));
 
     String body =
@@ -484,7 +486,7 @@ class PreviewControllerWebMvcTest {
     when(ordersReader.orders(eq(tenant), anyInt()))
         .thenReturn(
             List.of(order(GOOGL, "BUY", minutesAgo(2)), order(NVDA, "BUY", minutesAgo(40))));
-    when(marksClient.marks(anyList()))
+    when(marksClient.demoMarks(anyList()))
         .thenReturn(new MarksResponse("2026-11-27T15:00:00Z", List.of()));
 
     String orders =
@@ -496,7 +498,9 @@ class PreviewControllerWebMvcTest {
             .getContentAsString();
     assertThat(orders).doesNotContain("GOOGL");
     mvc.perform(get("/api/preview/marks").header("X-Tenant-Id", tenant)).andExpect(status().isOk());
-    verify(marksClient).marks(List.of(NVDA_COMPACT));
+    verify(marksClient).demoMarks(List.of(NVDA_COMPACT));
+    // Never the operators' lane: the demo must not spend the budget their /live marks use.
+    verify(marksClient, never()).marks(anyList());
   }
 
   @Test
