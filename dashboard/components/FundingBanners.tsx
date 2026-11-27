@@ -1,6 +1,6 @@
 import { fmtCurrency } from "@/components/Pnl";
 import type { LevelShortfall } from "@/lib/funding";
-import type { Order, Portfolio } from "@/lib/bff";
+import type { Order, Portfolio } from "@/lib/types";
 
 type Account = Portfolio["account_equity"][number];
 

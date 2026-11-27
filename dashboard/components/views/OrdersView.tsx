@@ -1,6 +1,6 @@
 import { DataTable } from "@/components/DataTable";
 import { contractCell } from "@/components/ContractLink";
-import type { Order } from "@/lib/bff";
+import type { Order } from "@/lib/types";
 
 // The Order History page body. Data arrives as props so the same markup renders wherever the rows
 // come from; the page itself only fetches.
