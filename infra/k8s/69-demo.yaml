@@ -135,7 +135,7 @@ spec:
             readOnlyRootFilesystem: true
           env:
             - name: BFF_URL
-              value: "http://tenant-dashboard-bff:8083"
+              value: "http://tenant-dashboard-bff:8085"
             - name: OUT_DIR
               value: "/data"
             - name: PREVIEW_TOKEN
@@ -205,12 +205,13 @@ spec:
               app: tenant-dashboard-bff
       ports:
         - protocol: TCP
-          port: 8083
+          port: 8085
     # No DNS: the one name the pod needs is in its hostAliases.
 ---
-# The grant that lets the poller reach the BFF. Enabled 2026-11-27, after #1086 stopped the BFF
-# exporting per-route request counters on /actuator/prometheus (served without a token on this
-# same port), which would have let a compromised demo pod watch operator actions on live tenants.
+# The grant that lets the poller reach the BFF, on its preview-only port (BFF_PREVIEW_PORT, #1089).
+# That port serves the five /api/preview/* routes to the preview token and nothing else, on its own
+# two request threads. The pod is NOT admitted to 8083, where /actuator/** needs no token and the
+# request threads are the ones operators' actions on live tenants run on.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -229,4 +230,4 @@ spec:
               app: demo
       ports:
         - protocol: TCP
-          port: 8083
+          port: 8085
