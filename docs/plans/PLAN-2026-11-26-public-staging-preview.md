@@ -196,8 +196,8 @@ Must be settled before the demo pod is admitted to the BFF's NetworkPolicy (phas
 - Pin the demo image by digest; this pod is internet-facing and `:latest` re-pulls on a reboot.
 - The page must render through React only (no `innerHTML`): order ids and symbols are data.
 
-Open decision for the operator: the demo would publish `trail_stop_price`. The live tenants follow
-the same signals, so their positions (after 15 min) and stop levels can be inferred from staging's.
+Decided 2026-11-26: `trail_stop_price` stays published. The operator accepts that the live
+tenants' positions (after 15 min) and stop levels can be inferred from staging's.
 
 ## Capacity (estimates, not measured)
 

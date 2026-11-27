@@ -555,17 +555,23 @@ class PreviewControllerWebMvcTest {
   @Test
   void moreThanTwoRequestsAtOnce_areRefused_notQueued() throws Exception {
     String tenant = "t-flood";
-    java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
-    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-    when(positions.openPositions(tenant))
-        .thenAnswer(
-            inv -> {
-              entered.countDown();
-              release.await(10, java.util.concurrent.TimeUnit.SECONDS);
-              return List.of();
-            });
+    when(positions.openPositions(tenant)).thenReturn(List.of());
     when(entryTimes.entryAt(eq(tenant), any())).thenReturn(Map.of());
     when(ordersReader.orders(eq(tenant), anyInt())).thenReturn(List.of());
+    // Warm the open-position cache so the two slow requests below do not serialize on it.
+    mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk());
+
+    // Both in-flight requests park INSIDE the orders read, each holding one permit.
+    java.util.concurrent.CountDownLatch bothInside = new java.util.concurrent.CountDownLatch(2);
+    java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+    when(ordersReader.orders(eq(tenant), anyInt()))
+        .thenAnswer(
+            inv -> {
+              bothInside.countDown();
+              release.await(20, java.util.concurrent.TimeUnit.SECONDS);
+              return List.of();
+            });
 
     java.util.concurrent.ExecutorService pool =
         java.util.concurrent.Executors.newFixedThreadPool(2);
@@ -580,25 +586,17 @@ class PreviewControllerWebMvcTest {
                         .getResponse()
                         .getStatus()));
       }
-      assertThat(entered.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-      // Both permits are now held (one inside the slow read, one waiting on it).
-      long deadline = System.currentTimeMillis() + 5000;
-      int third = 0;
-      while (System.currentTimeMillis() < deadline) {
-        third =
-            mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
-                .andReturn()
-                .getResponse()
-                .getStatus();
-        if (third == 503) {
-          break;
-        }
-        Thread.sleep(20);
+      assertThat(bothInside.await(15, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+      // A third request is refused at once — it never reaches a reader, so it cannot block.
+      for (String path : new String[] {"orders", "fills", "marks", "portfolio", "status"}) {
+        mvc.perform(get("/api/preview/" + path).header("X-Tenant-Id", tenant))
+            .andExpect(status().isServiceUnavailable());
       }
-      assertThat(third).isEqualTo(503);
+
       release.countDown();
       for (java.util.concurrent.Future<Integer> f : slow) {
-        assertThat(f.get(10, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(200);
+        assertThat(f.get(15, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(200);
       }
       // Permits were returned: the next request is served.
       mvc.perform(get("/api/preview/orders").header("X-Tenant-Id", tenant))
