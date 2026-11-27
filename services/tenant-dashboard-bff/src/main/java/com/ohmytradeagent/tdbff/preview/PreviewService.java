@@ -29,6 +29,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -46,6 +48,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 class PreviewService {
+
+  private static final Logger log = LoggerFactory.getLogger(PreviewService.class);
 
   static final Duration ENTRY_DELAY = Duration.ofMinutes(15);
   static final Duration HISTORY_WINDOW = Duration.ofDays(30);
@@ -72,7 +76,17 @@ class PreviewService {
   private static final long CIRCUIT_BREAKER_SECONDS = 900;
 
   // How old a cached open-position list may be and still be trusted to REVEAL something.
-  private static final Duration ANCHOR_MAX_AGE = Duration.ofSeconds(3);
+  private static final Duration ANCHOR_MAX_AGE = Duration.ofSeconds(1);
+  // The kill-switch state is a Temporal query on the worker that runs the live tenants' workflows.
+  static final Duration STATUS_TTL = Duration.ofSeconds(15);
+  // After a failed or refused load, do not try again for this long: a flood against a failing
+  // dependency must not re-run the slow read (or re-log it) on every request.
+  static final Duration FAILURE_HOLD = Duration.ofSeconds(5);
+
+  /** A recent load failed; it is not retried until {@link #FAILURE_HOLD} has passed. */
+  static final class UnavailableException extends RuntimeException {}
+
+  private record Failure(RuntimeException cause, Instant at) {}
 
   private record Open(
       List<OpenPosition> positions, Map<String, Instant> entryAt, Instant loadedAt) {}
@@ -88,6 +102,8 @@ class PreviewService {
   private final DbStrategyConfigReader strategyRegistry;
   private final Map<String, Open> openByTenant = new ConcurrentHashMap<>();
   private final Map<String, Body> portfolioByTenant = new ConcurrentHashMap<>();
+  private final Map<String, Body> statusByTenant = new ConcurrentHashMap<>();
+  private final Map<String, Failure> failureByTenant = new ConcurrentHashMap<>();
   private final Semaphore permits = new Semaphore(MAX_CONCURRENT);
   // Not a constructor parameter: a second constructor trips Spring's ambiguous-constructor abort.
   Clock clock = Clock.systemUTC();
@@ -155,10 +171,19 @@ class PreviewService {
           String since =
               OffsetDateTime.ofInstant(clock.instant().minus(HISTORY_WINDOW), ZoneOffset.UTC)
                   .toString();
-          return PreviewProjection.fills(
+          List<Map<String, Object>> rows =
               tradesReader.trades(
-                  tenant, List.copyOf(PreviewProjection.SHOWN_STRATEGIES), since, READ_LIMIT),
-              hidden);
+                  tenant, List.copyOf(PreviewProjection.SHOWN_STRATEGIES), since, READ_LIMIT);
+          Set<String> signalIds = new LinkedHashSet<>();
+          for (Map<String, Object> r : rows) {
+            if (r.get("correlation_id") instanceof String id && !id.isBlank()) {
+              signalIds.add(id);
+            }
+          }
+          return PreviewProjection.fills(
+              rows,
+              hidden,
+              PreviewProjection.entryBasis(entryTimes.entryFills(tenant, signalIds), hidden));
         });
   }
 
@@ -216,6 +241,11 @@ class PreviewService {
   }
 
   private Map<String, Object> statusUnguarded(String tenant) {
+    Instant now = clock.instant();
+    Body cached = statusByTenant.get(tenant);
+    if (cached != null && now.isBefore(cached.loadedAt().plus(STATUS_TTL))) {
+      return cached.body();
+    }
     Map<String, Object> body = new LinkedHashMap<>();
     try {
       KillSwitchState s =
@@ -234,6 +264,7 @@ class PreviewService {
     } catch (WorkflowNotFoundException e) {
       body.put("tripped", null);
     }
+    statusByTenant.put(tenant, new Body(body, now));
     return body;
   }
 
@@ -242,7 +273,10 @@ class PreviewService {
     for (Map<String, Object> o : orderRows) {
       // Anything that is not plainly a SELL counts as an entry: an unfamiliar side value must
       // hide its contract, never reveal it.
-      if (!"SELL".equalsIgnoreCase(String.valueOf(o.get("side")))) {
+      // Only rows the demo could publish need hiding: a hidden strategy's buy must not make shown
+      // rows vanish (that would signal its activity).
+      if (PreviewProjection.SHOWN_STRATEGIES.contains(String.valueOf(o.get("strategy_id")))
+          && !"SELL".equalsIgnoreCase(String.valueOf(o.get("side")))) {
         buys.add(
             new Buy(
                 (String) o.get("option_symbol"), PreviewProjection.instant(o.get("recorded_at"))));
@@ -290,7 +324,37 @@ class PreviewService {
     if (cached != null && now.isBefore(cached.loadedAt().plus(OPEN_TTL))) {
       return cached;
     }
-    for (String strategyId : strategyResolver.strategyIdsForTenant(tenant)) {
+    Failure failed = failureByTenant.get(tenant);
+    if (failed != null && now.isBefore(failed.at().plus(FAILURE_HOLD))) {
+      throw failed.cause() instanceof NotPaperException
+          ? failed.cause()
+          : new UnavailableException();
+    }
+    try {
+      Open fresh = load(tenant, now);
+      failureByTenant.remove(tenant);
+      openByTenant.put(tenant, fresh);
+      return fresh;
+    } catch (RuntimeException e) {
+      // Logged here, once per hold-off, not once per request.
+      if (e instanceof NotPaperException) {
+        log.warn("preview refused: tenant={} has a non-paper or no broker target", tenant);
+      } else {
+        log.warn("preview open-position load failed tenant={}", tenant, e);
+      }
+      openByTenant.remove(tenant);
+      failureByTenant.put(tenant, new Failure(e, now));
+      throw e;
+    }
+  }
+
+  private Open load(String tenant, Instant now) {
+    List<String> strategyIds = strategyResolver.strategyIdsForTenant(tenant);
+    if (strategyIds.isEmpty()) {
+      // Nothing proves this tenant is paper (e.g. a torn-down tenant whose fills remain).
+      throw new NotPaperException();
+    }
+    for (String strategyId : strategyIds) {
       String target = strategyRegistry.brokerTarget(tenant, strategyId);
       if (target == null || !target.endsWith("-paper")) {
         throw new NotPaperException();
@@ -305,7 +369,6 @@ class PreviewService {
       }
     }
     Open fresh = new Open(list, entryTimes.entryAt(tenant, signalIds), now);
-    openByTenant.put(tenant, fresh);
     return fresh;
   }
 }
