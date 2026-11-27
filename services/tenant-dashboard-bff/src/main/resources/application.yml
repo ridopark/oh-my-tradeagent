@@ -156,6 +156,11 @@ bff:
   #   echo "BFF_MCP_READ_TOKENS=${hash}:<tenant_id>"
   # Store the token (not the hash) in the client config; store the hash in dashboard-secrets.
   mcp-read-tokens: ${BFF_MCP_READ_TOKENS:}
+  # Read-only tokens for the public demo poller (PLAN-2026-11-26-public-staging-preview.md). Same
+  # <sha256-hex>:<tenant_id> format and fail-closed parsing as mcp-read-tokens, minted the same way.
+  # A preview token reaches ONLY GET/HEAD on the exact /api/preview/* paths, as its bound tenant.
+  # Default EMPTY: no preview token is accepted. A hash listed in both maps fails boot.
+  preview-read-tokens: ${BFF_PREVIEW_READ_TOKENS:}
   # Dark gate for the MCP delegated-assertion credential class (PLAN-2026-11-13-mcp-remote-oauth.md,
   # PR 1). Default OFF: both the DelegatedAssertionAuthenticator and the dashboardReadonlyDataSource
   # beans are absent when enabled=false, so a cluster without the MCP gateway never parses an Ed25519

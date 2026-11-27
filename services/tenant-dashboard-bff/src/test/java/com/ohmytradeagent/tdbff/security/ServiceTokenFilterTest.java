@@ -33,7 +33,7 @@ class ServiceTokenFilterTest {
   private static final String TOKEN = "s3cr3t-shared-token";
   private static final String INGEST_TOKEN = "s3cr3t-options-chat-ingest";
   private final ServiceTokenFilter filter =
-      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
+      new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", "", new MockEnvironment(), null);
 
   @Test
   void missingAuthorizationHeader_is401_andDoesNotInvokeChain() throws Exception {
@@ -84,7 +84,7 @@ class ServiceTokenFilterTest {
     MockEnvironment prod = new MockEnvironment();
     prod.setActiveProfiles("prod");
     assertThatThrownBy(
-            () -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, "", prod, null))
+            () -> new ServiceTokenFilter("dev-shared-token", INGEST_TOKEN, "", "", prod, null))
         .isInstanceOf(IllegalStateException.class);
   }
 
@@ -93,7 +93,7 @@ class ServiceTokenFilterTest {
     assertThatCode(
             () ->
                 new ServiceTokenFilter(
-                    "dev-shared-token", INGEST_TOKEN, "", new MockEnvironment(), null))
+                    "dev-shared-token", INGEST_TOKEN, "", "", new MockEnvironment(), null))
         .doesNotThrowAnyException();
   }
 
@@ -238,7 +238,7 @@ class ServiceTokenFilterTest {
   @Test
   void darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
     ServiceTokenFilter unprovisioned =
-        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
+        new ServiceTokenFilter(TOKEN, "", "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/darkpool/ingest");
     req.addHeader("Authorization", "Bearer ");
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -326,7 +326,7 @@ class ServiceTokenFilterTest {
   void flowIngestRoute_whenIngestTokenIsUnprovisioned_is401() throws Exception {
     // Mirrors darkpoolIngestRoute_whenIngestTokenIsUnprovisioned_is401.
     ServiceTokenFilter unprovisioned =
-        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
+        new ServiceTokenFilter(TOKEN, "", "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("POST", "/internal/flow/ingest");
     req.addHeader("Authorization", "Bearer ");
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -448,7 +448,7 @@ class ServiceTokenFilterTest {
   void ingestRoute_whenIngestTokenIsUnprovisioned_is401_evenWithAnEmptyBearer() throws Exception {
     // Fail-closed: a blank configured token must match NOTHING, not "any empty bearer".
     ServiceTokenFilter unprovisioned =
-        new ServiceTokenFilter(TOKEN, "", "", new MockEnvironment(), null);
+        new ServiceTokenFilter(TOKEN, "", "", "", new MockEnvironment(), null);
     MockHttpServletRequest req =
         new MockHttpServletRequest("POST", "/internal/options-chat/ingest");
     req.addHeader("Authorization", "Bearer ");
@@ -531,7 +531,7 @@ class ServiceTokenFilterTest {
 
   private final ServiceTokenFilter mcpFilter =
       new ServiceTokenFilter(
-          TOKEN, INGEST_TOKEN, MCP_ACME_HASH + ":acme", new MockEnvironment(), null);
+          TOKEN, INGEST_TOKEN, MCP_ACME_HASH + ":acme", "", new MockEnvironment(), null);
 
   @Test
   void mcpToken_allowlistedGet_passesThrough_withBoundTenantInjected() throws Exception {
@@ -854,7 +854,7 @@ class ServiceTokenFilterTest {
   void mcpTokens_emptyMap_is401ForAnMcpLookingToken() throws Exception {
     // Filter constructed with no MCP tokens — the acme token is unknown.
     ServiceTokenFilter emptyMcp =
-        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
+        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + MCP_ACME_TOKEN);
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -942,6 +942,7 @@ class ServiceTokenFilterTest {
             TOKEN,
             INGEST_TOKEN,
             MCP_ACME_HASH + ":acme," + MCP_BETA_HASH + ":beta",
+            "",
             new MockEnvironment(),
             null);
 
@@ -979,7 +980,7 @@ class ServiceTokenFilterTest {
     };
     for (String bad : malformed) {
       assertThatThrownBy(
-              () -> new ServiceTokenFilter(TOKEN, INGEST_TOKEN, bad, prod, null),
+              () -> new ServiceTokenFilter(TOKEN, INGEST_TOKEN, bad, "", prod, null),
               "expected IllegalStateException for entry: " + bad)
           .isInstanceOf(IllegalStateException.class);
     }
@@ -991,7 +992,7 @@ class ServiceTokenFilterTest {
     assertThatThrownBy(
             () ->
                 new ServiceTokenFilter(
-                    TOKEN, INGEST_TOKEN, "nothex:acme", new MockEnvironment(), null))
+                    TOKEN, INGEST_TOKEN, "nothex:acme", "", new MockEnvironment(), null))
         .isInstanceOf(IllegalStateException.class);
   }
 
@@ -1083,7 +1084,7 @@ class ServiceTokenFilterTest {
 
   private static ServiceTokenFilter filterWithDelegated(DashboardMembershipReader reader) {
     return new ServiceTokenFilter(
-        TOKEN, INGEST_TOKEN, "", new MockEnvironment(), authenticator(reader));
+        TOKEN, INGEST_TOKEN, "", "", new MockEnvironment(), authenticator(reader));
   }
 
   @Test
@@ -1433,7 +1434,7 @@ class ServiceTokenFilterTest {
             DelegatedAssertionTestKeys.validClaims(DLG_SUB, DLG_TENANT));
     // Filter built with null authenticator (the default; bff.mcp-delegated.enabled=false).
     ServiceTokenFilter disabledFilter =
-        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", new MockEnvironment(), null);
+        new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", "", new MockEnvironment(), null);
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + assertion);
     MockHttpServletResponse res = new MockHttpServletResponse();
@@ -1452,6 +1453,7 @@ class ServiceTokenFilterTest {
             TOKEN,
             INGEST_TOKEN,
             MCP_ACME_HASH + ":acme",
+            "",
             new MockEnvironment(),
             authenticator(memberReader()));
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
@@ -1473,7 +1475,7 @@ class ServiceTokenFilterTest {
     // Shared token is unaffected by the delegated authenticator.
     ServiceTokenFilter f =
         new ServiceTokenFilter(
-            TOKEN, INGEST_TOKEN, "", new MockEnvironment(), authenticator(memberReader()));
+            TOKEN, INGEST_TOKEN, "", "", new MockEnvironment(), authenticator(memberReader()));
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
     req.addHeader("Authorization", "Bearer " + TOKEN);
     req.addHeader("X-Tenant-Id", "acme");
@@ -1518,7 +1520,7 @@ class ServiceTokenFilterTest {
     assertThatThrownBy(
             () ->
                 new ServiceTokenFilter(
-                    TOKEN, INGEST_TOKEN, "rawsecrettoken123:acme", new MockEnvironment(), null))
+                    TOKEN, INGEST_TOKEN, "rawsecrettoken123:acme", "", new MockEnvironment(), null))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("position")
         .hasMessageNotContaining("rawsecrettoken123");
@@ -1681,6 +1683,7 @@ class ServiceTokenFilterTest {
                     TOKEN,
                     INGEST_TOKEN,
                     " " + MCP_ACME_HASH + ":acme , ",
+                    "",
                     new MockEnvironment(),
                     null))
         .doesNotThrowAnyException();
@@ -1693,6 +1696,7 @@ class ServiceTokenFilterTest {
             TOKEN,
             INGEST_TOKEN,
             MCP_ACME_HASH.toUpperCase(Locale.ROOT) + ":acme",
+            "",
             new MockEnvironment(),
             null);
     MockHttpServletRequest req = new MockHttpServletRequest("GET", "/api/positions");
@@ -1706,5 +1710,205 @@ class ServiceTokenFilterTest {
     assertThat(chain.getRequest()).isNotNull();
     assertThat(((HttpServletRequest) chain.getRequest()).getHeader("X-Tenant-Id"))
         .isEqualTo("acme");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Preview read token (public demo). sha256("test-preview-token-demo"), computed outside the code
+  // under test. A preview token reaches ONLY the exact /api/preview/* paths, GET/HEAD, as its
+  // bound tenant; no other credential class is interchangeable with it.
+  // ---------------------------------------------------------------------------------------------
+
+  private static final String PREVIEW_TOKEN = "test-preview-token-demo";
+  private static final String PREVIEW_HASH =
+      "14f2cfe5d57cdadf63084f11671d60429c62bbcc7ddc8f1e00d479f1421f3652";
+  private static final String[] PREVIEW_PATHS = {
+    "/api/preview/status",
+    "/api/preview/portfolio",
+    "/api/preview/fills",
+    "/api/preview/orders",
+    "/api/preview/marks"
+  };
+
+  private final ServiceTokenFilter previewFilter =
+      new ServiceTokenFilter(
+          TOKEN,
+          INGEST_TOKEN,
+          MCP_ACME_HASH + ":acme",
+          PREVIEW_HASH + ":staging_paper",
+          new MockEnvironment(),
+          null);
+
+  private MockFilterChain runPreview(
+      ServiceTokenFilter f, String method, String path, String bearer, MockHttpServletResponse res)
+      throws Exception {
+    MockHttpServletRequest req = new MockHttpServletRequest(method, path);
+    req.addHeader("Authorization", "Bearer " + bearer);
+    MockFilterChain chain = new MockFilterChain();
+    f.doFilter(req, res, chain);
+    return chain;
+  }
+
+  @Test
+  void previewToken_everyPreviewPath_getAndHead_passAsBoundTenant() throws Exception {
+    for (String path : PREVIEW_PATHS) {
+      for (String method : new String[] {"GET", "HEAD"}) {
+        MockHttpServletResponse res = new MockHttpServletResponse();
+        MockFilterChain chain = runPreview(previewFilter, method, path, PREVIEW_TOKEN, res);
+        assertThat(res.getStatus()).as(method + " " + path).isEqualTo(200);
+        HttpServletRequest downstream = (HttpServletRequest) chain.getRequest();
+        assertThat(downstream).as(method + " " + path).isNotNull();
+        assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo("staging_paper");
+        assertThat(downstream.getAttribute(ServiceTokenFilter.MCP_TOKEN_ID_ATTRIBUTE)).isNull();
+      }
+    }
+  }
+
+  @Test
+  void previewToken_onEveryMcpAllowlistedPath_is403() throws Exception {
+    // The whole point of the class: it must not read the un-projected tenant endpoints.
+    String[] tenantReads = {
+      "/api/positions",
+      "/api/portfolio",
+      "/api/portfolio-history",
+      "/api/live/marks",
+      "/api/trades",
+      "/api/orders",
+      "/api/signals",
+      "/api/account-killswitch",
+      "/api/strategy-config",
+      "/api/mcp/whoami",
+      "/api/market/snapshot"
+    };
+    for (String path : tenantReads) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = runPreview(previewFilter, "GET", path, PREVIEW_TOKEN, res);
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(chain.getRequest()).as(path).isNull();
+    }
+  }
+
+  @Test
+  void previewToken_nonReadMethods_are403() throws Exception {
+    for (String method : new String[] {"POST", "PUT", "PATCH", "DELETE"}) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain =
+          runPreview(previewFilter, method, "/api/preview/portfolio", PREVIEW_TOKEN, res);
+      assertThat(res.getStatus()).as(method).isEqualTo(403);
+      assertThat(chain.getRequest()).as(method).isNull();
+    }
+  }
+
+  @Test
+  void previewToken_pathVariants_areNotAllowlisted() throws Exception {
+    String[] variants = {
+      "/api/preview",
+      "/api/preview/",
+      "/api/preview/portfolio/",
+      "/api/preview/portfolio/x",
+      "/api/preview/Portfolio",
+      "/api/preview/strategy-config"
+    };
+    for (String path : variants) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = runPreview(previewFilter, "GET", path, PREVIEW_TOKEN, res);
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(chain.getRequest()).as(path).isNull();
+    }
+  }
+
+  @Test
+  void previewToken_traversalIntoATenantRead_is401() throws Exception {
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain =
+        runPreview(previewFilter, "GET", "/api/preview/%2e%2e/portfolio", PREVIEW_TOKEN, res);
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void previewToken_onIngestRoute_is401() throws Exception {
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain =
+        runPreview(previewFilter, "POST", "/internal/options-chat/ingest", PREVIEW_TOKEN, res);
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void previewToken_forgedTenantHeader_is403_matchingHeaderPasses() throws Exception {
+    MockHttpServletRequest forged = new MockHttpServletRequest("GET", "/api/preview/portfolio");
+    forged.addHeader("Authorization", "Bearer " + PREVIEW_TOKEN);
+    forged.addHeader("X-Tenant-Id", "prod_real");
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain = new MockFilterChain();
+    previewFilter.doFilter(forged, res, chain);
+    assertThat(res.getStatus()).isEqualTo(403);
+    assertThat(chain.getRequest()).isNull();
+
+    MockHttpServletRequest matching = new MockHttpServletRequest("GET", "/api/preview/portfolio");
+    matching.addHeader("Authorization", "Bearer " + PREVIEW_TOKEN);
+    matching.addHeader("X-Tenant-Id", "staging_paper");
+    matching.addHeader("X-Operator-Id", "someone@example.com");
+    MockFilterChain ok = new MockFilterChain();
+    previewFilter.doFilter(matching, new MockHttpServletResponse(), ok);
+    HttpServletRequest downstream = (HttpServletRequest) ok.getRequest();
+    assertThat(downstream.getHeader("X-Tenant-Id")).isEqualTo("staging_paper");
+    assertThat(downstream.getHeader("X-Operator-Id")).isNull();
+  }
+
+  @Test
+  void mcpToken_onPreviewPaths_is403() throws Exception {
+    for (String path : PREVIEW_PATHS) {
+      MockHttpServletResponse res = new MockHttpServletResponse();
+      MockFilterChain chain = runPreview(previewFilter, "GET", path, MCP_ACME_TOKEN, res);
+      assertThat(res.getStatus()).as(path).isEqualTo(403);
+      assertThat(chain.getRequest()).as(path).isNull();
+    }
+  }
+
+  @Test
+  void ingestToken_onPreviewPaths_is401() throws Exception {
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain =
+        runPreview(previewFilter, "GET", "/api/preview/portfolio", INGEST_TOKEN, res);
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void previewToken_notConfigured_is401() throws Exception {
+    // The default: an empty preview map accepts no preview token, even on a preview path.
+    MockHttpServletResponse res = new MockHttpServletResponse();
+    MockFilterChain chain =
+        runPreview(mcpFilter, "GET", "/api/preview/portfolio", PREVIEW_TOKEN, res);
+    assertThat(res.getStatus()).isEqualTo(401);
+    assertThat(chain.getRequest()).isNull();
+  }
+
+  @Test
+  void malformedPreviewTokenEntry_failsBoot() {
+    for (String bad :
+        new String[] {"nothex:staging_paper", PREVIEW_HASH, PREVIEW_HASH + ":bad t"}) {
+      assertThatThrownBy(
+              () ->
+                  new ServiceTokenFilter(TOKEN, INGEST_TOKEN, "", bad, new MockEnvironment(), null),
+              "expected IllegalStateException for entry: " + bad)
+          .isInstanceOf(IllegalStateException.class);
+    }
+  }
+
+  @Test
+  void sameHashInBothTokenClasses_failsBoot() {
+    // One secret must never hold both the full MCP read surface and the public-demo surface.
+    assertThatThrownBy(
+            () ->
+                new ServiceTokenFilter(
+                    TOKEN,
+                    INGEST_TOKEN,
+                    PREVIEW_HASH + ":acme",
+                    PREVIEW_HASH + ":staging_paper",
+                    new MockEnvironment(),
+                    null))
+        .isInstanceOf(IllegalStateException.class);
   }
 }

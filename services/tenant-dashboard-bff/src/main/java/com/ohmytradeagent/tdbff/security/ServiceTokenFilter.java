@@ -114,10 +114,24 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
           "/api/market/chain-expirations",
           "/api/market/chain");
 
+  // Exact raw paths a PREVIEW token may reach (GET/HEAD only): the public-demo projections, which
+  // serialize an allow-list of fields and nothing else. Deliberately disjoint from MCP_ALLOWLIST —
+  // a preview token never reads an un-projected tenant endpoint, and an MCP token never reads
+  // these.
+  private static final Set<String> PREVIEW_ALLOWLIST =
+      Set.of(
+          "/api/preview/status",
+          "/api/preview/portfolio",
+          "/api/preview/fills",
+          "/api/preview/orders",
+          "/api/preview/marks");
+
   private final String sharedToken;
   private final String optionsChatIngestToken;
   // sha256-lowercase-hex -> tenant_id. Empty means no MCP tokens are configured (fail-closed).
   private final Map<String, String> mcpTokenMap;
+  // sha256-lowercase-hex -> tenant_id for the public-demo poller. Empty (the default) accepts none.
+  private final Map<String, String> previewTokenMap;
   // null when bff.mcp-delegated.enabled=false (the default). Non-null only when the bean is
   // constructed — the @ConditionalOnProperty on DelegatedAssertionAuthenticator guarantees the key
   // is valid and the reader is wired before this filter sees it.
@@ -127,6 +141,7 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
       @Value("${bff.service-token}") String sharedToken,
       @Value("${options-chat.ingest-token:}") String optionsChatIngestToken,
       @Value("${bff.mcp-read-tokens:}") String mcpReadTokens,
+      @Value("${bff.preview-read-tokens:}") String previewReadTokens,
       Environment environment,
       @Nullable DelegatedAssertionAuthenticator delegated) {
     if (INSECURE_DEFAULT_TOKEN.equals(sharedToken)
@@ -139,7 +154,15 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     }
     this.sharedToken = sharedToken;
     this.optionsChatIngestToken = optionsChatIngestToken;
-    this.mcpTokenMap = parseMcpReadTokens(mcpReadTokens);
+    this.mcpTokenMap = parseReadTokens(mcpReadTokens, "bff.mcp-read-tokens");
+    this.previewTokenMap = parseReadTokens(previewReadTokens, "bff.preview-read-tokens");
+    for (String hash : previewTokenMap.keySet()) {
+      if (mcpTokenMap.containsKey(hash)) {
+        // One secret must never hold both the full MCP read surface and the public-demo surface.
+        throw new IllegalStateException(
+            "the same token hash is configured in bff.mcp-read-tokens and bff.preview-read-tokens");
+      }
+    }
     this.delegated = delegated;
   }
 
@@ -149,7 +172,7 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
    * ^[0-9a-fA-F]{64}:[A-Za-z0-9_-]+$} throws {@link IllegalStateException} unconditionally — a
    * malformed map has no legitimate use in any profile.
    */
-  private static Map<String, String> parseMcpReadTokens(String raw) {
+  private static Map<String, String> parseReadTokens(String raw, String property) {
     if (raw == null || raw.isBlank()) {
       return Map.of();
     }
@@ -163,7 +186,9 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
       }
       if (!trimmed.matches("^[0-9a-fA-F]{64}:[A-Za-z0-9_-]+$")) {
         throw new IllegalStateException(
-            "Malformed bff.mcp-read-tokens entry at position "
+            "Malformed "
+                + property
+                + " entry at position "
                 + pos
                 + " (expected <64-hex>:<tenant>)");
       }
@@ -238,20 +263,18 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     // Rule 5: MCP read token. Compute sha256 once; compare against EVERY configured entry with
     // MessageDigest.isEqual (constant-time per entry, loop shape is independent of which entry
     // matches) so a timing side-channel cannot reveal which hash (if any) matched.
-    if (!mcpTokenMap.isEmpty()) {
+    if (!mcpTokenMap.isEmpty() || !previewTokenMap.isEmpty()) {
       String presentedHash = sha256hex(presented);
-      String boundTenant = null;
-      for (Map.Entry<String, String> entry : mcpTokenMap.entrySet()) {
-        if (MessageDigest.isEqual(
-            presentedHash.getBytes(StandardCharsets.UTF_8),
-            entry.getKey().getBytes(StandardCharsets.UTF_8))) {
-          boundTenant = entry.getValue();
-          // Do NOT break: continue iterating all entries so the loop shape is timing-independent.
-        }
-      }
+      String boundTenant = boundTenant(mcpTokenMap, presentedHash);
       if (boundTenant != null) {
         applyMcpReadRules(
             request, response, chain, boundTenant, presentedHash.substring(0, 12), null);
+        return;
+      }
+      // Rule 5p: preview read token (public demo). Same match, its own narrower allowlist.
+      String previewTenant = boundTenant(previewTokenMap, presentedHash);
+      if (previewTenant != null) {
+        applyPreviewReadRules(request, response, chain, previewTenant);
         return;
       }
     }
@@ -330,6 +353,48 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
     HttpServletRequest wrapped = new McpRequestWrapper(request, boundTenant);
     wrapped.setAttribute(MCP_TOKEN_ID_ATTRIBUTE, credentialId);
     chain.doFilter(wrapped, response);
+  }
+
+  /** The tenant bound to {@code presentedHash} in {@code tokens}, or null when none matches. */
+  private static String boundTenant(Map<String, String> tokens, String presentedHash) {
+    String boundTenant = null;
+    for (Map.Entry<String, String> entry : tokens.entrySet()) {
+      if (MessageDigest.isEqual(
+          presentedHash.getBytes(StandardCharsets.UTF_8),
+          entry.getKey().getBytes(StandardCharsets.UTF_8))) {
+        boundTenant = entry.getValue();
+        // Do NOT break: continue iterating all entries so the loop shape is timing-independent.
+      }
+    }
+    return boundTenant;
+  }
+
+  /**
+   * Rule 5p enforcement: GET/HEAD only, exact {@link #PREVIEW_ALLOWLIST} path, forged-tenant check,
+   * then the bound tenant is injected. No token attribute is set and nothing is logged at INFO —
+   * the demo poller calls these every few seconds.
+   */
+  private void applyPreviewReadRules(
+      HttpServletRequest request,
+      HttpServletResponse response,
+      FilterChain chain,
+      String boundTenant)
+      throws ServletException, IOException {
+    String method = request.getMethod();
+    if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
+      forbidden(response);
+      return;
+    }
+    if (!PREVIEW_ALLOWLIST.contains(request.getRequestURI())) {
+      forbidden(response);
+      return;
+    }
+    String callerTenant = request.getHeader("X-Tenant-Id");
+    if (callerTenant != null && !callerTenant.isBlank() && !callerTenant.equals(boundTenant)) {
+      forbidden(response);
+      return;
+    }
+    chain.doFilter(new McpRequestWrapper(request, boundTenant), response);
   }
 
   private static boolean isIngestPath(String path) {
