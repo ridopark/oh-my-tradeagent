@@ -67,14 +67,29 @@ spec:
       # The pod never talks to the Kubernetes API.
       automountServiceAccountToken: false
       enableServiceLinks: false
+      # The poller needs one name and the pod has no DNS egress (a compromised pod could otherwise
+      # tunnel out through the cluster resolver), so the name is given here. The address is the
+      # tenant-dashboard-bff Service's ClusterIP, fixed for the life of that Service. If the Service
+      # is ever deleted and recreated, update this from
+      #   kubectl -n copytrade get svc tenant-dashboard-bff -o jsonpath='{.spec.clusterIP}'
+      # (the symptom is every feed "not published (fetch-TypeError)" and stale pages).
+      hostAliases:
+        - ip: "10.43.80.233"
+          hostnames: ["tenant-dashboard-bff"]
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
+        # Both images are pinned by DIGEST (built from main at bce591c4): this pod is
+        # internet-facing, and `:latest` would re-pull whatever is newest on any restart or node
+        # reboot. To update: merge, let "Build and push images" finish, read the digest of the image
+        # tagged with that commit SHA (GHCR package page, or
+        #   gh api /users/ridopark/packages/container/oh-my-tradeagent-demo-web/versions),
+        # change both lines here, and apply this file.
         - name: web
-          image: ghcr.io/ridopark/oh-my-tradeagent-demo-web:latest
-          imagePullPolicy: Always
+          image: ghcr.io/ridopark/oh-my-tradeagent-demo-web@sha256:e21e015f0b9bea18238fd05f3386499c5e1b372e0f9ec3280329f7e563bc37fe
+          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 101
             runAsGroup: 101
@@ -109,8 +124,8 @@ spec:
             - name: web-tmp
               mountPath: /tmp
         - name: poller
-          image: ghcr.io/ridopark/oh-my-tradeagent-demo-poller:latest
-          imagePullPolicy: Always
+          image: ghcr.io/ridopark/oh-my-tradeagent-demo-poller@sha256:77a8df6b8315df9275ced5044bc9a9ada07bc41798f074e9fbc774b94064103d
+          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
@@ -170,8 +185,8 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# What the demo may reach: the BFF's port and DNS. Not the internet, not Postgres, not Temporal,
-# not the orchestrator, not the api-gateway.
+# What the demo may reach: the BFF's port, and nothing else. Not DNS, not the internet, not
+# Postgres, not Temporal, not the orchestrator, not the api-gateway.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -191,18 +206,7 @@ spec:
       ports:
         - protocol: TCP
           port: 8083
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+    # No DNS: the one name the pod needs is in its hostAliases.
 ---
 # The grant that lets the poller reach the BFF. Enabled 2026-11-27, after #1086 stopped the BFF
 # exporting per-route request counters on /actuator/prometheus (served without a token on this
