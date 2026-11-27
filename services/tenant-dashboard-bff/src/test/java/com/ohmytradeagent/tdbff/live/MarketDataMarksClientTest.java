@@ -53,4 +53,44 @@ class MarketDataMarksClientTest {
   void unrecognisedShapeIsNull_soItRendersAsUnreachableNotAsNoMarks() {
     assertThat(MarketDataMarksClient.parse(Map.of("now", "x"))).isNull();
   }
+
+  /** What actually goes on the wire, against a real local HTTP server. */
+  private static String queryFor(
+      java.util.function.BiFunction<MarketDataMarksClient, List<String>, ?> call) throws Exception {
+    java.util.concurrent.atomic.AtomicReference<String> seen =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    com.sun.net.httpserver.HttpServer server =
+        com.sun.net.httpserver.HttpServer.create(
+            new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 0);
+    server.createContext(
+        "/md/marks",
+        ex -> {
+          seen.set(ex.getRequestURI().getRawQuery());
+          byte[] body = "{\"now\":\"x\",\"marks\":[]}".getBytes();
+          ex.getResponseHeaders().add("Content-Type", "application/json");
+          ex.sendResponseHeaders(200, body.length);
+          ex.getResponseBody().write(body);
+          ex.close();
+        });
+    server.start();
+    try {
+      call.apply(
+          new MarketDataMarksClient("http://127.0.0.1:" + server.getAddress().getPort()),
+          List.of("SPY260519C00737000"));
+      return seen.get();
+    } finally {
+      server.stop(0);
+    }
+  }
+
+  @Test
+  void marks_sendsNoLane_soOperatorsKeepTheirOwnBudget() throws Exception {
+    assertThat(queryFor(MarketDataMarksClient::marks)).isEqualTo("occ=SPY260519C00737000");
+  }
+
+  @Test
+  void demoMarks_asksForTheDemoLane() throws Exception {
+    assertThat(queryFor(MarketDataMarksClient::demoMarks))
+        .isEqualTo("occ=SPY260519C00737000&lane=demo");
+  }
 }

@@ -38,10 +38,30 @@ public class MarketDataMarksClient {
 
   /** Marks for the given COMPACT OCCs, or null when market-data could not be read. */
   public MarksResponse marks(List<String> compactOccs) {
+    return fetch(compactOccs, null);
+  }
+
+  /**
+   * The same read through market-data's DEMO lane: its own watch slots and its own, much smaller,
+   * Alpaca allowance. The public demo polls around the clock; on the operators' lane it would spend
+   * the budget their /live marks depend on.
+   */
+  public MarksResponse demoMarks(List<String> compactOccs) {
+    return fetch(compactOccs, "demo");
+  }
+
+  private MarksResponse fetch(List<String> compactOccs, String lane) {
     try {
       Map<String, Object> body =
           rest.get()
-              .uri(b -> b.path("/md/marks").queryParam("occ", compactOccs.toArray()).build())
+              .uri(
+                  b -> {
+                    b.path("/md/marks").queryParam("occ", compactOccs.toArray());
+                    if (lane != null) {
+                      b.queryParam("lane", lane);
+                    }
+                    return b.build();
+                  })
               .retrieve()
               .body(MAP_TYPE);
       return body == null ? null : parse(body);

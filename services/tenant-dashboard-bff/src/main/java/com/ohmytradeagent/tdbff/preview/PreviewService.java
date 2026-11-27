@@ -190,7 +190,7 @@ class PreviewService {
       }
     }
     MarksResponse resp =
-        rowForms.isEmpty() ? null : marksClient.marks(new ArrayList<>(rowForms.keySet()));
+        rowForms.isEmpty() ? null : marksClient.demoMarks(new ArrayList<>(rowForms.keySet()));
     List<Map<String, Object>> marks = new ArrayList<>();
     if (resp != null) {
       for (Map<String, Object> mark : resp.marks()) {
