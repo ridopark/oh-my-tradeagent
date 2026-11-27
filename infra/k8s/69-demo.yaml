@@ -11,14 +11,13 @@
 #   1. kubectl -n copytrade create secret generic demo-preview-token --from-literal=token=<token>
 #      and add "<sha256 of token>:staging_paper" to BFF_PREVIEW_READ_TOKENS on the BFF.
 #   2. kubectl apply -f infra/k8s/69-demo.yaml
-#   3. Grant the pod network access to the BFF (the additive NetworkPolicy at the bottom of this
-#      file is deliberately commented out until the BFF's unauthenticated /actuator/** on the same
-#      port is closed off — see the plan's "must be settled before" list).
+#   3. The additive NetworkPolicy at the bottom of this file grants the pod network access to the
+#      BFF. It is applied with the rest of the file; delete it to cut the data (runbook, "Off
+#      switch").
 #   4. Operator, in Cloudflare: add the published application tradeagent-demo.ridopark.com ->
 #      http://demo:8080 on tunnel homelab-dashboard. No Access application for it.
 #
-# Until step 3 the pod runs and serves the site, but the poller cannot reach the BFF, so every
-# page says "waiting for data". That is the intended dark state.
+# Until step 4 nothing is public: the pod runs and publishes, but no hostname routes to it.
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
@@ -204,29 +203,26 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-# ---
-# DELIBERATELY NOT ENABLED YET. This is the grant that lets the poller reach the BFF. The BFF serves
-# /actuator/prometheus without a token on this same port, and its per-route request counters would
-# let a compromised demo pod watch operator actions on live tenants. Enable only after that is
-# closed off (a separate management port, or a token on /actuator/prometheus for non-monitoring
-# peers).
-#
-# apiVersion: networking.k8s.io/v1
-# kind: NetworkPolicy
-# metadata:
-#   name: tenant-dashboard-bff-allow-demo
-#   namespace: copytrade
-# spec:
-#   podSelector:
-#     matchLabels:
-#       app: tenant-dashboard-bff
-#   policyTypes:
-#     - Ingress
-#   ingress:
-#     - from:
-#         - podSelector:
-#             matchLabels:
-#               app: demo
-#       ports:
-#         - protocol: TCP
-#           port: 8083
+---
+# The grant that lets the poller reach the BFF. Enabled 2026-11-27, after #1086 stopped the BFF
+# exporting per-route request counters on /actuator/prometheus (served without a token on this
+# same port), which would have let a compromised demo pod watch operator actions on live tenants.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-dashboard-bff-allow-demo
+  namespace: copytrade
+spec:
+  podSelector:
+    matchLabels:
+      app: tenant-dashboard-bff
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: demo
+      ports:
+        - protocol: TCP
+          port: 8083

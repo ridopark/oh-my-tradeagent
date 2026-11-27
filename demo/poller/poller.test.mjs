@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { refresh } from "./poller.mjs";
+import { refresh, serial } from "./poller.mjs";
 
 const NOW = () => new Date("2026-11-27T15:00:00Z");
 const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), "demo-poller-"));
@@ -65,4 +65,20 @@ test("the token is sent as a bearer and redirects are refused", async () => {
   assert.ok(seen.url.endsWith("/api/preview/status"));
   assert.equal(seen.init.redirect, "error");
   assert.ok(seen.init.headers.Authorization.startsWith("Bearer "));
+});
+
+test("serial runs one job at a time, in order, and a failed job does not stop the next", async () => {
+  const run = serial();
+  let inFlight = 0;
+  let most = 0;
+  const job = (value, fail) => async () => {
+    most = Math.max(most, ++inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    if (fail) throw new Error("boom");
+    return value;
+  };
+  const results = await Promise.allSettled([run(job("a")), run(job("b", true)), run(job("c"))]);
+  assert.equal(most, 1);
+  assert.deepEqual(results.map((r) => r.value ?? r.status), ["a", "rejected", "c"]);
 });

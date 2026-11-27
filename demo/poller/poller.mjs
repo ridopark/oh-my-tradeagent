@@ -46,19 +46,33 @@ export async function refresh(feed, { fetchImpl = fetch, now = () => new Date(),
   return null;
 }
 
+/**
+ * Runs jobs one at a time, in the order given. The feeds' cadences line up every 15 s, and the BFF
+ * refuses (503) more than two preview requests at once, so unqueued fetches drop feeds.
+ */
+export function serial() {
+  let tail = Promise.resolve();
+  return (job) => {
+    const run = tail.then(job);
+    tail = run.catch(() => {});
+    return run;
+  };
+}
+
 function main() {
   if (!TOKEN) {
     console.error("PREVIEW_TOKEN is not set; nothing can be fetched");
     process.exit(1);
   }
   const last = {};
+  const oneAtATime = serial();
   for (const [feed, seconds] of Object.entries(FEEDS)) {
     let running = false;
     const tick = async () => {
       if (running) return; // a slow read must not stack up behind itself
       running = true;
       try {
-        const rule = await refresh(feed);
+        const rule = await oneAtATime(() => refresh(feed));
         // One line per change of outcome, not per poll.
         if (rule !== last[feed]) {
           console.log(rule ? `${feed}: not published (${rule})` : `${feed}: publishing`);
