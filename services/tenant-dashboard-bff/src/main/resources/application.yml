@@ -308,6 +308,14 @@ management:
     web:
       exposure:
         include: health,info,prometheus
+  # /actuator/prometheus needs no token (the scraper has none) and shares the API's port, so every
+  # pod allowed to reach the BFF can read it — including internet-facing ones (the MCP gateway, the
+  # public demo's poller). The per-route request timer would show such a pod, in real time, when an
+  # operator force-closes or manually enters on a live account. It is not exported. Pool, JVM and
+  # logback metrics are unaffected. (PLAN-2026-11-26-public-staging-preview.md)
+  metrics:
+    enable:
+      http.server.requests: false
   endpoint:
     health:
       probes:
