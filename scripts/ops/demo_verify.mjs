@@ -25,7 +25,7 @@ if (!/^https?:\/\//.test(base)) {
 const extraForbidden = (process.env.DEMO_FORBIDDEN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
 const PAGES = ["/status/", "/live/", "/portfolio/", "/positions/", "/trades/", "/orders/"];
-const FEEDS = ["status", "portfolio", "fills", "orders", "marks"];
+const FEEDS = ["status", "portfolio", "fills", "orders", "marks", "history"];
 // Shapes that must not appear anywhere: pages, scripts, stylesheets or data.
 // (Field NAMES such as "workflow_id" are not here: the page's own code legitimately mentions them
 // — a column definition, an empty placeholder. Whether a data file CARRIES such a field is the
@@ -107,7 +107,7 @@ for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
   }
 }
 
-console.log("\nNothing outside the site and the five data files");
+console.log("\nNothing outside the site and the six data files");
 const MUST_NOT_SERVE = [
   "/data/", "/data/other.json", "/data/.portfolio.json.tmp", "/data/portfolio.json.tmp",
   "/data/portfolio.json/", "/data/health.json", "/data/../etc/passwd", "/data/%2e%2e/%2e%2e/etc/passwd",

@@ -3,7 +3,11 @@ package com.ohmytradeagent.tdbff.preview;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.ohmytradeagent.contract.PortfolioHistoryResult;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -266,6 +270,89 @@ final class PreviewProjection {
     } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
       return null;
     }
+  }
+
+  /** Seconds one bar covers, by the broker's timeframe name. Anything else is not published. */
+  private static final Map<String, Long> BAR_SECONDS =
+      Map.of("5Min", 300L, "15Min", 900L, "1D", 86_400L);
+
+  /**
+   * One range of the account's equity history for the demo chart, or null when there is nothing
+   * publishable (no points, or a timeframe this code does not know).
+   *
+   * <p>Only bars that ENDED at least {@code delay} ago are kept. A bar still in progress carries
+   * the account's value as of now, whatever its timestamp says (today's daily bar most of all), so
+   * keeping it would publish live equity and announce an entry inside its hold-back. The range
+   * return is recomputed from the kept bars alone, never from a live equity read. Figures are
+   * rounded (cents, and 6 decimals for ratios): the chart needs no more.
+   */
+  static Map<String, Object> history(
+      PortfolioHistoryResult r, Instant now, Duration delay, PortfolioReturnCalculator calculator) {
+    Long barSeconds =
+        r == null || r.getTimeframe() == null ? null : BAR_SECONDS.get(r.getTimeframe());
+    List<Long> ts = r == null ? null : r.getTimestamps();
+    List<BigDecimal> eq = r == null ? null : r.getEquity();
+    if (barSeconds == null || ts == null || eq == null) {
+      return null;
+    }
+    long cutoff = now.minus(delay).getEpochSecond();
+    List<Long> timestamps = new ArrayList<>();
+    List<BigDecimal> equity = new ArrayList<>();
+    List<BigDecimal> pl = new ArrayList<>();
+    List<BigDecimal> plPct = new ArrayList<>();
+    for (int i = 0; i < ts.size() && i < eq.size(); i++) {
+      if (ts.get(i) == null || eq.get(i) == null || ts.get(i) + barSeconds > cutoff) {
+        continue;
+      }
+      timestamps.add(ts.get(i));
+      equity.add(eq.get(i));
+      pl.add(at(r.getProfitLoss(), i));
+      plPct.add(at(r.getProfitLossPct(), i));
+    }
+    if (timestamps.isEmpty()) {
+      return null;
+    }
+    PortfolioReturnCalculator.RangeReturn rr =
+        calculator.compute(
+            equity,
+            r.getBaseValue(),
+            timestamps,
+            r.getCashFlowTimestamps(),
+            r.getCashFlowAmounts(),
+            r.getCashFlowsAvailable(),
+            r.getBaseValueAsof(),
+            null,
+            null);
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("timestamps", timestamps);
+    out.put("equity", scaled(equity, 2));
+    out.put("profit_loss", scaled(pl, 2));
+    out.put("profit_loss_pct", scaled(plPct, 6));
+    out.put("base_value", scale(r.getBaseValue(), 2));
+    out.put("base_value_asof", r.getBaseValueAsof());
+    out.put("timeframe", r.getTimeframe());
+    out.put("range_pl", scale(rr.rangePl(), 2));
+    out.put("range_pl_pct", scale(rr.rangePlPct(), 6));
+    out.put("cash_flows_available", Boolean.TRUE.equals(r.getCashFlowsAvailable()));
+    return out;
+  }
+
+  /** The i-th entry, or zero where the broker sent a shorter or sparse list. */
+  private static BigDecimal at(List<BigDecimal> list, int i) {
+    BigDecimal v = list != null && i < list.size() ? list.get(i) : null;
+    return v == null ? BigDecimal.ZERO : v;
+  }
+
+  private static BigDecimal scale(BigDecimal v, int places) {
+    return v == null ? null : v.setScale(places, RoundingMode.HALF_UP);
+  }
+
+  private static List<BigDecimal> scaled(List<BigDecimal> values, int places) {
+    List<BigDecimal> out = new ArrayList<>(values.size());
+    for (BigDecimal v : values) {
+      out.add(scale(v, places));
+    }
+    return out;
   }
 
   private static Map<String, Object> copy(Map<String, Object> src, List<String> fields) {

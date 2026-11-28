@@ -53,6 +53,11 @@ class PreviewController {
     return items(service.orders(ctx.tenantId(req)));
   }
 
+  @GetMapping("/history")
+  Map<String, Object> history(HttpServletRequest req) {
+    return service.history(ctx.tenantId(req));
+  }
+
   @GetMapping("/marks")
   Map<String, Object> marks(HttpServletRequest req) {
     return service.marks(ctx.tenantId(req));

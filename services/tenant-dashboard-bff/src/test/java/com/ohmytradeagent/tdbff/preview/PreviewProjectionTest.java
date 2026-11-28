@@ -130,6 +130,130 @@ class PreviewProjectionTest {
     return m;
   }
 
+  // ---- history (the equity chart) -------------------------------------------------------------
+
+  private static final com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator CALC =
+      new com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator();
+  private static final Duration DELAY = Duration.ofMinutes(15);
+
+  private static com.ohmytradeagent.contract.PortfolioHistoryResult historyResult(
+      String timeframe, long[] ts, String[] equity) {
+    com.ohmytradeagent.contract.PortfolioHistoryResult r =
+        new com.ohmytradeagent.contract.PortfolioHistoryResult();
+    List<Long> t = new ArrayList<>();
+    List<BigDecimal> e = new ArrayList<>();
+    List<BigDecimal> pl = new ArrayList<>();
+    List<BigDecimal> pct = new ArrayList<>();
+    for (int i = 0; i < ts.length; i++) {
+      t.add(ts[i]);
+      e.add(equity[i] == null ? null : new BigDecimal(equity[i]));
+      pl.add(equity[i] == null ? null : new BigDecimal(equity[i]).subtract(new BigDecimal("1000")));
+      pct.add(new BigDecimal("0.0123456789012345678"));
+    }
+    r.setTimestamps(t);
+    r.setEquity(e);
+    r.setProfitLoss(pl);
+    r.setProfitLossPct(pct);
+    r.setBaseValue(new BigDecimal("1000.004"));
+    r.setBaseValueAsof(ts.length == 0 ? null : ts[0] - 60);
+    r.setTimeframe(timeframe);
+    r.setCashFlowsAvailable(true);
+    r.setCashFlowTimestamps(List.of());
+    r.setCashFlowAmounts(List.of());
+    return r;
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void history_intraday_keepsOnlyBarsThatEndedBeforeTheDelay() throws Exception {
+    long now = NOW.getEpochSecond();
+    // 5-minute bars. A bar ends 5 minutes after it starts, so the second ended exactly 15 minutes
+    // ago (kept) and the third one second later than that (dropped), as are the two after it.
+    long[] ts = {now - 2400, now - 1200, now - 1199, now - 900, now - 300};
+    Map<String, Object> out =
+        PreviewProjection.history(
+            historyResult("5Min", ts, new String[] {"1010", "1020", "1030", "1040", "9999"}),
+            NOW,
+            DELAY,
+            CALC);
+
+    assertThat((List<Long>) out.get("timestamps")).containsExactly(now - 2400, now - 1200);
+    assertThat(out.get("equity").toString()).isEqualTo("[1010.00, 1020.00]");
+    assertThat(out.get("profit_loss").toString()).isEqualTo("[10.00, 20.00]");
+    // The return for the range is what the KEPT bars show: 1020 against a 1000 base, not 9999.
+    assertThat((BigDecimal) out.get("range_pl")).isEqualByComparingTo("20.00");
+    assertThat(json(out)).doesNotContain("9999").doesNotContain("1030").doesNotContain("1040");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void history_daily_dropsTodaysBar_whichCarriesTheLiveBalance() throws Exception {
+    long midnight = Instant.parse("2026-11-27T05:00:00Z").getEpochSecond(); // 00:00 New York
+    long[] ts = {midnight - 2 * 86_400, midnight - 86_400, midnight};
+    Map<String, Object> out =
+        PreviewProjection.history(
+            historyResult("1D", ts, new String[] {"1010", "1020", "9999"}), NOW, DELAY, CALC);
+
+    // Today's bar started ten hours ago but is still in progress: its value is the balance NOW.
+    assertThat((List<Long>) out.get("timestamps"))
+        .containsExactly(midnight - 2 * 86_400, midnight - 86_400);
+    assertThat(json(out)).doesNotContain("9999");
+  }
+
+  @Test
+  void history_publishesNamedFieldsOnly_roundedToWhatAChartNeeds() throws Exception {
+    long now = NOW.getEpochSecond();
+    Map<String, Object> out =
+        PreviewProjection.history(
+            historyResult("5Min", new long[] {now - 3000}, new String[] {"1010.123456789"}),
+            NOW,
+            DELAY,
+            CALC);
+
+    assertThat(out)
+        .containsOnlyKeys(
+            "timestamps",
+            "equity",
+            "profit_loss",
+            "profit_loss_pct",
+            "base_value",
+            "base_value_asof",
+            "timeframe",
+            "range_pl",
+            "range_pl_pct",
+            "cash_flows_available");
+    assertThat(out.get("equity").toString()).isEqualTo("[1010.12]");
+    assertThat(out.get("profit_loss_pct").toString()).isEqualTo("[0.012346]");
+    assertThat((BigDecimal) out.get("base_value")).isEqualByComparingTo("1000.00");
+    // No run of digits long enough to be mistaken for (or to carry) an id.
+    assertThat(json(out)).doesNotContainPattern("\\d{12,}");
+  }
+
+  @Test
+  void history_skipsABarWithNoEquity_andPublishesNothingForAnUnknownTimeframeOrNoBars() {
+    long now = NOW.getEpochSecond();
+    Map<String, Object> sparse =
+        PreviewProjection.history(
+            historyResult("5Min", new long[] {now - 3000, now - 2700}, new String[] {null, "1020"}),
+            NOW,
+            DELAY,
+            CALC);
+    assertThat(sparse.get("equity").toString()).isEqualTo("[1020.00]");
+
+    assertThat(
+            PreviewProjection.history(
+                historyResult("1H", new long[] {now - 90_000}, new String[] {"1"}),
+                NOW,
+                DELAY,
+                CALC))
+        .isNull();
+    assertThat(
+            PreviewProjection.history(
+                historyResult("5Min", new long[] {now - 60}, new String[] {"1"}), NOW, DELAY, CALC))
+        .isNull();
+    assertThat(PreviewProjection.history(null, NOW, DELAY, CALC)).isNull();
+  }
+
   // ---- portfolio ----------------------------------------------------------------------------
 
   @Test

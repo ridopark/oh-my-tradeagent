@@ -6,6 +6,7 @@ import type {
   LiveMarksResponse,
   Order,
   Portfolio,
+  PortfolioHistory,
   Position,
   UnmanagedPosition,
 } from "@/lib/types";
@@ -850,19 +851,7 @@ export const getFloorBreach = () =>
 // `base_value` the dashed baseline / range start. Account-level / shared scope (same caveat as
 // account_equity_scope) — `account_scope` carries the label. Empty arrays = unavailable; the chart
 // degrades, never crashes.
-export interface PortfolioHistory {
-  timestamps: number[];
-  equity: number[];
-  profit_loss: number[];
-  profit_loss_pct: number[];
-  base_value: number;
-  base_value_asof: number | null;
-  timeframe: string;
-  account_scope: string;
-  range_pl: number | null;
-  range_pl_pct: number | null;
-  cash_flows_available: boolean;
-}
+// PortfolioHistory lives in lib/types.ts (see the re-export at the end of this file).
 export const getPortfolioHistory = (range: string) =>
   bffGet<PortfolioHistory>(`/api/portfolio-history?range=${range}`);
 
@@ -1099,6 +1088,7 @@ export type {
   LivePartStatus,
   Order,
   Portfolio,
+  PortfolioHistory,
   Position,
   UnmanagedPosition,
 } from "@/lib/types";

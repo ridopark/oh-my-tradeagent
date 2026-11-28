@@ -74,6 +74,16 @@ class PreviewControllerWebMvcTest {
   @MockitoBean private OrdersReader ordersReader;
   @MockitoBean private TradesReader tradesReader;
   @MockitoBean private PortfolioCache portfolioCache;
+  @MockitoBean private com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient historyClient;
+
+  @org.springframework.boot.test.context.TestConfiguration
+  static class RealCalculator {
+    @org.springframework.context.annotation.Bean
+    com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator returnCalculator() {
+      return new com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator();
+    }
+  }
+
   @MockitoBean private MarketDataMarksClient marksClient;
   @MockitoBean private WorkflowClient workflowClient;
   @MockitoBean private TenantStrategyResolver strategyResolver;
@@ -978,6 +988,121 @@ class PreviewControllerWebMvcTest {
     mvc.perform(get("/api/preview/portfolio").header("X-Tenant-Id", tenant))
         .andExpect(jsonPath("$.account_equity").isEmpty())
         .andExpect(jsonPath("$.realized_pnl_today").value(org.hamcrest.Matchers.nullValue()));
+  }
+
+  // ---- history (the equity chart) -------------------------------------------------------------
+
+  private static com.ohmytradeagent.contract.PortfolioHistoryResult dailyHistory(
+      String lastEquity) {
+    long midnight = Instant.parse("2026-11-27T05:00:00Z").getEpochSecond();
+    com.ohmytradeagent.contract.PortfolioHistoryResult r =
+        new com.ohmytradeagent.contract.PortfolioHistoryResult();
+    r.setTimestamps(List.of(midnight - 2 * 86_400, midnight - 86_400, midnight));
+    r.setEquity(
+        List.of(new BigDecimal("1010"), new BigDecimal(lastEquity), new BigDecimal("9999")));
+    r.setProfitLoss(List.of(BigDecimal.TEN, BigDecimal.TEN, BigDecimal.TEN));
+    r.setProfitLossPct(List.of(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO));
+    r.setBaseValue(new BigDecimal("1000"));
+    r.setTimeframe("1D");
+    r.setCashFlowsAvailable(false);
+    return r;
+  }
+
+  private static com.ohmytradeagent.contract.PortfolioHistoryResult noHistory() {
+    com.ohmytradeagent.contract.PortfolioHistoryResult r =
+        new com.ohmytradeagent.contract.PortfolioHistoryResult();
+    r.setTimestamps(List.of());
+    r.setEquity(List.of());
+    return r;
+  }
+
+  @Test
+  void history_servesEveryRangeItHasRead_twoBrokerReadsPerCall_andDropsTodaysBar()
+      throws Exception {
+    String tenant = "t-history";
+    noPositions(tenant);
+    when(historyClient.historyFor(eq(tenant), eq("alpaca-paper"), anyString()))
+        .thenReturn(dailyHistory("1020"));
+
+    String first =
+        mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.ranges.1D.equity.length()").value(2))
+            .andExpect(jsonPath("$.ranges.1W.equity.length()").value(2))
+            .andExpect(jsonPath("$.ranges.1M").doesNotExist())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    assertThat(first).doesNotContain("9999").doesNotContain(SECRET).doesNotContain("account_scope");
+    verify(historyClient, times(2)).historyFor(eq(tenant), anyString(), anyString());
+
+    // Two more calls read the other four ranges; after that nothing is read again inside the TTL.
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant))
+        .andExpect(jsonPath("$.ranges.1Y.equity.length()").value(2));
+    verify(historyClient, times(6)).historyFor(eq(tenant), anyString(), anyString());
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    verify(historyClient, times(6)).historyFor(eq(tenant), anyString(), anyString());
+
+    // Six minutes on, only the intraday range is read again; the daily ones keep for an hour.
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(6)), ZoneOffset.UTC);
+    for (int i = 0; i < 4; i++) {
+      mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    }
+    verify(historyClient, times(2)).historyFor(tenant, "alpaca-paper", "1D");
+    for (String daily : new String[] {"1W", "1M", "3M", "YTD", "1Y"}) {
+      verify(historyClient, times(1)).historyFor(tenant, "alpaca-paper", daily);
+    }
+
+    // After an hour the daily-bar ranges are read again too.
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(61)), ZoneOffset.UTC);
+    for (int i = 0; i < 4; i++) {
+      mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    }
+    verify(historyClient, times(2)).historyFor(tenant, "alpaca-paper", "1Y");
+  }
+
+  @Test
+  void history_aFailedRead_keepsTheLastGoodRange_andIsNotRetriedForAMinute() throws Exception {
+    String tenant = "t-history-fail";
+    noPositions(tenant);
+    when(historyClient.historyFor(eq(tenant), anyString(), anyString()))
+        .thenReturn(dailyHistory("1020"));
+    for (int i = 0; i < 3; i++) {
+      mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    }
+
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(6)), ZoneOffset.UTC);
+    when(historyClient.historyFor(eq(tenant), anyString(), anyString())).thenReturn(noHistory());
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.ranges.1D.equity[1]").value(1020.00));
+    verify(historyClient, times(2)).historyFor(tenant, "alpaca-paper", "1D");
+
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(6)).plusSeconds(30), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    verify(historyClient, times(2)).historyFor(tenant, "alpaca-paper", "1D");
+
+    service.clock = Clock.fixed(NOW.plus(Duration.ofMinutes(8)), ZoneOffset.UTC);
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant));
+    verify(historyClient, times(3)).historyFor(tenant, "alpaca-paper", "1D");
+  }
+
+  @Test
+  void history_withNothingReadable_isTheFixed503_andALiveTenantIsRefusedBeforeAnyRead()
+      throws Exception {
+    String tenant = "t-history-empty";
+    noPositions(tenant);
+    when(historyClient.historyFor(eq(tenant), anyString(), anyString())).thenReturn(noHistory());
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", tenant))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.error").value("unavailable"));
+
+    String live = "t-history-live";
+    when(strategyRegistry.brokerTarget(eq(live), anyString())).thenReturn("alpaca-live");
+    mvc.perform(get("/api/preview/history").header("X-Tenant-Id", live))
+        .andExpect(status().isServiceUnavailable());
+    verify(historyClient, never()).historyFor(eq(live), anyString(), anyString());
   }
 
   @Test
