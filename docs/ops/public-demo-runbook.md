@@ -53,6 +53,15 @@ deploy/tenant-dashboard-bff`.
       kubectl -n copytrade exec deploy/dashboard -- \
         wget -q -O- http://tenant-dashboard-bff:8083/actuator/prometheus | grep -c 'uri="/api/'
       ```
+- [ ] The BFF has its preview-only port: the live Deployment has `BFF_PREVIEW_PORT=8085` and the
+      Service has port 8085 (`infra/k8s/58-tenant-dashboard-bff.yaml`; that manifest is not applied
+      by `deploy.yml`, so both are patched by hand). The demo pod is admitted to 8085 only. Check
+      from the demo pod, after §4: 8085 answers, 8083 does not.
+      ```bash
+      P="kubectl -n copytrade exec deploy/demo -c poller --"
+      $P node -e 'fetch("http://tenant-dashboard-bff:8085/actuator/health").then(r=>console.log(r.status))'   # 401
+      $P node -e 'fetch("http://tenant-dashboard-bff:8083/actuator/health",{signal:AbortSignal.timeout(5000)}).then(r=>console.log("REACHED",r.status),()=>console.log("blocked"))'
+      ```
 
 ## 2. Mint the preview token
 
