@@ -24,7 +24,7 @@ if (!/^https?:\/\//.test(base)) {
 }
 const extraForbidden = (process.env.DEMO_FORBIDDEN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const PAGES = ["/status/", "/portfolio/", "/positions/", "/trades/", "/orders/"];
+const PAGES = ["/status/", "/live/", "/portfolio/", "/positions/", "/trades/", "/orders/"];
 const FEEDS = ["status", "portfolio", "fills", "orders", "marks"];
 // Shapes that must not appear anywhere: pages, scripts, stylesheets or data.
 // (Field NAMES such as "workflow_id" are not here: the page's own code legitimately mentions them
@@ -114,7 +114,7 @@ const MUST_NOT_SERVE = [
   "/data/..%2f..%2fetc%2fpasswd", "/data/portfolio.json%00.html", "/..%2f..%2fetc/passwd",
   "/.env", "/.git/config", "/etc/nginx/nginx.conf", "/nginx.conf", "/package.json",
   "/api/portfolio", "/api/preview/portfolio", "/actuator/health", "/actuator/prometheus",
-  "/live/", "/config/", "/settings/", "/admin/tenants/", "/options-chat/", "/signin/",
+  "/config/", "/settings/", "/admin/tenants/", "/options-chat/", "/signin/",
   "/_next/../data/portfolio.json.tmp", "/status/..%2f..%2f..%2fetc%2fpasswd",
 ];
 for (const p of MUST_NOT_SERVE) {

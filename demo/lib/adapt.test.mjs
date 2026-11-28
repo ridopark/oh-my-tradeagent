@@ -8,6 +8,7 @@ import {
   toPortfolio,
   toTrades,
   withMark,
+  marksFrame,
 } from "./adapt.ts";
 
 const pos = {
@@ -100,4 +101,50 @@ test("age and staleness", () => {
   assert.equal(isStale(31, 3), true);
   assert.equal(isStale(80, 30), false);
   assert.equal(isStale(91, 30), true);
+});
+
+test("marksFrame keys marks by compact OCC and carries only what the live cells read", () => {
+  const file = {
+    now: "2026-11-27T15:00:10Z",
+    marks: [
+      {
+        occ: "NVDA  261224C00200000",
+        bid: 1.25,
+        mid: 1.3,
+        ask: 1.35,
+        quote_at: "2026-11-27T15:00:08Z",
+        polled_at: "2026-11-27T15:00:09Z",
+        warming: false,
+        underlying: { ticker: "NVDA", price: 181.2, at: "2026-11-27T15:00:09Z" },
+      },
+      { occ: "GOOGL 261204C00285000", bid: null, quote_at: null },
+    ],
+  };
+  const frame = marksFrame(file, 5000);
+  assert.equal(frame.payloadNowMs, Date.parse("2026-11-27T15:00:10Z"));
+  assert.equal(frame.receivedAtMs, 5000);
+  assert.deepEqual([...frame.marks.keys()], ["NVDA261224C00200000", "GOOGL261204C00285000"]);
+  assert.deepEqual(frame.marks.get("NVDA261224C00200000"), {
+    occ: "NVDA  261224C00200000",
+    bid: 1.25,
+    mid: 1.3,
+    ask: 1.35,
+    quote_at: "2026-11-27T15:00:08Z",
+    polled_at: "2026-11-27T15:00:09Z",
+    underlying: { ticker: "NVDA", price: 181.2, at: "2026-11-27T15:00:09Z" },
+    warming: false,
+    capped: false,
+  });
+  // A sparse mark is filled with nulls, never with a number.
+  const sparse = frame.marks.get("GOOGL261204C00285000");
+  assert.equal(sparse.bid, null);
+  assert.equal(sparse.underlying, null);
+  assert.equal(sparse.polled_at, undefined);
+});
+
+test("marksFrame treats a mark that says it is warming as warming, and a bad clock as no frame", () => {
+  const mark = { occ: "NVDA  261224C00200000", bid: 1, quote_at: null, warming: true };
+  assert.equal(marksFrame({ now: "2026-11-27T15:00:10Z", marks: [mark] }, 1).marks.get("NVDA261224C00200000").warming, true);
+  assert.equal(marksFrame({ now: "not a time", marks: [mark] }, 1), null);
+  assert.equal(marksFrame({ now: "2026-11-27T15:00:10Z", marks: "nope" }, 1), null);
 });
