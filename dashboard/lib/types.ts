@@ -185,3 +185,19 @@ export interface LiveConnection {
   broker: LivePart;
   discord: LivePart;
 }
+
+// One range of the account's equity history (the BFF's /api/portfolio-history), as the /live chart
+// draws it. Moved verbatim from lib/bff.ts, which re-exports it.
+export interface PortfolioHistory {
+  timestamps: number[];
+  equity: number[];
+  profit_loss: number[];
+  profit_loss_pct: number[];
+  base_value: number;
+  base_value_asof: number | null;
+  timeframe: string;
+  account_scope: string;
+  range_pl: number | null;
+  range_pl_pct: number | null;
+  cash_flows_available: boolean;
+}

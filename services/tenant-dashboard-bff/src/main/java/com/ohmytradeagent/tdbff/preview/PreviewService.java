@@ -1,6 +1,7 @@
 package com.ohmytradeagent.tdbff.preview;
 
 import com.ohmytradeagent.contract.KillSwitchState;
+import com.ohmytradeagent.contract.PortfolioHistoryResult;
 import com.ohmytradeagent.contract.identity.WorkflowIds;
 import com.ohmytradeagent.tdbff.live.MarketDataMarksClient;
 import com.ohmytradeagent.tdbff.live.MarketDataMarksClient.MarksResponse;
@@ -8,6 +9,8 @@ import com.ohmytradeagent.tdbff.orders.OrdersReader;
 import com.ohmytradeagent.tdbff.platform.DbStrategyConfigReader;
 import com.ohmytradeagent.tdbff.platform.TenantStrategyResolver;
 import com.ohmytradeagent.tdbff.portfolio.PortfolioCache;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioHistoryClient;
+import com.ohmytradeagent.tdbff.portfolio.PortfolioReturnCalculator;
 import com.ohmytradeagent.tdbff.positions.PositionsReader;
 import com.ohmytradeagent.tdbff.positions.PositionsReader.OpenPosition;
 import com.ohmytradeagent.tdbff.preview.PreviewQuarantine.Buy;
@@ -97,6 +100,20 @@ class PreviewService {
       Set.of("FILLED", "CANCELLED", "CANCELED", "ERRORED", "EXPIRED", "REJECTED");
   // The kill-switch state is a Temporal query on the worker that runs the live tenants' workflows.
   static final Duration STATUS_TTL = Duration.ofSeconds(15);
+
+  // The equity chart's ranges, in the dashboard's order. Each is one broker-backed read, so each is
+  // kept: the intraday one for five minutes, the daily-bar ones (which change once a day) for an
+  // hour. A failed read is not retried for HISTORY_RETRY, and at most HISTORY_LOADS_PER_CALL ranges
+  // are read in one request, so a cold start cannot hold a request for six broker round-trips.
+  static final List<String> HISTORY_RANGES = List.of("1D", "1W", "1M", "3M", "YTD", "1Y");
+  static final Duration HISTORY_TTL_INTRADAY = Duration.ofMinutes(5);
+  static final Duration HISTORY_TTL_DAILY = Duration.ofHours(1);
+  static final Duration HISTORY_RETRY = Duration.ofMinutes(1);
+  static final int HISTORY_LOADS_PER_CALL = 2;
+
+  /** One range's un-projected history and when it was read (or last attempted). */
+  private record History(PortfolioHistoryResult result, Instant loadedAt, Instant attemptedAt) {}
+
   // After a failed or refused load, do not try again for this long: a flood against a failing
   // dependency must not re-run the slow read (or re-log it) on every request.
   static final Duration FAILURE_HOLD = Duration.ofSeconds(5);
@@ -114,6 +131,8 @@ class PreviewService {
   private final OrdersReader ordersReader;
   private final TradesReader tradesReader;
   private final PortfolioCache portfolioCache;
+  private final PortfolioHistoryClient historyClient;
+  private final PortfolioReturnCalculator returnCalculator;
   private final MarketDataMarksClient marksClient;
   private final WorkflowClient workflowClient;
   private final TenantStrategyResolver strategyResolver;
@@ -123,6 +142,7 @@ class PreviewService {
   private final Map<String, Deque<Body>> portfolioHistory = new ConcurrentHashMap<>();
   private final Map<String, Body> statusByTenant = new ConcurrentHashMap<>();
   private final Map<String, Failure> failureByTenant = new ConcurrentHashMap<>();
+  private final Map<String, History> historyByTenantRange = new ConcurrentHashMap<>();
   private final Semaphore permits = new Semaphore(MAX_CONCURRENT);
   // Not a constructor parameter: a second constructor trips Spring's ambiguous-constructor abort.
   Clock clock = Clock.systemUTC();
@@ -133,6 +153,8 @@ class PreviewService {
       OrdersReader ordersReader,
       TradesReader tradesReader,
       PortfolioCache portfolioCache,
+      PortfolioHistoryClient historyClient,
+      PortfolioReturnCalculator returnCalculator,
       MarketDataMarksClient marksClient,
       WorkflowClient workflowClient,
       TenantStrategyResolver strategyResolver,
@@ -142,6 +164,8 @@ class PreviewService {
     this.ordersReader = ordersReader;
     this.tradesReader = tradesReader;
     this.portfolioCache = portfolioCache;
+    this.historyClient = historyClient;
+    this.returnCalculator = returnCalculator;
     this.marksClient = marksClient;
     this.workflowClient = workflowClient;
     this.strategyResolver = strategyResolver;
@@ -172,6 +196,61 @@ class PreviewService {
               body,
               hiddenFrom(tenant, ordersReader.orders(tenant, READ_LIMIT)),
               delayedPortfolioBody(tenant));
+        });
+  }
+
+  /**
+   * The account's equity history for the demo chart: every range that has been read, each cut back
+   * to bars that ended at least {@link #ENTRY_DELAY} ago. The cut is applied on every call, so a
+   * kept reading never publishes a bar early.
+   */
+  Map<String, Object> history(String tenant) {
+    return guarded(
+        tenant,
+        () -> {
+          Instant now = clock.instant();
+          // guarded() has already refused a tenant with any non-paper broker target.
+          String brokerTarget =
+              strategyRegistry.brokerTarget(
+                  tenant, strategyResolver.strategyIdsForTenant(tenant).get(0));
+          Map<String, Object> ranges = new LinkedHashMap<>();
+          int loads = 0;
+          for (String range : HISTORY_RANGES) {
+            String key = tenant + "|" + range;
+            History h = historyByTenantRange.get(key);
+            Duration ttl = "1D".equals(range) ? HISTORY_TTL_INTRADAY : HISTORY_TTL_DAILY;
+            boolean stale =
+                h == null || h.result() == null || !now.isBefore(h.loadedAt().plus(ttl));
+            boolean mayRetry = h == null || !now.isBefore(h.attemptedAt().plus(HISTORY_RETRY));
+            if (stale && mayRetry && loads < HISTORY_LOADS_PER_CALL) {
+              loads++;
+              PortfolioHistoryResult fresh = historyClient.historyFor(tenant, brokerTarget, range);
+              boolean ok =
+                  fresh != null
+                      && fresh.getTimestamps() != null
+                      && !fresh.getTimestamps().isEmpty();
+              // A failed read keeps the last good one; only the attempt time moves.
+              h =
+                  ok
+                      ? new History(fresh, now, now)
+                      : new History(
+                          h == null ? null : h.result(), h == null ? now : h.loadedAt(), now);
+              historyByTenantRange.put(key, h);
+            }
+            Map<String, Object> body =
+                h == null || h.result() == null
+                    ? null
+                    : PreviewProjection.history(h.result(), now, ENTRY_DELAY, returnCalculator);
+            if (body != null) {
+              ranges.put(range, body);
+            }
+          }
+          if (ranges.isEmpty()) {
+            throw new UnavailableException();
+          }
+          Map<String, Object> out = new LinkedHashMap<>();
+          out.put("ranges", ranges);
+          return out;
         });
   }
 

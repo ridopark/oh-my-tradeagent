@@ -11,14 +11,14 @@ import {
   YAxis,
 } from "recharts";
 import type { TooltipContentProps } from "recharts";
-// Type-only import (erased at compile): lib/bff is server-only, so only its shape crosses here. The
-// data itself arrives over the /api/portfolio-history route handler, never a direct BFF call.
-import type { PortfolioHistory } from "@/lib/bff";
+// Where the data comes from is the caller's `load`: this file names no route, so a build that only
+// draws the chart (the public demo) carries none of the dashboard's.
+import type { PortfolioHistory } from "@/lib/types";
 
 // Range tabs in RH order. 1D is the default; only 1D polls (intraday), the others fetch once per
 // selection (a 1M/1Y line does not move enough to justify polling).
 const RANGES = ["1D", "1W", "1M", "3M", "YTD", "1Y"] as const;
-type Range = (typeof RANGES)[number];
+export type Range = (typeof RANGES)[number];
 
 const POLL_MS = 15000;
 
@@ -97,6 +97,7 @@ export function AccountValueChart({
   onData,
   toolbarEnd,
   replacement,
+  load,
 }: {
   // Lift the fetched history to the parent so the header's +$X (Y%) reads the SAME profit_loss /
   // base_value the chart drew — one fetch, one baseline.
@@ -106,6 +107,9 @@ export function AccountValueChart({
   // When set, shown in place of the range tabs and the chart. This component stays mounted, so
   // history keeps polling and onData keeps the header's figures current.
   replacement?: ReactNode;
+  // Where one range's history comes from. The dashboard reads its own route; the public demo
+  // supplies a reader of its published file. A rejected promise shows the "reconnecting" banner.
+  load: (range: Range) => Promise<PortfolioHistory>;
 }) {
   const [range, setRange] = useState<Range>("1D");
   const [data, setData] = useState<PortfolioHistory | null>(null);
@@ -116,13 +120,7 @@ export function AccountValueChart({
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const res = await fetch(`/api/portfolio-history?range=${range}`, {
-          cache: "no-store",
-        });
-        if (!res.ok) {
-          throw new Error(String(res.status));
-        }
-        const json = (await res.json()) as PortfolioHistory;
+        const json = await load(range);
         if (!active) return;
         setData(json);
         setStale(false);

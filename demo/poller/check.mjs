@@ -123,7 +123,7 @@ const INT = num(0, 1_000_000, true); // contracts, row counts
 const PRICE = num(0, 1_000_000); // per-unit: premium, quote, underlying, percent
 const MONEY = num(-100_000_000, 100_000_000); // balances, notional, P&L
 
-// ---- the five feeds ----------------------------------------------------------------------------
+// ---- the feeds (history is further down) ----------------------------------------------------------------------------
 // Bounds: fills and orders are read with PreviewService.READ_LIMIT (500); marks are at most
 // market-data's DEMO_CAP (10) contracts, each under every row form it is held as. The backend
 // puts no limit on open positions or broker targets; 200 and 8 are far above a real account.
@@ -249,6 +249,56 @@ const FEEDS = {
   }),
 };
 
+// ---- history (the equity chart) ------------------------------------------------------------------
+
+// Seconds one bar covers, by timeframe. The BFF publishes only bars that ended at least 15 minutes
+// ago; this is the same rule, enforced again here against this process's own clock.
+const BAR_SECONDS = { "5Min": 300, "15Min": 900, "1D": 86_400 };
+const HISTORY_DELAY_S = 15 * 60;
+const MAX_BARS = 2000;
+const EPOCH = num(1_500_000_000, 2_500_000_000, true); // seconds; 2017 to 2049
+const RATIO = num(-1000, 1000);
+
+const HISTORY_RANGE_SHAPE = object({
+  timestamps: array(EPOCH, MAX_BARS),
+  equity: array(MONEY, MAX_BARS),
+  profit_loss: array(MONEY, MAX_BARS),
+  profit_loss_pct: array(RATIO, MAX_BARS),
+  base_value: orNull(MONEY),
+  base_value_asof: orNull(EPOCH),
+  timeframe: oneOf(Object.keys(BAR_SECONDS), "unknown-timeframe"),
+  range_pl: orNull(MONEY),
+  range_pl_pct: orNull(RATIO),
+  cash_flows_available: bool,
+});
+
+function historyRange(v, nowMs) {
+  const rule = HISTORY_RANGE_SHAPE(v);
+  if (rule) return rule;
+  const n = v.timestamps.length;
+  if (v.equity.length !== n || v.profit_loss.length !== n || v.profit_loss_pct.length !== n) {
+    return "series-length";
+  }
+  const latestStart = Math.floor(nowMs / 1000) - HISTORY_DELAY_S - BAR_SECONDS[v.timeframe];
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && v.timestamps[i] <= v.timestamps[i - 1]) return "series-order";
+    if (v.timestamps[i] > latestStart) return "bar-too-recent";
+  }
+  return null;
+}
+
+const HISTORY_RANGES = ["1D", "1W", "1M", "3M", "YTD", "1Y"];
+
+function historyFeed(v, nowMs) {
+  const range = opt((r) => historyRange(r, nowMs));
+  const rule = object({
+    ranges: object(Object.fromEntries(HISTORY_RANGES.map((name) => [name, range]))),
+  })(v);
+  if (rule) return rule;
+  return Object.keys(v.ranges).length === 0 ? "empty-history" : null;
+}
+FEEDS.history = historyFeed;
+
 // ---- parsing -----------------------------------------------------------------------------------
 
 const STRING_TOKEN = /"(?:[^"\\]|\\.)*"/g;
@@ -283,14 +333,15 @@ function parse(text) {
 /**
  * @param {keyof typeof FEEDS} feed
  * @param {string} text the response body exactly as received
+ * @param {number} [nowMs] the clock time-based rules are judged against (the history feed's delay)
  * @returns {string | null} null = may be published; otherwise the broken rule's name
  */
-export function check(feed, text) {
+export function check(feed, text, nowMs = Date.now()) {
   if (!Object.hasOwn(FEEDS, feed)) return "unknown-feed";
   if (typeof text !== "string" || text.length === 0) return "empty";
   if (text.length > MAX_BYTES) return "too-large";
   // Over the raw text, so it also covers number literals, which are published digit for digit.
   if (SNOWFLAKE.test(text)) return "snowflake";
   const { rule, value } = parse(text);
-  return rule ?? FEEDS[feed](value);
+  return rule ?? FEEDS[feed](value, nowMs);
 }

@@ -1726,7 +1726,8 @@ class ServiceTokenFilterTest {
     "/api/preview/portfolio",
     "/api/preview/fills",
     "/api/preview/orders",
-    "/api/preview/marks"
+    "/api/preview/marks",
+    "/api/preview/history"
   };
 
   private final ServiceTokenFilter previewFilter =

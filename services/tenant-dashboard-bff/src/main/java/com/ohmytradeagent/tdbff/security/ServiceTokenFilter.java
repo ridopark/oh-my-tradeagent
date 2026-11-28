@@ -125,7 +125,8 @@ public class ServiceTokenFilter extends OncePerRequestFilter {
           "/api/preview/portfolio",
           "/api/preview/fills",
           "/api/preview/orders",
-          "/api/preview/marks");
+          "/api/preview/marks",
+          "/api/preview/history");
 
   private final String sharedToken;
   private final String optionsChatIngestToken;

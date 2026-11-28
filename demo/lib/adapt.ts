@@ -121,6 +121,36 @@ export function marksFrame(file: { now: string; marks: DemoLiveMark[] }, receive
   return { marks, payloadNowMs, receivedAtMs };
 }
 
+/** One range of the published equity history. */
+export interface DemoHistoryRange {
+  timestamps: number[];
+  equity: number[];
+  profit_loss: number[];
+  profit_loss_pct: number[];
+  base_value: number | null;
+  base_value_asof: number | null;
+  timeframe: string;
+  range_pl: number | null;
+  range_pl_pct: number | null;
+  cash_flows_available: boolean;
+}
+
+/**
+ * One range of the published history file in the shape the dashboard's chart draws. Throws when the
+ * range has not been published (yet), which the chart reports as "showing the last received data"
+ * rather than drawing an empty account.
+ */
+export function toHistory(
+  file: { ranges?: Record<string, DemoHistoryRange> } | null,
+  range: string,
+) {
+  const r = file?.ranges?.[range];
+  if (!r) {
+    throw new Error("range not published");
+  }
+  return { ...r, account_scope: "" };
+}
+
 /** The portfolio the views render: published fields, live marks overlaid, absent text left empty. */
 export function toPortfolio(d: DemoPortfolio, marks: DemoMark[]) {
   return {

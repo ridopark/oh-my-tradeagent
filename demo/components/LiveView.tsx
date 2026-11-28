@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { AccountValueChart } from "@/components/AccountValueChart";
 import { DataTable, type Column } from "@/components/DataTable";
 import { ContractChartLinks, ContractLink, occCompactParts } from "@/components/ContractLink";
 import {
@@ -18,6 +19,7 @@ import { PositionsUnavailable } from "@/components/PositionsUnavailable";
 import { num } from "@/lib/liveMarks";
 import { tradeFill, tradePnl, type Trade } from "@/lib/trades";
 import type { Order, Portfolio } from "@/lib/types";
+import { loadHistory } from "~/lib/feeds";
 
 // The demo's Live page: the read-only parts of the dashboard's /live, drawn from the same published
 // files as the other demo pages. It has no buttons and sends nothing; every operator control on the
@@ -270,6 +272,14 @@ export function LiveView({
           <Stat label="Today" note="Change since the previous close. Shown 15 minutes late.">
             <Pnl value={todayPl} />
           </Stat>
+        </section>
+
+        <section>
+          <AccountValueChart load={loadHistory} />
+          <p className="mt-2 text-xs text-slate-500">
+            Account value over time. A point appears 15 minutes after its interval ends, so the
+            line stops short of now and today is not on the longer ranges until tomorrow.
+          </p>
         </section>
 
         <section>

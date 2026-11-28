@@ -16,7 +16,8 @@ const OUT = process.env.OUT_DIR ?? "/data";
 
 // Seconds between fetches. The BFF caches the expensive reads itself (portfolio 30s in market
 // hours and 5 min outside, status 15s), so asking this often costs nothing extra there.
-export const FEEDS = { marks: 3, fills: 5, orders: 5, status: 15, portfolio: 30 };
+// The equity chart's history changes at most every five minutes at the BFF; a minute is plenty.
+export const FEEDS = { marks: 3, fills: 5, orders: 5, status: 15, portfolio: 30, history: 60 };
 
 /** One fetch-check-publish cycle. Returns the rule that stopped it, or null when it published. */
 export async function refresh(feed, { fetchImpl = fetch, now = () => new Date(), out = OUT } = {}) {

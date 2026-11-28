@@ -366,3 +366,65 @@ test("a rule name never contains the offending content", () => {
   assert.ok(!rule.includes("SECRET"));
   assert.equal(check("orders", JSON.stringify(withOrder({ state: "SECRET" }))), "unknown-state");
 });
+
+// ---- history (the equity chart) ------------------------------------------------------------------
+
+const NOW_MS = Date.parse("2026-11-27T15:00:00Z");
+const NOW_S = NOW_MS / 1000;
+const range = (extra = {}) => ({
+  timestamps: [NOW_S - 3000, NOW_S - 2700],
+  equity: [154607.03, 154700.5],
+  profit_loss: [-12.5, 80.97],
+  profit_loss_pct: [-0.000081, 0.000524],
+  base_value: 154619.53,
+  base_value_asof: NOW_S - 90000,
+  timeframe: "5Min",
+  range_pl: 80.97,
+  range_pl_pct: 0.000524,
+  cash_flows_available: true,
+  ...extra,
+});
+const history = (ranges = { "1D": range() }) => ({ ranges });
+const hist = (body) => check("history", JSON.stringify(body), NOW_MS);
+
+test("an equity history with any of the six ranges is publishable", () => {
+  assert.equal(hist(history()), null);
+  const daily = range({ timeframe: "1D", timestamps: [NOW_S - 3 * 86400, NOW_S - 2 * 86400] });
+  assert.equal(hist(history({ "1D": range(), "1W": range({ timeframe: "15Min" }), "1M": daily, "3M": daily, YTD: daily, "1Y": daily })), null);
+  assert.equal(hist(history({ "1Y": range({ base_value: null, base_value_asof: null, range_pl: null, range_pl_pct: null }) })), null);
+});
+
+test("a history range outside the six, or a key the chart does not use, refuses", () => {
+  assert.equal(hist(history({ "5Y": range() })), "unknown-key");
+  assert.equal(hist(history({ "1D": range({ account_scope: "x" }) })), "unknown-key");
+  assert.equal(hist({ ranges: { "1D": range() }, tenant_id: "x" }), "unknown-key");
+  const { equity: _dropped, ...noEquity } = range();
+  assert.equal(hist(history({ "1D": noEquity })), "missing-key");
+});
+
+test("a chart bar that had not ended 15 minutes ago refuses, for every bar length", () => {
+  // A 5-minute bar that started 20 minutes ago ended exactly 15 minutes ago: allowed.
+  assert.equal(hist(history({ "1D": range({ timestamps: [NOW_S - 3000, NOW_S - 1200] }) })), null);
+  assert.equal(hist(history({ "1D": range({ timestamps: [NOW_S - 3000, NOW_S - 1199] }) })), "bar-too-recent");
+  // Today's daily bar is hours old by its timestamp and still in progress.
+  const today = range({ timeframe: "1D", timestamps: [NOW_S - 2 * 86400, NOW_S - 36000] });
+  assert.equal(hist(history({ "1M": today })), "bar-too-recent");
+  const fifteen = range({ timeframe: "15Min", timestamps: [NOW_S - 9000, NOW_S - 1799] });
+  assert.equal(hist(history({ "1W": fifteen })), "bar-too-recent");
+});
+
+test("history lists must line up, be in order, and hold only plausible numbers", () => {
+  assert.equal(hist(history({ "1D": range({ equity: [154607.03] }) })), "series-length");
+  assert.equal(hist(history({ "1D": range({ profit_loss_pct: [0.1, 0.2, 0.3] }) })), "series-length");
+  assert.equal(hist(history({ "1D": range({ timestamps: [NOW_S - 2700, NOW_S - 3000] }) })), "series-order");
+  assert.equal(hist(history({ "1D": range({ timestamps: [5, 6] }) })), "number-out-of-range");
+  assert.equal(hist(history({ "1D": range({ timestamps: [NOW_S - 3000.5, NOW_S - 2700] }) })), "not-an-integer");
+  assert.equal(hist(history({ "1D": range({ equity: [154607.03, 847309116000] }) })), "number-out-of-range");
+  assert.equal(hist(history({ "1D": range({ equity: ["154607.03", 1] }) })), "not-a-number");
+  assert.equal(hist(history({ "1D": range({ profit_loss_pct: [5000, 1] }) })), "number-out-of-range");
+  assert.equal(hist(history({ "1D": range({ timeframe: "1H" }) })), "unknown-timeframe");
+  assert.equal(hist(history({ "1D": range({ cash_flows_available: "yes" }) })), "not-a-boolean");
+  const many = Array.from({ length: 2001 }, (_, i) => NOW_S - 900000 + i);
+  assert.equal(hist(history({ "1D": range({ timestamps: many, equity: many, profit_loss: many, profit_loss_pct: many }) })), "too-many-items");
+  assert.equal(hist(history({})), "empty-history");
+});

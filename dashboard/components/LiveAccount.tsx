@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AccountValueChart } from "@/components/AccountValueChart";
+import { AccountValueChart, type Range } from "@/components/AccountValueChart";
 import { fmtCurrency } from "@/components/Pnl";
 import { WatchlistBoard } from "@/components/WatchlistBoard";
 // Type-only import (erased at compile): lib/bff is server-only, only its shape crosses here.
@@ -19,6 +19,18 @@ const VIEW_KEY = "live.accountView";
 // daily bar — for a daily-bar range that is YESTERDAY's session, not live intraday (the bug this
 // fixes). The headline TOTAL is the live account snapshot (accountValue, passed in from the server
 // page), NOT the chart's last point — see live/page.tsx (Alpaca portfolio-history lags a deposit).
+// The chart's data source on the dashboard: the /api/portfolio-history route handler, the mandatory
+// server hop (never a direct BFF call). Moved here from AccountValueChart, unchanged.
+async function fetchHistory(range: Range): Promise<PortfolioHistory> {
+  const res = await fetch(`/api/portfolio-history?range=${range}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(String(res.status));
+  }
+  return (await res.json()) as PortfolioHistory;
+}
+
 export function LiveAccount({
   accountValue,
   accountScope,
@@ -65,6 +77,7 @@ export function LiveAccount({
         todayPlPct={todayPlPct ?? null}
       />
       <AccountValueChart
+        load={fetchHistory}
         onData={setHistory}
         toolbarEnd={watchlistAction ? <ViewToggle view={view} onChange={choose} /> : null}
         replacement={

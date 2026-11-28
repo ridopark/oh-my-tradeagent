@@ -9,6 +9,7 @@ import {
   toTrades,
   withMark,
   marksFrame,
+  toHistory,
 } from "./adapt.ts";
 
 const pos = {
@@ -147,4 +148,25 @@ test("marksFrame treats a mark that says it is warming as warming, and a bad clo
   assert.equal(marksFrame({ now: "2026-11-27T15:00:10Z", marks: [mark] }, 1).marks.get("NVDA261224C00200000").warming, true);
   assert.equal(marksFrame({ now: "not a time", marks: [mark] }, 1), null);
   assert.equal(marksFrame({ now: "2026-11-27T15:00:10Z", marks: "nope" }, 1), null);
+});
+
+test("toHistory picks one range of the published history, and fails when it is not there", () => {
+  const oneDay = {
+    timestamps: [1, 2],
+    equity: [10, 11],
+    profit_loss: [0, 1],
+    profit_loss_pct: [0, 0.1],
+    base_value: 10,
+    base_value_asof: null,
+    timeframe: "5Min",
+    range_pl: 1,
+    range_pl_pct: 0.1,
+    cash_flows_available: true,
+  };
+  const file = { ranges: { "1D": oneDay } };
+  assert.deepEqual(toHistory(file, "1D"), { ...oneDay, account_scope: "" });
+  // The chart shows its "reconnecting" banner on a throw; a missing range must not draw as empty.
+  assert.throws(() => toHistory(file, "1Y"));
+  assert.throws(() => toHistory(null, "1D"));
+  assert.throws(() => toHistory({}, "1D"));
 });

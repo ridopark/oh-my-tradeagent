@@ -127,7 +127,7 @@ DEMO_FORBIDDEN='<paper account number>,<each whitelisted author name>' \
   node scripts/ops/demo_verify.mjs http://127.0.0.1:8080
 ```
 
-It must end with `ALL CHECKS PASSED`. It checks, from the outside: the five pages and their
+It must end with `ALL CHECKS PASSED`. It checks, from the outside: the six pages and their
 security headers; that every non-GET method is refused; that 28 paths outside the site (traversal,
 dotfiles, the BFF's own routes) are not served; that each published file passes the publish gate
 and is fresh; and that no response byte — pages, scripts, data — contains a Discord id, a workflow

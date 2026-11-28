@@ -2,11 +2,13 @@
 
 import {
   marksFrame,
+  toHistory,
   toKillSwitch,
   toOrders,
   toPortfolio,
   toTrades,
   type DemoFill,
+  type DemoHistoryRange,
   type DemoLiveMark,
   type DemoMark,
   type DemoOrder,
@@ -14,6 +16,7 @@ import {
   type DemoStatus,
 } from "./adapt";
 import type { LiveMarksState } from "@/components/LiveMarks";
+import type { PortfolioHistory } from "@/lib/types";
 import { bidUsability, type MarkInput } from "@/lib/liveMarks";
 import { useNow, usePolled } from "./poll";
 
@@ -25,6 +28,19 @@ interface MarksFile {
 // How often the poller refreshes each file, in seconds. The page polls a little faster than the
 // slowest of these so a new file is picked up promptly; "stale" is judged against these.
 export const CADENCE = { marks: 3, fills: 5, orders: 5, portfolio: 30, status: 15 } as const;
+
+/**
+ * Reads one range of the published equity history, for the dashboard's chart component (which
+ * calls it on a range change, and every 15s on the 1D tab).
+ */
+export async function loadHistory(range: string): Promise<PortfolioHistory> {
+  const res = await fetch("/data/history.json", { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(String(res.status));
+  }
+  const body = (await res.json()) as { data?: { ranges?: Record<string, DemoHistoryRange> } };
+  return toHistory(body.data ?? null, range) as PortfolioHistory;
+}
 
 /** Portfolio (30s) with live quotes (3s) laid over the open positions. */
 export function usePortfolio() {
