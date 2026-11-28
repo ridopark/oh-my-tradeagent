@@ -9,6 +9,7 @@ import { useNow } from "~/lib/poll";
 // are not public (and "Trades" is honestly named: these are individual fills).
 const LINKS = [
   { href: "/status/", label: "Status" },
+  { href: "/live/", label: "Live" },
   { href: "/portfolio/", label: "Portfolio" },
   { href: "/positions/", label: "Positions" },
   { href: "/trades/", label: "Fills" },

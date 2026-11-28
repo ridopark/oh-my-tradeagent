@@ -2,6 +2,8 @@ import "server-only";
 import { finite, parseSubject, type Trade } from "@/lib/trades";
 import type {
   AccountKillSwitch,
+  LiveConnection,
+  LiveMarksResponse,
   Order,
   Portfolio,
   Position,
@@ -782,38 +784,8 @@ export const getProximity = () => bffGet<ProximityResponse>("/api/proximity");
 // `occ` is the row's contract_symbol exactly as /api/portfolio carries it. Every price is null when
 // unknown; `warming` = first sight before the first poll landed; `capped` = over the 25-OCC display
 // cap, prices null. None of those may be rendered as live — see lib/liveMarks.ts.
-export interface LiveMark {
-  occ: string;
-  bid: number | null;
-  mid: number | null;
-  ask: number | null;
-  quote_at: string | null;
-  // When market-data last polled the contract; absent = market-data predates the field.
-  polled_at?: string | null;
-  underlying: { ticker: string | null; price: number | null; at: string | null } | null;
-  warming: boolean;
-  capped: boolean;
-}
-export interface LiveMarksResponse {
-  now: string;
-  market_data_reachable: boolean;
-  occs_status: "ok" | "unknown";
-  marks: LiveMark[];
-}
-export type LivePartStatus = "ok" | "stale" | "down" | "unknown";
-export interface LivePart {
-  status: LivePartStatus;
-  age_s: number | null;
-  reason: string | null;
-  [extra: string]: unknown;
-}
-export interface LiveConnection {
-  server_time: string;
-  market_open: boolean;
-  market_data: { equity: LivePart; option: LivePart };
-  broker: LivePart;
-  discord: LivePart;
-}
+// The shapes (LiveMark, LiveMarksResponse, LivePart, LiveConnection) live in lib/types.ts, which
+// client components and the public demo can import without pulling in this server-only module.
 export const getLiveMarks = () => bffGet<LiveMarksResponse>("/api/live/marks", 3_000);
 // The BFF runs each part with its own <=2s timeout, concurrently; leave headroom above that.
 export const getLiveConnection = () =>
@@ -1120,6 +1092,11 @@ export type { Trade, TradeFill } from "@/lib/trades";
 // only renders views never has to load this server-only module; re-exported for existing imports.
 export type {
   AccountKillSwitch,
+  LiveConnection,
+  LiveMark,
+  LiveMarksResponse,
+  LivePart,
+  LivePartStatus,
   Order,
   Portfolio,
   Position,

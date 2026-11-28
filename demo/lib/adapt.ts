@@ -77,6 +77,50 @@ export function withMark(p: DemoPosition, marks: DemoMark[]): DemoPosition {
   return out;
 }
 
+/** One entry of the published marks file. */
+export interface DemoLiveMark {
+  occ: string;
+  bid: number | null;
+  mid?: number | null;
+  ask?: number | null;
+  quote_at: string | null;
+  polled_at?: string | null;
+  warming?: boolean;
+  underlying?: { ticker?: string | null; price: number | null; at: string | null } | null;
+}
+
+/**
+ * The published marks file as the frame the dashboard's live cells read: marks keyed by compact
+ * OCC, the file's own clock, and when this browser received it. Null when the file has no usable
+ * clock or mark list, so nothing downstream can read a number as live.
+ */
+export function marksFrame(file: { now: string; marks: DemoLiveMark[] }, receivedAtMs: number) {
+  const payloadNowMs = Date.parse(file.now);
+  if (!Number.isFinite(payloadNowMs) || !Array.isArray(file.marks)) {
+    return null;
+  }
+  const marks = new Map(
+    file.marks.map((m) => [
+      m.occ.replace(/\s+/g, ""),
+      {
+        occ: m.occ,
+        bid: m.bid ?? null,
+        mid: m.mid ?? null,
+        ask: m.ask ?? null,
+        quote_at: m.quote_at ?? null,
+        // Left absent when absent: the cells then age the bid by quote_at instead.
+        ...(m.polled_at !== undefined ? { polled_at: m.polled_at } : {}),
+        underlying: m.underlying
+          ? { ticker: m.underlying.ticker ?? null, price: m.underlying.price ?? null, at: m.underlying.at ?? null }
+          : null,
+        warming: m.warming === true,
+        capped: false,
+      },
+    ]),
+  );
+  return { marks, payloadNowMs, receivedAtMs };
+}
+
 /** The portfolio the views render: published fields, live marks overlaid, absent text left empty. */
 export function toPortfolio(d: DemoPortfolio, marks: DemoMark[]) {
   return {

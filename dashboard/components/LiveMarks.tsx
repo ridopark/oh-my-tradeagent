@@ -8,8 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-// Type-only import (erased at compile): lib/bff is server-only, only its shape crosses here.
-import type { LiveConnection, LiveMark, LiveMarksResponse } from "@/lib/bff";
+import type { LiveConnection, LiveMark, LiveMarksResponse } from "@/lib/types";
 import { Pnl, fmtCurrency } from "@/components/Pnl";
 import {
   allIn,
@@ -156,6 +155,20 @@ export function LiveMarksProvider({ children }: { children: ReactNode }) {
       {children}
     </Ctx.Provider>
   );
+}
+
+/**
+ * Shares a marks frame built elsewhere with the live cells, without polling anything. The public
+ * demo uses it: its marks arrive as a published file, not from /api/live-marks.
+ */
+export function LiveMarksFrame({
+  state,
+  children,
+}: {
+  state: LiveMarksState;
+  children: ReactNode;
+}) {
+  return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
 }
 
 export function useLiveMarks(): LiveMarksState | null {

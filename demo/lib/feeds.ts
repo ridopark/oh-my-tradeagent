@@ -1,16 +1,19 @@
 "use client";
 
 import {
+  marksFrame,
   toKillSwitch,
   toOrders,
   toPortfolio,
   toTrades,
   type DemoFill,
+  type DemoLiveMark,
   type DemoMark,
   type DemoOrder,
   type DemoPortfolio,
   type DemoStatus,
 } from "./adapt";
+import type { LiveMarksState } from "@/components/LiveMarks";
 import { bidUsability, type MarkInput } from "@/lib/liveMarks";
 import { useNow, usePolled } from "./poll";
 
@@ -51,6 +54,25 @@ export function usePortfolio() {
       { label: "Account", at: portfolio.generatedAt, cadence: CADENCE.portfolio },
       { label: "Prices", at: marks.generatedAt, cadence: CADENCE.marks },
     ],
+  };
+}
+
+/**
+ * The marks file as the state the dashboard's live cells read, so the demo's Live page re-marks
+ * its holdings with the same rules (a mark older than 10s is shown as not live). There is no
+ * connection snapshot here; nothing on the demo reads one.
+ */
+export function useLiveMarksState(): {
+  state: LiveMarksState;
+  stamp: { label: string; at: string | null; cadence: number };
+} {
+  const marks = usePolled<{ now: string; marks: DemoLiveMark[] }>("marks", 3_000);
+  const now = useNow();
+  const frame =
+    marks.data && marks.receivedAtMs !== null ? marksFrame(marks.data, marks.receivedAtMs) : null;
+  return {
+    state: { nowMs: now, frame, failures: 0, lastOkMs: marks.receivedAtMs, conn: null },
+    stamp: { label: "Prices", at: marks.generatedAt, cadence: CADENCE.marks },
   };
 }
 
