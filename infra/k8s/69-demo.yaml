@@ -81,14 +81,14 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        # Both images are pinned by DIGEST (built from main at 6b163c48): this pod is
+        # Both images are pinned by DIGEST (built from main at 9d1fa45c): this pod is
         # internet-facing, and `:latest` would re-pull whatever is newest on any restart or node
         # reboot. To update: merge, let "Build and push images" finish, read the digest of the image
         # tagged with that commit SHA (GHCR package page, or
         #   gh api /users/ridopark/packages/container/oh-my-tradeagent-demo-web/versions),
         # change both lines here, and apply this file.
         - name: web
-          image: ghcr.io/ridopark/oh-my-tradeagent-demo-web@sha256:a4dd306fc2cc78af60a2688cdd7b4e53d14436988be635a708efc307f130961b
+          image: ghcr.io/ridopark/oh-my-tradeagent-demo-web@sha256:58b58d95a5f95d1dfa40c8efdd1ca236528dd9c73e59fbbc2a33d9b2f4741f6a
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 101
@@ -124,7 +124,7 @@ spec:
             - name: web-tmp
               mountPath: /tmp
         - name: poller
-          image: ghcr.io/ridopark/oh-my-tradeagent-demo-poller@sha256:10bba5976cab32df3ef2de112d34f527b1efc26f69a371441370421b42f07fed
+          image: ghcr.io/ridopark/oh-my-tradeagent-demo-poller@sha256:581e9d7fae1d563cad41a60eec7519e96007367ac30b7676568719cebf6c2b85
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
